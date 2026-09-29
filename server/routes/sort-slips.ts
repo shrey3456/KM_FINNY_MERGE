@@ -108,6 +108,15 @@ async function getSlipById(id: number): Promise<any | null> {
   return rows[0] ?? null;
 }
 
+// Who currently "owns" this slip's assignment, for Pause and Transfer — narrower than plain
+// write access, since both actions take a loader off work someone else put them on. Backed by
+// sort_slips.managed_by_code (see its comment in shared/schema.ts): set at creation, moved by a
+// loader Transfer (that IS the transferring supervisor taking it over), and moved directly by
+// POST .../transfer-supervisor without touching the loader at all.
+function canManageAssignment(req: Request, slip: any): boolean {
+  return isAdmin(req) || slip.managed_by_code === actor(req).userCode;
+}
+
 // The loaders on a set of slips, in one query — the landing list would otherwise run one query
 // per row just to draw the name chips.
 async function assigneesFor(slipIds: number[]): Promise<Map<number, Array<{ userCode: string; userName: string | null }>>> {
@@ -232,6 +241,7 @@ router.get('/sort-slips', requirePageAccess('sort-slip'), async (req: Request, r
                 s.created_by_name AS "createdByName", s.created_at AS "createdAt",
                 s.activated_at AS "activatedAt",
                 s.completed_at AS "completedAt", s.completed_by_name AS "completedByName",
+                s.managed_by_code AS "managedByCode", s.managed_by_name AS "managedByName",
                 s.notes,
                 COALESCE((SELECT SUM(p.qty) FROM sort_slip_picks p
                            WHERE p.sort_slip_id = s.id AND NOT p.voided), 0)::int AS "pickedQty"
@@ -325,6 +335,30 @@ router.get('/sort-slips/loaders', requirePageWrite('sort-slip'), async (req: Req
   } catch (error) {
     console.error('[Sort Slip] loaders failed:', error);
     res.status(500).json({ message: 'Failed to load the loader list' });
+  }
+});
+
+// GET /sort-slips/supervisors — real Sort Slip supervisors only (write access to the page) —
+// admins are deliberately left out: they can already manage every slip regardless of who
+// managed_by_code names (see canManageAssignment's admin bypass), so naming one as the new
+// "owner" would be a no-op that just clutters the picker. Powers the "Transfer to Supervisor"
+// picker (POST /sort-slips/transfer-supervisor) — the caller themself is filtered out
+// client-side (handing a slip to yourself is a no-op), not here.
+router.get('/sort-slips/supervisors', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.user_code AS "userCode", u.name, u.username, u.department, u.designation,
+              u.plants, u.role
+         FROM users u
+        WHERE COALESCE(u.page_write_access, '') LIKE '%sort-slip%'
+          AND NOT (LOWER(COALESCE(u.role, '')) = ANY($1))
+        ORDER BY u.name NULLS LAST, u.username`,
+      [WRITE_ADMIN_ROLES],
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('[Sort Slip] supervisors failed:', error);
+    res.status(500).json({ message: 'Failed to load the supervisor list' });
   }
 });
 
@@ -513,7 +547,7 @@ router.get('/sort-slips/:orderNumber', requirePageAccess('sort-slip'), async (re
       ),
       pool.query(
         `SELECT user_code AS "userCode", user_name AS "userName", assigned_at AS "assignedAt",
-                assigned_by_name AS "assignedByName", is_active AS "isActive"
+                assigned_by_code AS "assignedByCode", assigned_by_name AS "assignedByName", is_active AS "isActive"
            FROM sort_slip_assignees
           WHERE sort_slip_id = $1 AND removed_at IS NULL ORDER BY assigned_at ASC`,
         [slip.id],
@@ -555,12 +589,17 @@ router.get('/sort-slips/:orderNumber', requirePageAccess('sort-slip'), async (re
         createdByName: slip.created_by_name, createdAt: slip.created_at,
         activatedAt: slip.activated_at,
         completedAt: slip.completed_at, completedByName: slip.completed_by_name,
+        managedByCode: slip.managed_by_code, managedByName: slip.managed_by_name,
       },
       items,
       assignees: assigneeRes.rows,
       loaderTimeline: timelineRes.rows,
       canWrite: hasWrite(req),
       canPick: hasWrite(req) || mine,
+      // Pause and Transfer are both narrower than canWrite — see canManageAssignment above for
+      // why. Computed here so those buttons can hide themselves instead of a supervisor clicking
+      // one and hitting a 403.
+      canManageAssignment: hasWrite(req) && (canManageAssignment(req, slip)),
     });
   } catch (error) {
     console.error('[Sort Slip] detail failed:', error);
@@ -675,8 +714,9 @@ router.post('/sort-slips', requirePageWrite('sort-slip'), async (req: Request, r
 
     const inserted = await client.query(
       `INSERT INTO sort_slips (order_number, proforma_slip_id, party_name, plant, order_date,
-                               total_qty, status, activated_at, created_by_code, created_by_name, notes, platform_stv)
-       VALUES ($1, $2, $3, $4, $5::date, $6, 'active', NOW(), $7, $8, $9, $10) RETURNING id`,
+                               total_qty, status, activated_at, created_by_code, created_by_name, notes, platform_stv,
+                               managed_by_code, managed_by_name)
+       VALUES ($1, $2, $3, $4, $5::date, $6, 'active', NOW(), $7, $8, $9, $10, $7, $8) RETURNING id`,
       [orderNumber, order.id, order.party_name, order.plant, order.order_date,
        order.total_qty, userCode, userName, notes, matchedStv],
     );
@@ -951,8 +991,9 @@ router.post('/sort-slips/:id(\\d+)/replace', requirePageWrite('sort-slip'), asyn
 
     const inserted = await client.query(
       `INSERT INTO sort_slips (order_number, proforma_slip_id, party_name, plant, order_date,
-                               total_qty, status, activated_at, created_by_code, created_by_name, notes)
-       VALUES ($1, $2, $3, $4, $5::date, $6, 'active', NOW(), $7, $8, $9) RETURNING id`,
+                               total_qty, status, activated_at, created_by_code, created_by_name, notes,
+                               managed_by_code, managed_by_name)
+       VALUES ($1, $2, $3, $4, $5::date, $6, 'active', NOW(), $7, $8, $9, $7, $8) RETURNING id`,
       [targetOrderNumber, targetOrder.id, targetOrder.party_name, targetOrder.plant, targetOrder.order_date,
        targetOrder.total_qty, userCode, userName, `Replaced from order ${slip.order_number} (sort slip #${id})`],
     );
@@ -996,7 +1037,10 @@ router.post('/sort-slips/:id(\\d+)/replace', requirePageWrite('sort-slip'), asyn
 });
 
 // POST /sort-slips/:id/transfer — hand the slip from one loader to another.
-// Write access only, by design: a loader can never move their own work onto somebody else.
+// Write access alone is not enough, same restriction as Pause and for the same reason: this
+// moves a loader off work someone else put them on, so it's limited to whoever currently owns
+// the assignment (see canManageAssignment) — plus a loader can never move their own work onto
+// somebody else regardless, since that path never had write access to begin with.
 router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
@@ -1009,6 +1053,9 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
     if (!slip) return res.status(404).json({ message: 'Sort slip not found' });
     if (slip.status === 'completed') return res.status(400).json({ message: 'This sort slip is completed' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Plant access required' });
+    if (!(canManageAssignment(req, slip))) {
+      return res.status(403).json({ message: 'Only whoever assigned or last transferred this sort slip (or an admin) can transfer it' });
+    }
 
     // Whoever currently holds it — the caller does not have to say, because there is only ever
     // one. Null when the slip came back from a reopen with its loader already busy elsewhere,
@@ -1068,9 +1115,12 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
        to.rows[0]?.name || to.rows[0]?.username || toUserCode, userCode, userName, reason],
     );
     // A slip that came out of a reopen with nobody on it is working again the moment it has one.
+    // Transferring the loader is also the transferring supervisor taking the slip's management
+    // over — see canManageAssignment's comment for why a Transfer moves managed_by too.
     await client.query(
-      `UPDATE sort_slips SET status = 'active', activated_at = COALESCE(activated_at, NOW()) WHERE id = $1`,
-      [id],
+      `UPDATE sort_slips SET status = 'active', activated_at = COALESCE(activated_at, NOW()),
+                             managed_by_code = $2, managed_by_name = $3 WHERE id = $1`,
+      [id, userCode, userName],
     );
     await client.query('COMMIT');
     res.json({ transferred: true });
@@ -1083,6 +1133,66 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
   }
 });
 
+// POST /sort-slips/transfer-supervisor — hand management of one or more slips to a different
+// supervisor, loader(s) untouched. The page-level counterpart to the per-slip loader Transfer
+// above: pick a target supervisor once and check off however many of your own slips at once,
+// rather than opening each one. Each slip is checked and updated independently so one bad id in
+// the batch (already someone else's, already completed, wrong plant) doesn't block the rest —
+// the response says which ones actually moved.
+router.post('/sort-slips/transfer-supervisor', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+  try {
+    const slipIds = Array.isArray(req.body?.slipIds)
+      ? req.body.slipIds.map((v: any) => parseInt(v, 10)).filter((v: number) => Number.isFinite(v))
+      : [];
+    const toSupervisorCode = String(req.body?.toSupervisorCode ?? '').trim();
+    if (slipIds.length === 0) return res.status(400).json({ message: 'Pick at least one sort slip' });
+    if (!toSupervisorCode) return res.status(400).json({ message: 'Pick the supervisor to hand these off to' });
+
+    const { userCode } = actor(req);
+    if (toSupervisorCode === userCode) {
+      return res.status(400).json({ message: 'That is you — pick a different supervisor' });
+    }
+
+    const toRows = await pool.query(
+      `SELECT user_code, name, username, role, plants, page_write_access FROM users WHERE user_code = $1`,
+      [toSupervisorCode],
+    );
+    const toUser = toRows.rows[0];
+    if (!toUser) return res.status(404).json({ message: 'That supervisor was not found' });
+    const toIsSupervisor = WRITE_ADMIN_ROLES.includes(String(toUser.role ?? '').toLowerCase())
+      || (() => { try { return (JSON.parse(toUser.page_write_access || '[]') as string[]).includes('sort-slip'); } catch { return false; } })();
+    if (!toIsSupervisor) {
+      return res.status(400).json({ message: 'That person does not have write access to Sort Slip' });
+    }
+    const toUserName = toUser.name || toUser.username || toUser.user_code;
+
+    const moved: number[] = [];
+    const skipped: Array<{ id: number; reason: string }> = [];
+    for (const id of slipIds) {
+      const slip = await getSlipById(id);
+      if (!slip) { skipped.push({ id, reason: 'not found' }); continue; }
+      if (slip.status === 'completed') { skipped.push({ id, reason: `${slip.order_number} is completed` }); continue; }
+      if (!canAccessPlant(req, slip.plant)) { skipped.push({ id, reason: `${slip.order_number}: plant access required` }); continue; }
+      if (!canManageAssignment(req, slip)) { skipped.push({ id, reason: `${slip.order_number}: not yours to hand off` }); continue; }
+      const toAllowedPlants = getUserPlants(toUser);
+      if (toAllowedPlants !== null && !toAllowedPlants.includes(normalize(slip.plant))) {
+        skipped.push({ id, reason: `${slip.order_number}: ${toUserName} has no access to ${slip.plant ?? 'this plant'}` });
+        continue;
+      }
+      await pool.query(
+        `UPDATE sort_slips SET managed_by_code = $2, managed_by_name = $3 WHERE id = $1`,
+        [id, toSupervisorCode, toUserName],
+      );
+      moved.push(id);
+    }
+
+    res.json({ moved, skipped, toSupervisorName: toUserName });
+  } catch (error) {
+    console.error('[Sort Slip] transfer-supervisor failed:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to transfer to that supervisor' });
+  }
+});
+
 // POST /sort-slips/:id/pause — the supervisor steps the current loader off without naming a
 // replacement, freeing them for another slip immediately. Unlike transfer (which always has an
 // on-half), this is transfer's off-half alone: the assignee row is deactivated the same way, and
@@ -1090,8 +1200,14 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
 // loader at all) so the landing list can show pausing as its own, expected section rather than
 // the rare "reopen with nobody free" state 'unassigned' represents elsewhere. A later Transfer
 // (giving it any loader) is what un-pauses it — it unconditionally sets status back to 'active'
-// regardless of prior status, so no separate "resume" action is needed. Write access only, same
-// as every other action that changes who is working a slip.
+// regardless of prior status, so no separate "resume" action is needed.
+//
+// Write access alone is not enough here (unlike create/transfer/complete/reopen, which stay open
+// to any supervisor in the plant): pausing yanks a loader off work someone else put them on, so
+// it's restricted to whoever currently "owns" that assignment — the supervisor who most recently
+// assigned or transferred this slip's active loader (sort_slip_assignees.assignedByCode on the
+// live row) — plus admins. A slip that's just been transferred is owned by whoever did that
+// transfer, not whoever originally created it.
 router.post('/sort-slips/:id(\\d+)/pause', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
@@ -1101,6 +1217,10 @@ router.post('/sort-slips/:id(\\d+)/pause', requirePageWrite('sort-slip'), async 
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Plant access required' });
     if (slip.status === 'completed') return res.status(400).json({ message: 'This sort slip is completed' });
     if (slip.status !== 'active') return res.status(400).json({ message: 'This sort slip has no active loader to pause' });
+
+    if (!(canManageAssignment(req, slip))) {
+      return res.status(403).json({ message: 'Only whoever assigned or last transferred this sort slip (or an admin) can pause it' });
+    }
 
     const { userCode } = actor(req);
     await client.query('BEGIN');

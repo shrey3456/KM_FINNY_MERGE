@@ -2,55 +2,60 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./index.css";
 
-// Improved service worker registration with better error handling for PWA support
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', async () => {
+// Service worker registration — register ONCE per load and let the browser's own update
+// algorithm do the rest, instead of unregistering + re-registering from scratch every time the
+// app opens (the old behavior here). That old pattern is what made deploys look like a brand-new
+// app to Android rather than an in-place update: killing and recreating the registration on every
+// load fights the browser's normal "fetch /sw.js in the background, diff it, swap in the new one
+// once nothing is using the old one" flow, so updates never landed cleanly and the user eventually
+// had to reinstall the PWA to get anything new — icon included.
+//
+// The flow below is the standard one: register, and when a new worker finishes installing while
+// an old one is already controlling the page, tell it to take over immediately (skipWaiting) and
+// reload once when it does. First-ever install (no controller yet) needs no reload — there's
+// nothing showing yet to refresh.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", async () => {
     try {
-      // Clear any existing registrations to ensure a clean state
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      for (let registration of registrations) {
-        await registration.unregister();
-        console.log('Unregistered old service worker');
-      }
-      
-      // Register the updated service worker
-      const registration = await navigator.serviceWorker.register('/sw.js', { 
-        scope: '/',
-        updateViaCache: 'none' // Prevent browser cache issues
+      const registration = await navigator.serviceWorker.register("/sw.js", {
+        scope: "/",
+        updateViaCache: "none", // always revalidate sw.js itself against the network
       });
-      
-      console.log('Service Worker registered successfully with scope:', registration.scope);
-      
-      // Handle updates
-      registration.onupdatefound = () => {
-        const installingWorker = registration.installing;
-        if (installingWorker) {
-          installingWorker.onstatechange = () => {
-            if (installingWorker.state === 'installed') {
-              if (navigator.serviceWorker.controller) {
-                // At this point, the updated content has been fetched
-                console.log('New content is available; please refresh.');
-              } else {
-                // At this point, everything has been cached for offline use
-                console.log('Content is cached for offline use.');
-              }
+
+      const promoteWaitingWorker = (worker: ServiceWorker | null) => {
+        if (!worker) return;
+        if (worker.state === "installed" && navigator.serviceWorker.controller) {
+          worker.postMessage({ action: "skipWaiting" });
+        } else {
+          worker.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) {
+              worker.postMessage({ action: "skipWaiting" });
             }
-          };
+          });
         }
       };
+
+      // Already-waiting worker from a previous visit that never got promoted.
+      promoteWaitingWorker(registration.waiting);
+      registration.addEventListener("updatefound", () => promoteWaitingWorker(registration.installing));
+
+      // Ask once now, then again roughly every 30 minutes the app stays open, so a long-running
+      // tab (e.g. a wall-mounted kiosk) still picks up a deploy without the operator restarting it.
+      registration.update().catch(() => {});
+      setInterval(() => registration.update().catch(() => {}), 30 * 60 * 1000);
     } catch (error) {
-      console.error('Service Worker registration failed:', error);
+      console.error("Service Worker registration failed:", error);
     }
   });
-  
-  // Handle service worker communication
-  navigator.serviceWorker.addEventListener('message', (event) => {
-    console.log('Received message from service worker:', event.data);
-  });
-  
-  // Handle controller change for immediate take over
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    console.log('Service Worker controller changed');
+
+  // The freshly-promoted worker above becomes the controller once every open tab has dropped the
+  // old one — that's this event. One reload picks up the new build; the guard against a second,
+  // unrelated controllerchange (rare, but possible) keeps this from ever reloading twice.
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloaded) return;
+    reloaded = true;
+    window.location.reload();
   });
 }
 

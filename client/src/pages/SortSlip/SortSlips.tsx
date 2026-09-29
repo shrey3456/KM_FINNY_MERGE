@@ -22,7 +22,8 @@ import {
 } from "@/lib/columnFilters";
 import { Label } from "@/components/ui/label";
 import { PlantBadge } from "@/components/PlantBadge";
-import { SectionSkeleton } from "@/components/ui/loading-skeletons";
+import { SectionSkeleton, SkeletonBar, TableSkeleton } from "@/components/ui/loading-skeletons";
+import { ZoomableImg } from "@/components/ProductPhoto";
 import {
   AlertTriangle, ArrowLeft, ArrowRightLeft, CheckCircle2, ChevronLeft, ChevronRight,
   ChevronDown, ClipboardList, Loader2, Package, Pause, Plus, RotateCcw, Search, Trash2, User, X,
@@ -53,6 +54,8 @@ type SortSlipRow = {
   createdAt: string;
   completedAt: string | null;
   completedByName: string | null;
+  managedByCode: string | null;
+  managedByName: string | null;
   assignees: Array<{ userCode: string; userName: string | null }>;
 };
 
@@ -82,6 +85,10 @@ type Loader = {
   plants: string | null;
   role: string | null;
 };
+
+// GET /sort-slips/supervisors' exact mirror of the loader shape, minus the "busy on one active
+// slip" fields that only make sense for a loader — a supervisor can manage any number of slips.
+type Supervisor = { userCode: string; name: string | null; username: string; department: string | null; designation: string | null; plants: string | null; role: string | null };
 
 const STATUS_STYLES: Record<string, string> = {
   unassigned: "border-gray-200 bg-gray-50 text-gray-600",
@@ -120,10 +127,10 @@ function ItemPhoto({ item, size = 40, className }: { item: SortSlipItem; size?: 
     );
   }
   return (
-    <img
+    <ZoomableImg
       src={src}
       alt={item.itemName ?? ""}
-      loading="lazy"
+      title={item.itemName}
       onError={() => setFailed(true)}
       className={`rounded border border-gray-200 bg-white object-contain ${className ?? ""}`}
       style={className ? undefined : { width: size, height: size }}
@@ -173,6 +180,13 @@ export default function SortSlips() {
     } catch { /* storage unavailable */ }
   }, [openOrder]);
   const [createOpen, setCreateOpen] = useState(false);
+
+  // "Transfer to Supervisor" — a per-row action on the landing list, right next to Delete/Open
+  // (loaders untouched, only WHO manages the slip changes). The row itself picks the slip, so
+  // this only needs to remember which row and which target supervisor.
+  const [transferSupRow, setTransferSupRow] = useState<SortSlipRow | null>(null);
+  const [transferSupTarget, setTransferSupTarget] = useState("");
+  const [transferSupSearch, setTransferSupSearch] = useState("");
 
   // ── Landing list ───────────────────────────────────────────────────────────
   const [search, setSearch] = useState("");
@@ -258,6 +272,39 @@ export default function SortSlips() {
     queryClient.invalidateQueries({ queryKey: ["/api/sort-slips"] });
     if (openOrder) queryClient.invalidateQueries({ queryKey: ["/api/sort-slips", "detail", openOrder] });
   };
+
+  // Supervisors this caller could hand a slip off to — fetched only once the dialog is
+  // actually open, same lazy pattern the per-slip loader Transfer's own picker uses.
+  const supervisorsQuery = useQuery({
+    queryKey: ["/api/sort-slips/supervisors"],
+    enabled: !!transferSupRow,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/sort-slips/supervisors`);
+      return res.json() as Promise<Supervisor[]>;
+    },
+  });
+  const supervisors = (supervisorsQuery.data ?? []).filter((s) => s.userCode !== user?.userCode);
+
+  const transferSupMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/sort-slips/transfer-supervisor", {
+        slipIds: [transferSupRow!.id], toSupervisorCode: transferSupTarget,
+      });
+      return res.json() as Promise<{ moved: number[]; skipped: Array<{ id: number; reason: string }>; toSupervisorName: string }>;
+    },
+    onSuccess: (data) => {
+      if (data.moved.length > 0) {
+        toast({ title: `${transferSupRow?.orderNumber} handed to ${data.toSupervisorName}` });
+        setTransferSupRow(null);
+        setTransferSupTarget("");
+        setTransferSupSearch("");
+        refreshAll();
+      } else {
+        toast({ title: "Could not transfer", description: data.skipped[0]?.reason, variant: "destructive" });
+      }
+    },
+    onError: (err: any) => toast({ title: "Could not transfer", description: err.message, variant: "destructive" }),
+  });
 
   // ── Create ─────────────────────────────────────────────────────────────────
   const [orderSearch, setOrderSearch] = useState("");
@@ -396,7 +443,7 @@ export default function SortSlips() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6">
+    <div className="py-4 lg:py-6">
       <div className="mx-auto w-full max-w-[1800px]">
         <div className="mb-6">
           <h2 className="text-2xl font-bold">Sort Slip</h2>
@@ -545,6 +592,18 @@ export default function SortSlips() {
                       >
                         Open
                       </Button>
+                      {/* Only the current owner sees this — the server would skip anyone else's
+                          attempt anyway (see canManageAssignment), so it's hidden rather than
+                          offered and then rejected. */}
+                      {row.managedByCode === user?.userCode && row.status !== "completed" && (
+                        <Button
+                          size="sm" variant="ghost" className="h-7 w-7 p-0 text-amber-600 hover:text-amber-700"
+                          title="Transfer to another supervisor"
+                          onClick={(e) => { e.stopPropagation(); setTransferSupRow(row); }}
+                        >
+                          <ArrowRightLeft className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                       {/* Completed slips have no delete: they are the record of a finished sort. */}
                       {canWrite && row.status !== "completed" && (
                         <Button
@@ -601,6 +660,15 @@ export default function SortSlips() {
                 <div className="mt-2 flex items-center justify-between gap-3">
                   <ProgressBar picked={row.pickedQty} total={row.totalQty} />
                   <div className="flex shrink-0 items-center gap-1.5">
+                    {row.managedByCode === user?.userCode && row.status !== "completed" && (
+                      <Button
+                        size="sm" variant="ghost" className="h-9 w-9 p-0 text-amber-600"
+                        title="Transfer to another supervisor"
+                        onClick={(e) => { e.stopPropagation(); setTransferSupRow(row); }}
+                      >
+                        <ArrowRightLeft className="h-4 w-4" />
+                      </Button>
+                    )}
                     {canWrite && row.status !== "completed" && (
                       <Button
                         size="sm" variant="ghost" className="h-9 w-9 p-0 text-red-500"
@@ -852,6 +920,43 @@ export default function SortSlips() {
               </DialogFooter>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Transfer to Supervisor — a per-row action (the "transfer" icon next to Delete on each
+          row), loaders untouched. Only WHO manages this one slip changes. */}
+      <Dialog open={!!transferSupRow} onOpenChange={(o) => {
+        if (!o) { setTransferSupRow(null); setTransferSupTarget(""); setTransferSupSearch(""); }
+      }}>
+        <DialogContent className="sm:max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle>Transfer {transferSupRow?.orderNumber} to another supervisor</DialogTitle>
+            <DialogDescription>
+              {transferSupRow?.assignees.length
+                ? `${transferSupRow.assignees.map((a) => a.userName ?? a.userCode).join(", ")} keeps working it exactly as they are — only who manages the slip changes.`
+                : "Only who manages the slip changes."}
+            </DialogDescription>
+          </DialogHeader>
+          <SupervisorPicker
+            label="Hand off to"
+            supervisors={supervisors}
+            search={transferSupSearch}
+            onSearch={setTransferSupSearch}
+            selected={transferSupTarget}
+            onSelect={setTransferSupTarget}
+            isLoading={supervisorsQuery.isLoading}
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTransferSupRow(null)}>Cancel</Button>
+            <Button
+              className="bg-amber-600 text-white hover:bg-amber-700"
+              disabled={!transferSupTarget || transferSupMutation.isPending}
+              onClick={() => transferSupMutation.mutate()}
+            >
+              {transferSupMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRightLeft className="mr-2 h-4 w-4" />}
+              Transfer
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -1215,6 +1320,90 @@ function LoaderPicker({
   );
 }
 
+// A trimmed-down LoaderPicker for the Transfer to Supervisor dialog — no "busy on another slip"
+// exclusivity (a supervisor can manage any number of slips at once), so no disabled rows either.
+function SupervisorPicker({
+  label, supervisors, search, onSearch, selected, onSelect, isLoading,
+}: {
+  label: string;
+  supervisors: Supervisor[];
+  search: string;
+  onSearch: (value: string) => void;
+  selected: string;
+  onSelect: (code: string) => void;
+  isLoading?: boolean;
+}) {
+  const [focused, setFocused] = useState(false);
+  const term = search.trim().toLowerCase();
+  const shown = supervisors.filter((s) => !term
+    || (s.name ?? "").toLowerCase().includes(term)
+    || s.username.toLowerCase().includes(term)
+    || s.userCode.toLowerCase().includes(term));
+  const picked = supervisors.find((s) => s.userCode === selected) ?? null;
+
+  return (
+    <div className="space-y-1.5">
+      <label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
+        <User className="h-3.5 w-3.5" /> {label}
+      </label>
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+        <Input
+          value={search}
+          onChange={(e) => onSearch(e.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setTimeout(() => setFocused(false), 150)}
+          placeholder="Supervisor name or code…"
+          className="h-10 pl-9 pr-9 text-sm"
+        />
+        {search && (
+          <button type="button" onClick={() => onSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+            <X className="h-4 w-4" />
+          </button>
+        )}
+        {focused && !picked && (
+          <div className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+            {isLoading ? (
+              <p className="px-4 py-3 text-xs text-gray-400">Loading supervisors…</p>
+            ) : shown.length === 0 ? (
+              <p className="px-4 py-3 text-xs text-gray-400">No other supervisor matches that name.</p>
+            ) : shown.map((s) => (
+              <button
+                key={s.userCode}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => { onSelect(s.userCode); setFocused(false); }}
+                className="flex w-full items-center justify-between gap-2 border-b border-gray-100 px-4 py-2.5 text-left last:border-0 hover:bg-[#001d6e]/5"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-[#001d6e]">{s.name || s.username}</div>
+                  <div className="truncate text-xs text-gray-500">
+                    {[s.designation, s.department].filter(Boolean).join(" · ") || s.userCode}
+                  </div>
+                </div>
+                <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {picked && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-[#001d6e]/20 bg-[#001d6e]/5 px-3 py-2.5">
+          <div className="min-w-0 text-sm">
+            <span className="font-semibold text-[#001d6e]">{picked.name || picked.username}</span>
+            <span className="text-gray-500">
+              {" — "}{[picked.designation, picked.department].filter(Boolean).join(" · ") || picked.userCode}
+            </span>
+          </div>
+          <button type="button" onClick={() => onSelect("")} className="shrink-0 text-gray-400 hover:text-gray-600">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── The slip itself ─────────────────────────────────────────────────────────
 
 function SortSlipDetail({
@@ -1251,7 +1440,7 @@ function SortSlipDetail({
         slip: any; items: SortSlipItem[];
         assignees: Array<{ userCode: string; userName: string | null; assignedByName: string | null; isActive: boolean }>;
         loaderTimeline: Array<{ userCode: string; userName: string | null; from: string | null; to: string | null; pickedQty: number }>;
-        canWrite: boolean; canPick: boolean;
+        canWrite: boolean; canPick: boolean; canManageAssignment: boolean;
       }>;
     },
   });
@@ -1262,6 +1451,12 @@ function SortSlipDetail({
   const loaderTimeline = detailQuery.data?.loaderTimeline ?? [];
   const canWrite = detailQuery.data?.canWrite ?? false;
   const canPick = detailQuery.data?.canPick ?? false;
+  // Narrower than canWrite — Pause and Transfer both take a loader off work someone else put
+  // them on, so they're limited to whoever currently owns the assignment (whoever assigned or
+  // last transferred the active loader, or an admin) — see canManageAssignment in
+  // server/routes/sort-slips.ts for why. A supervisor who isn't that person doesn't see either
+  // button, instead of clicking one and hitting a 403.
+  const canManageAssignment = detailQuery.data?.canManageAssignment ?? false;
   const isCompleted = slip?.status === "completed";
   const slipPlant = slip?.plant ?? "";
 
@@ -1337,7 +1532,7 @@ function SortSlipDetail({
       return res.json();
     },
     onSuccess: () => {
-      toast({ title: "Transferred" });
+      toast({ title: "Loader changed" });
       setTransferOpen(false);
       setTransferTo(""); setTransferSearch(""); setTransferReason("");
       refresh();
@@ -1393,7 +1588,44 @@ function SortSlipDetail({
   });
 
   if (detailQuery.isLoading) {
-    return <div className="p-8 text-center text-gray-400">Loading sort slip…</div>;
+    return (
+      <div className="py-4 lg:py-6">
+        <div className="mx-auto w-full max-w-[1800px]">
+          <Button variant="ghost" size="sm" className="mb-3 text-gray-600" onClick={onBack}>
+            <ArrowLeft className="mr-2 h-4 w-4" /> All sort slips
+          </Button>
+          {/* Mirrors the real header's shape (order/badges, party/date, progress+action buttons,
+              loader chip) so nothing jumps once the real data lands. */}
+          <Card className="mb-4 overflow-hidden">
+            <div className="border-b border-gray-200 bg-white px-4 py-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <SkeletonBar className="h-6 w-40" />
+                    <SkeletonBar className="h-5 w-16 rounded-full" />
+                    <SkeletonBar className="h-5 w-20 rounded-full" />
+                  </div>
+                  <SkeletonBar className="h-3.5 w-52" />
+                </div>
+                <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+                  <SkeletonBar className="h-2 w-24 rounded-full" />
+                  <SkeletonBar className="h-9 w-28 rounded-md sm:h-8" />
+                  <SkeletonBar className="h-9 w-28 rounded-md sm:h-8" />
+                  <SkeletonBar className="h-9 w-20 rounded-md sm:h-8" />
+                </div>
+              </div>
+              <div className="mt-2 flex items-center gap-1.5">
+                <SkeletonBar className="h-3 w-14" />
+                <SkeletonBar className="h-5 w-24 rounded-full" />
+              </div>
+            </div>
+          </Card>
+          <Card className="mb-4 overflow-hidden p-4">
+            <TableSkeleton columns={6} rows={6} />
+          </Card>
+        </div>
+      </div>
+    );
   }
   if (detailQuery.isError || !slip) {
     return (
@@ -1410,7 +1642,9 @@ function SortSlipDetail({
   // three numbers with their pallet count underneath beats six columns.
   const qtyCell = (qty: number, palletSize: number, tone: string) => (
     <div className="leading-tight">
-      <div className={`text-base tabular-nums ${tone}`}>{qty ? qty.toLocaleString() : "—"}</div>
+      {/* Bumped from text-base — the Item column's own three lines (name/barcode/pallet-size)
+          are taller than this cell either way, so a bigger number here doesn't grow the row. */}
+      <div className={`text-lg tabular-nums ${tone}`}>{qty ? qty.toLocaleString() : "—"}</div>
       {palletSize > 0 && (
         <div className="text-[13px] tabular-nums text-gray-500">{(qty / palletSize).toFixed(2)} plt</div>
       )}
@@ -1496,7 +1730,7 @@ function SortSlipDetail({
       render: (item) => {
         const left = remainingOf(item);
         return left === 0
-          ? <span className="text-base font-semibold tabular-nums text-green-600">0</span>
+          ? <span className="text-lg font-semibold tabular-nums text-green-600">0</span>
           : qtyCell(left, item.palletSize, "font-semibold text-amber-600");
       },
     },
@@ -1523,81 +1757,91 @@ function SortSlipDetail({
 
 
   return (
-    <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6">
+    <div className="py-4 lg:py-6">
       <div className="mx-auto w-full max-w-[1800px]">
         <Button variant="ghost" size="sm" className="mb-3 text-gray-600" onClick={onBack}>
           <ArrowLeft className="mr-2 h-4 w-4" /> All sort slips
         </Button>
 
-        <Card className="mb-4 overflow-hidden">
-          <div className="border-b border-gray-200 bg-white px-4 py-3">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="text-xl font-bold text-gray-900">{slip.orderNumber}</h2>
-                  <Badge variant="outline" className={STATUS_STYLES[slip.status] ?? ""}>
-                    {STATUS_LABELS[slip.status] ?? slip.status}
-                  </Badge>
-                  {slip.plant && <PlantBadge plant={slip.plant} className="text-[10px]" />}
-                  {slip.platformStv && (
-                    <Badge variant="outline" className="text-[10px]" title="The STV/platform this slip was created for — set once at creation">
-                      STV: {slip.platformStv}
-                    </Badge>
-                  )}
-                </div>
-                <p className="mt-0.5 text-sm text-gray-500">
-                  {slip.partyName || "—"} · {slip.orderDate ?? "—"}
-                  {slip.completedAt && ` · completed by ${slip.completedByName ?? "—"}`}
-                </p>
-              </div>
-              <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+        {/* Sticky — order/status/actions/loader stay on screen while the item list below
+            scrolls, instead of scrolling away with everything else on a long order. */}
+        <Card className="sticky top-0 z-20 mb-4 overflow-hidden shadow-sm">
+          <div className="border-b border-gray-200 bg-white px-3 py-2 sm:px-4 sm:py-3">
+            {/* Order number + badges always get their own row. */}
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+              <h2 className="text-base font-bold text-gray-900 sm:text-xl">{slip.orderNumber}</h2>
+              <Badge variant="outline" className={STATUS_STYLES[slip.status] ?? ""}>
+                {STATUS_LABELS[slip.status] ?? slip.status}
+              </Badge>
+              {slip.plant && <PlantBadge plant={slip.plant} className="text-[10px]" />}
+              {slip.platformStv && (
+                <Badge variant="outline" className="text-[10px]" title="The STV/platform this slip was created for — set once at creation">
+                  STV: {slip.platformStv}
+                </Badge>
+              )}
+            </div>
+            {/* Party/date and the progress bar + action buttons are direct siblings in ONE flex
+                row now (they used to be in separate blocks, so they could never share a line no
+                matter how much width was free) — wherever both actually fit side by side, they
+                sit on the same row right after the date; otherwise this row wraps on its own. */}
+            <div className="mt-1 flex flex-wrap items-center justify-between gap-2 sm:gap-3">
+              <p className="text-xs text-gray-500 sm:text-sm">
+                {slip.partyName || "—"} · {slip.orderDate ?? "—"}
+                {slip.completedAt && ` · completed by ${slip.completedByName ?? "—"}`}
+              </p>
+              <div className="flex w-full flex-wrap items-center gap-1.5 md:w-auto md:gap-2">
                 <ProgressBar picked={totals.picked} total={totals.expected} />
 
+                {/* Icon-only below sm (label hidden, kept for a11y via title); flex-1 so the row
+                    stretches edge-to-edge instead of a few small buttons sitting on the left
+                    with dead space past them — the container itself stays full-width through md,
+                    only reverting to natural/inline sizing on genuine desktop widths. */}
                 {canWrite && !isCompleted && (
                   <>
-                    {/* w-[calc(50%-...)] instead of flex-1 on mobile — with 4 buttons now
-                        (Transfer/Complete/Pause/Delete), flex-1 stretched all four to share one
-                        row, squeezing each into an unreadable sliver on a narrow screen instead
-                        of wrapping. This wraps them 2-per-row below sm, then reverts to natural
-                        width on one row at sm+. */}
+                    {canManageAssignment && (
+                      <Button
+                        size="sm" title="Change Loader"
+                        className="h-8 flex-1 bg-[#001d6e] px-2 text-xs text-white hover:bg-[#00154b] sm:px-3 md:flex-none"
+                        onClick={() => setTransferOpen(true)}
+                      >
+                        <ArrowRightLeft className="h-3.5 w-3.5 sm:mr-1.5" /> <span className="hidden sm:inline">Change Loader</span>
+                      </Button>
+                    )}
                     <Button
-                      size="sm"
-                      className="h-9 w-[calc(50%-0.25rem)] bg-[#001d6e] text-xs text-white hover:bg-[#00154b] sm:h-8 sm:w-auto"
-                      onClick={() => setTransferOpen(true)}
+                      size="sm" title="Complete"
+                      className="h-8 flex-1 bg-green-600 px-2 text-xs text-white hover:bg-green-700 sm:px-3 md:flex-none"
+                      onClick={() => setCompleteOpen(true)}
                     >
-                      <ArrowRightLeft className="mr-1.5 h-3.5 w-3.5" /> Transfer
-                    </Button>
-                    <Button size="sm" className="h-9 w-[calc(50%-0.25rem)] bg-green-600 text-xs text-white hover:bg-green-700 sm:h-8 sm:w-auto" onClick={() => setCompleteOpen(true)}>
-                      <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" /> Complete
+                      <CheckCircle2 className="h-3.5 w-3.5 sm:mr-1.5" /> <span className="hidden sm:inline">Complete</span>
                     </Button>
                     {/* Only while a loader is actually on it — pausing an already-unassigned slip
                         makes no sense, and this is the one-click "free the loader now" action,
                         not Loading's own two-step Pause/Claim. */}
-                    {slip.status === "active" && (
+                    {slip.status === "active" && canManageAssignment && (
                       <Button
-                        size="sm" variant="outline"
-                        className="h-9 w-[calc(50%-0.25rem)] border-amber-200 text-xs text-amber-700 hover:bg-amber-50 sm:h-8 sm:w-auto"
+                        size="sm" variant="outline" title="Pause"
+                        className="h-8 flex-1 border-amber-200 px-2 text-xs text-amber-700 hover:bg-amber-50 sm:px-3 md:flex-none"
                         onClick={() => pauseMutation.mutate()}
                         disabled={pauseMutation.isPending}
                       >
-                        {pauseMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Pause className="mr-1.5 h-3.5 w-3.5" />}
-                        Pause
+                        {pauseMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1.5" /> : <Pause className="h-3.5 w-3.5 sm:mr-1.5" />}
+                        <span className="hidden sm:inline">Pause</span>
                       </Button>
                     )}
                     {/* Only before Complete — a finished sort is a record, not a draft. */}
                     <Button
-                      size="sm" variant="outline"
-                      className="h-9 w-[calc(50%-0.25rem)] border-red-200 text-xs text-red-600 hover:bg-red-50 hover:text-red-700 sm:h-8 sm:w-auto"
+                      size="sm" variant="outline" title="Delete"
+                      className="h-8 flex-1 border-red-200 px-2 text-xs text-red-600 hover:bg-red-50 hover:text-red-700 sm:px-3 md:flex-none"
                       onClick={() => setDeleteOpen(true)}
                     >
-                      <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete
+                      <Trash2 className="h-3.5 w-3.5 sm:mr-1.5" /> <span className="hidden sm:inline">Delete</span>
                     </Button>
                   </>
                 )}
                 {canWrite && isCompleted && (
                   <Button
                     size="sm"
-                    className="h-9 flex-1 bg-[#001d6e] text-xs text-white hover:bg-[#00154b] sm:h-8 sm:flex-none"
+                    className="h-8 flex-1 bg-[#001d6e] text-xs text-white hover:bg-[#00154b] md:flex-none"
                     onClick={() => reopenMutation.mutate()}
                     disabled={reopenMutation.isPending}
                   >
@@ -1607,8 +1851,11 @@ function SortSlipDetail({
               </div>
             </div>
 
-            <div className="mt-2 flex flex-wrap items-center gap-1">
-              <span className="mr-1 text-xs text-gray-500">Loader:</span>
+            {/* Loader chips and the loader-history toggle share one row now instead of two —
+                a phone-height sticky header can't afford a whole extra line for what's really
+                a footnote link. */}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-gray-500">Loader:</span>
               {assignees.length === 0 ? (
                 <span className="text-xs text-amber-600">nobody — transfer it to a loader</span>
               ) : assignees.map((a) => (
@@ -1616,22 +1863,24 @@ function SortSlipDetail({
                   {a.userName ?? a.userCode}
                 </Badge>
               ))}
+              {loaderTimeline.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setLoaderHistoryOpen((v) => !v)}
+                  className="ml-1 flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-[#001d6e]"
+                >
+                  <User className="h-3 w-3 text-gray-400" />
+                  History
+                  <ChevronDown className={`h-3 w-3 text-gray-400 transition-transform ${loaderHistoryOpen ? "rotate-180" : ""}`} />
+                </button>
+              )}
             </div>
 
             {/* Every loader who has held this slip, with how much each of them picked while they
                 had it — "the loader is an array", the same summary the Loading page keeps for a
-                load's owners. Collapsed, so it costs one line until somebody asks. */}
+                load's owners. Collapsed, so it costs nothing until somebody asks. */}
             {loaderTimeline.length > 0 && (
-              <div className="mt-2">
-                <button
-                  type="button"
-                  onClick={() => setLoaderHistoryOpen((v) => !v)}
-                  className="flex items-center gap-1.5 text-xs font-medium text-gray-600 hover:text-[#001d6e]"
-                >
-                  <User className="h-3.5 w-3.5 text-gray-400" />
-                  Loader history
-                  <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${loaderHistoryOpen ? "rotate-180" : ""}`} />
-                </button>
+              <div>
                 {loaderHistoryOpen && (
                   <div className="mt-2 overflow-hidden rounded-md border bg-white">
                     <table className="w-full text-sm">
@@ -1686,6 +1935,8 @@ function SortSlipDetail({
             emptyState="This order has no items."
             sortMode="client"
             enableZebraStripes
+            // Same "picked -> tint the row green" treatment the mobile card list uses.
+            rowClassName={(item) => (item.pickedQty > 0 ? "bg-green-50" : undefined)}
             // Find a line without reading the whole slip — matches the item name and the barcode,
             // which is what people have in front of them on the floor.
             enableSearch
@@ -1783,8 +2034,12 @@ function SortSlipDetail({
               <p className="py-10 text-center text-sm text-gray-400">This order has no items.</p>
             ) : items.map((item) => {
               const left = remainingOf(item);
+              const picked = item.pickedQty > 0;
               return (
-                <div key={item.id} className="flex items-start gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0">
+                <div
+                  key={item.id}
+                  className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0 ${picked ? "bg-green-50" : ""}`}
+                >
                   <ItemPhoto item={item} size={48} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
@@ -1792,25 +2047,32 @@ function SortSlipDetail({
                       <span className="shrink-0 font-mono text-xs font-semibold text-gray-500">{item.srNo || "—"}</span>
                     </div>
                     <p className="mt-0.5 font-mono text-[13px] text-gray-500">{item.barcode ?? "—"}</p>
-                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm tabular-nums">
-                      <span className="text-gray-500">Order <strong className="text-gray-800">{item.expectedQty.toLocaleString()}</strong></span>
-                      <span className="text-gray-500">Picked <strong className={item.pickedQty > 0 ? "text-green-600" : "text-gray-400"}>{item.pickedQty.toLocaleString()}</strong></span>
-                      <span className="text-gray-500">Left <strong className={left > 0 ? "text-amber-600" : "text-green-600"}>{left.toLocaleString()}</strong></span>
-                      {item.palletSize > 0 && (
-                        <span className="text-gray-400">{item.palletSize}/plt · {(left / item.palletSize).toFixed(2)} plt left</span>
+                    {/* Pallet math right under the barcode — how much makes one pallet, and how
+                        many pallets are still needed for what's left. */}
+                    {item.palletSize > 0 && (
+                      <p className="mt-0.5 text-xs text-gray-400">{item.palletSize}/plt · {(left / item.palletSize).toFixed(2)} plt needed</p>
+                    )}
+                    {/* Pick on the left (bigger — the button IS the action, it gets the
+                        emphasis), Expected/Received/Remain on the right in a bigger font, using
+                        the row's spare width instead of sitting small and empty next to it. */}
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      {canPick && !isCompleted && (
+                        <Button
+                          size="sm"
+                          className="h-11 shrink-0 bg-[#001d6e] px-6 text-base font-semibold text-white hover:bg-[#00154b] disabled:bg-gray-200 disabled:text-gray-500"
+                          disabled={left === 0}
+                          onClick={() => { setPickTarget(item); setPickQty(""); setPickPallets(""); }}
+                        >
+                          {left === 0 ? "Done" : "Pick"}
+                        </Button>
                       )}
+                      <div className="flex flex-1 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-right text-lg leading-none tabular-nums">
+                        <span className="text-gray-500">Expected <strong className="text-xl text-gray-800">{item.expectedQty.toLocaleString()}</strong></span>
+                        <span className="text-gray-500">Received <strong className={`text-xl ${picked ? "text-green-600" : "text-gray-400"}`}>{item.pickedQty.toLocaleString()}</strong></span>
+                        <span className="text-gray-500">Remain <strong className={`text-xl ${left > 0 ? "text-amber-600" : "text-green-600"}`}>{left.toLocaleString()}</strong></span>
+                      </div>
                     </div>
                   </div>
-                  {canPick && !isCompleted && (
-                    <Button
-                      size="sm"
-                      className="h-8 shrink-0 bg-[#001d6e] px-3 text-xs font-semibold text-white hover:bg-[#00154b] disabled:bg-gray-200 disabled:text-gray-500"
-                      disabled={left === 0}
-                      onClick={() => { setPickTarget(item); setPickQty(""); setPickPallets(""); }}
-                    >
-                      {left === 0 ? "Done" : "Pick"}
-                    </Button>
-                  )}
                 </div>
               );
             })}
@@ -1999,7 +2261,7 @@ function SortSlipDetail({
       }}>
         <DialogContent className="sm:max-w-[480px]">
           <DialogHeader>
-            <DialogTitle>Transfer this sort slip</DialogTitle>
+            <DialogTitle>Change this sort slip's loader</DialogTitle>
             <DialogDescription>
               {assignees[0]
                 ? `${assignees[0].userName ?? assignees[0].userCode} hands it over. The picks they already made stay theirs — the work happened.`
@@ -2035,7 +2297,7 @@ function SortSlipDetail({
               onClick={() => transferMutation.mutate()}
             >
               {transferMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRightLeft className="mr-2 h-4 w-4" />}
-              Transfer
+              Change Loader
             </Button>
           </DialogFooter>
         </DialogContent>

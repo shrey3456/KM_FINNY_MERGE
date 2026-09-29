@@ -123,6 +123,16 @@ type ScanHistoryItem = {
   voidReason: string | null;
 };
 
+// The row's own "pallets" column is floor(totalQty / itemsPerPallet) — a real, separate fact
+// (whole physical pallets in THIS one scan, with looseQty as the remainder), legitimately 0 for
+// a scan smaller than one pallet. That's not what belongs in a "Pallets" total/column meant to
+// answer "how much of a pallet is this qty" — for that, every other pallet figure in the app
+// (Scan Operations' own Expected/Received tiles, Sort Slip, etc.) uses the fractional qty ÷
+// itemsPerPallet instead, which is what this computes.
+function palletFraction(row: { totalQty: number; itemsPerPallet: number | null }): number | null {
+  return row.itemsPerPallet && row.itemsPerPallet > 0 ? row.totalQty / row.itemsPerPallet : null;
+}
+
 type ScanHistoryResponse = {
   items: ScanHistoryItem[];
   total: number;
@@ -1072,7 +1082,7 @@ const Reports = () => {
       h.orderDate ?? "",
       h.plant,
       h.totalQty,
-      h.pallets != null ? parseFloat(String(h.pallets)).toFixed(2) : "",
+      (() => { const p = palletFraction(h); return p != null ? p.toFixed(2) : ""; })(),
       h.stv ?? "",
       scanTypeLabel(h).label,
       h.scannedAt ? format(new Date(h.scannedAt), "yyyy-MM-dd HH:mm") : "",
@@ -1212,14 +1222,16 @@ const Reports = () => {
       header: columnHeader("pallets", "Pallets"),
       width: 90,
       align: "right",
-      accessor: (row) => row.pallets,
+      accessor: (row) => palletFraction(row),
       total: (rows) =>
         (historyData?.palletsTotal ??
-          rows.reduce((sum, r) => (r.voided ? sum : sum + Number(r.pallets ?? 0)), 0)
+          rows.reduce((sum, r) => (r.voided ? sum : sum + (palletFraction(r) ?? 0)), 0)
         ).toFixed(2),
       cellClassName: "font-semibold text-[#001d6e]",
-      render: (row) =>
-        row.pallets != null && Number(row.pallets) > 0 ? parseFloat(String(row.pallets)).toFixed(2) : dash,
+      // != null only — a real 0 (or 0.07, etc.) is common and legitimate; only a row with no
+      // pallet size at all (itemsPerPallet null/0, e.g. a Stock Exchange ledger row) has
+      // nothing to show, and gets the dash.
+      render: (row) => { const p = palletFraction(row); return p != null ? p.toFixed(2) : dash; },
     },
     {
       id: "stv",
@@ -1298,39 +1310,39 @@ const Reports = () => {
               ),
           } as DataTableColumn<ScanHistoryItem>,
           {
-            id: "remove",
-            header: "Remove",
-            hideable: false,
-            width: 64,
-            align: "center" as const,
-            render: (row: ScanHistoryItem) =>
-              canRemoveEntry && isRemovableEntry(row) && (
-                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
-                  onClick={() => setRemoveTarget(row)}
-                  title={row.voided ? "Remove this voided entry from history" : "Remove this leftover stock entry from history"}>
-                  <X className="h-3.5 w-3.5" />
-                </Button>
-              ),
-          } as DataTableColumn<ScanHistoryItem>,
-          {
+            // One shared slot for Void/Remove instead of two separate columns — a row is only
+            // ever eligible for ONE of them (isRemovableEntry is exactly "already voided", and
+            // Void's own condition is exactly "not yet voided"), so a dedicated second column
+            // was always empty on every row the other one filled.
             id: "void",
             header: "Void",
             hideable: false,
             width: 56,
             align: "center" as const,
-            render: (row: ScanHistoryItem) =>
+            render: (row: ScanHistoryItem) => {
+              if (canRemoveEntry && isRemovableEntry(row)) {
+                return (
+                  <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                    onClick={() => setRemoveTarget(row)}
+                    title={row.voided ? "Remove this voided entry from history" : "Remove this leftover stock entry from history"}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                );
+              }
               // Exchange rows aren't backed by a voidable event at all. Receiving/dispatch/unload
               // each check their own permission and hit their own endpoint (see voidMutation) — a
               // user with only one of the write-access pairs would otherwise see a Void button
               // that 403s on the row it doesn't cover. Every real scan row can be voided, including
               // the corrections; only the stock-ledger rows (manual adjust, exchange) can't.
-              !row.voided && scanTypeLabel(row).source !== "Stock" && scanTypeLabel(row).source !== "Sort"
-              && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
+              const canShowVoid = !row.voided && scanTypeLabel(row).source !== "Stock" && scanTypeLabel(row).source !== "Sort"
+                && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan);
+              return canShowVoid && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
                   onClick={() => setVoidTarget(row)} title="Void this scan">
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
-              ),
+              );
+            },
           } as DataTableColumn<ScanHistoryItem>,
         ]
       : []),
@@ -1920,10 +1932,10 @@ const Reports = () => {
                       <span className="text-gray-400">Qty </span>
                       <span className="font-bold tabular-nums text-gray-900">{(row.totalQty ?? 0).toLocaleString()}</span>
                     </span>
-                    {row.pallets != null && Number(row.pallets) > 0 && (
+                    {palletFraction(row) != null && (
                       <span>
                         <span className="text-gray-400">Pallets </span>
-                        <span className="font-bold tabular-nums text-[#001d6e]">{parseFloat(String(row.pallets)).toFixed(2)}</span>
+                        <span className="font-bold tabular-nums text-[#001d6e]">{palletFraction(row)!.toFixed(2)}</span>
                       </span>
                     )}
                     {row.stv && (

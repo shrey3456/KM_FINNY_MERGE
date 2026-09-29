@@ -12,7 +12,7 @@ import { eq, and, or, desc, asc, gte, sql, inArray } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
 import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
-import { requirePageWrite } from '../lib/pageAccess';
+import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
 import { sessionMiddleware } from '../auth';
 
 // Case-insensitive plant match: LOWER(plant) = LOWER(filter)
@@ -1304,6 +1304,109 @@ router.post('/order-scan/sessions/:id/reopen', requirePageWrite('order-import'),
   }
 });
 
+// ── POST /api/order-scan/sessions/:id/adjust-remaining ───────────────────────
+// Overall Scan Ops' "Adjust Remaining" — for a CSV from a PAST order date that was already
+// marked COMPLETED but still has items short of their expected qty (completed manually with
+// shortfalls left). Writes one "Scan Adjust" event per short item, exactly as if that remaining
+// amount had actually been scanned (through the same writeScanEvents + stock path a live scan
+// uses), so the shortfall is settled after the fact. The session is already completed, so its
+// status/completion time are left untouched.
+// Gated on write access to 'scan-viewer' specifically — narrower than requireVoidAccess's
+// three-path OR, since this is a bulk, one-way correction rather than fixing one mistaken scan.
+// Restricted to a PAST order_date: a current-date CSV should be settled by scanning it.
+router.post('/order-scan/sessions/:id/adjust-remaining', requirePageWrite('scan-viewer'), async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  if (isNaN(id)) return res.status(400).json({ message: 'Invalid session ID' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: sessRows } = await client.query(
+      `SELECT * FROM order_import_sessions WHERE id = $1 AND is_deleted = false FOR UPDATE`,
+      [id],
+    );
+    const session = sessRows[0];
+    if (!session) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Session not found' });
+    }
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes((session.plant ?? '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+    if (session.scan_status !== 'completed') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Only a completed CSV can be adjusted this way — finish or complete it first.' });
+    }
+    // "Today" in IST, matching the app-wide convention (Daily Reports, etc.) — order_date is a
+    // plain YYYY-MM-DD text column, so a string compare is exact.
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    if (!session.order_date || session.order_date >= todayIST) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Only a CSV from a previous order date can be adjusted this way — a current/future one should be settled by scanning it.' });
+    }
+
+    const { rows: items } = await client.query(
+      `SELECT * FROM order_scan_items WHERE session_id = $1 FOR UPDATE`,
+      [id],
+    );
+    const userCode = (req.user as any)?.userCode ?? null;
+    const userName = (req.user as any)?.name ?? null;
+    const now = new Date();
+
+    let adjustedCount = 0;
+    let adjustedQty = 0;
+    for (const item of items) {
+      const remaining = Math.max(0, Number(item.expected_qty ?? 0) - Number(item.total_scanned_qty ?? 0));
+      if (remaining <= 0) continue;
+      const r = await writeScanEvents(client, {
+        sessionId: id,
+        scanItem: item,
+        totalQty: remaining,
+        itemsPerPallet: Number(item.items_per_pallet ?? 0),
+        barcode: item.barcode,
+        resolvedItemName: item.item_name,
+        stv: null,
+        userCode,
+        userName,
+        forceAllExtra: false,
+        isAdjust: true,
+        // No earlier real scan to preserve — both the scan time and the adjustment time ARE
+        // this moment, so both are stamped with it rather than one being left null/"now" at
+        // write time while the other says something more specific.
+        scannedAt: now,
+        adjustedAt: now,
+      });
+      if (session.plant && item.barcode) {
+        await applyLiveScanStock(client, session.plant, item.barcode, r.orderQty, r.extraQty, id);
+      }
+      adjustedCount += 1;
+      adjustedQty += remaining;
+    }
+
+    if (adjustedCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Nothing to adjust — every item on this CSV is already fully received.' });
+    }
+
+    // The session was already completed before this ran — status, completion time and completer
+    // stay exactly as they were, and there's nothing to re-complete, re-credit or re-activate.
+    // Only the connected screens need to hear that the numbers changed.
+    await client.query('COMMIT');
+    broadcastOrderImportUpdate();
+
+    res.json({ success: true, adjustedCount, adjustedQty });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[order-scan] adjust-remaining failed:', err);
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to adjust remaining quantity' });
+  } finally {
+    client.release();
+  }
+});
+
 // ── GET /api/order-scan/sessions/:id/items ───────────────────────────────────
 router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
@@ -2228,6 +2331,352 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to void scan' });
+  } finally {
+    client.release();
+  }
+});
+
+// ── Adjust Exchange ──────────────────────────────────────────────────────────────────────────
+// Manually crediting an Extra scanned on one date toward a still-open shortfall on an EARLIER
+// date — something the automatic credit system (reconcileCredits, above) never does on its own:
+// that one only ever credits FORWARD, from a just-completed part to a LATER part of the same
+// FIFO group. This is the same underlying mechanism (is_credit / credit_source_event_id /
+// credited_qty — see their comments in shared/schema.ts), just reachable manually, across any
+// two sessions for the same plant and barcode, in either direction time-wise as long as the
+// target is on or before the source Extra's own order date.
+//
+// Voiding one of these credit rows, or the Extra it came from, or reopening an old Adjust
+// Remaining closure, all reuse the EXISTING /order-scan/events/:id/void endpoint unchanged — it
+// already special-cases is_credit rows (gives the qty back to the source instead of touching
+// stock a second time) and already handles a plain non-extra/non-credit row (an Adjust Remaining
+// event) by reversing its stock and reducing total_scanned_qty, which is exactly "reopening" it.
+
+// GET /api/order-scan/exchange/extras — two modes, plant-scoped to the caller either way:
+//   ?date=YYYY-MM-DD&plant=      — every Extra scanned on that exact date (Tab 1's own browse).
+//   ?barcode=&fromDate=&plant=   — every Extra for that ONE product from fromDate onward,
+//                                   regardless of date (Tab 2's "pick a source Extra" step, where
+//                                   the shortfall's own date is the lower bound).
+// Either way, each row carries how much of it is still unclaimed.
+router.get('/order-scan/exchange/extras', requirePageAccess('adjust-exchange'), async (req: Request, res: Response) => {
+  try {
+    const date = String(req.query.date ?? '').trim();
+    const barcode = String(req.query.barcode ?? '').trim();
+    const fromDate = String(req.query.fromDate ?? '').trim();
+    let dateClause: string;
+    const params: unknown[] = [];
+    if (barcode) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate)) return res.status(400).json({ message: 'fromDate is required with barcode' });
+      params.push(barcode, fromDate);
+      dateClause = `LOWER(e.barcode) = LOWER($1) AND s.order_date >= $2`;
+    } else {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'A date is required' });
+      params.push(date);
+      dateClause = `s.order_date = $1`;
+    }
+    const userPlants = getUserPlants(req.user);
+    const requestedPlant = String(req.query.plant ?? '').trim().toLowerCase();
+    let plantClause = '';
+    if (userPlants !== null) {
+      if (userPlants.length === 0) return res.json([]);
+      const scoped = requestedPlant && userPlants.includes(requestedPlant) ? [requestedPlant] : userPlants;
+      params.push(scoped);
+      plantClause = ` AND LOWER(s.plant) = ANY($${params.length})`;
+    } else if (requestedPlant) {
+      params.push(requestedPlant);
+      plantClause = ` AND LOWER(s.plant) = $${params.length}`;
+    }
+    const { rows } = await pool.query(
+      `SELECT e.id, e.session_id AS "sessionId", e.barcode, e.item_name AS "itemName",
+              e.total_qty AS "totalQty", COALESCE(e.credited_qty, 0) AS "creditedQty",
+              e.scanned_at AS "scannedAt", e.scanned_by_name AS "scannedByName",
+              COALESCE(e.voided, false) AS voided, e.void_reason AS "voidReason",
+              s.plant, s.csv_file_name AS "csvFileName", s.order_date AS "orderDate"
+         FROM order_scan_events e
+         JOIN order_import_sessions s ON s.id = e.session_id
+        WHERE e.is_extra = true AND NOT COALESCE(e.hidden_in_history, false)
+          AND ${dateClause}${plantClause}
+        ORDER BY e.scanned_at ASC`,
+      params,
+    );
+    res.json(rows.map((r: any) => ({ ...r, available: Math.max(0, Number(r.totalQty) - Number(r.creditedQty)) })));
+  } catch (error) {
+    console.error('Error listing exchange extras:', error);
+    res.status(500).json({ message: 'Failed to load extras' });
+  }
+});
+
+// GET /api/order-scan/exchange/shortfalls?plant=&beforeDate=&barcode= — still-open shortfalls at
+// that plant dated on or before beforeDate, oldest first; barcode narrows to one product (Tab
+// 1's "find where to send this Extra" step) but is optional (Tab 2's own general browse lists
+// every product's open shortfalls). Includes an item that LOOKS complete but only because of a
+// still-active Adjust Remaining event (reopenQty > 0, reopenEventId set) — picking one of those
+// in the UI voids that event first (a plain call to the existing void endpoint), which is
+// exactly "reopening" it.
+router.get('/order-scan/exchange/shortfalls', requirePageAccess('adjust-exchange'), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const barcode = String(req.query.barcode ?? '').trim();
+    const beforeDate = String(req.query.beforeDate ?? '').trim();
+    if (!plant || !/^\d{4}-\d{2}-\d{2}$/.test(beforeDate)) {
+      return res.status(400).json({ message: 'plant and beforeDate are required' });
+    }
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+    const params: unknown[] = [plant, beforeDate];
+    let barcodeClause = '';
+    if (barcode) { params.push(barcode); barcodeClause = ` AND LOWER(i.barcode) = LOWER($${params.length})`; }
+    const { rows } = await pool.query(
+      `WITH adj AS (
+         SELECT scan_item_id, COALESCE(SUM(total_qty), 0)::int AS adjust_qty, MIN(id) AS adjust_event_id
+           FROM order_scan_events
+          WHERE is_adjust = true AND NOT COALESCE(voided, false)
+          GROUP BY scan_item_id
+       )
+       SELECT i.id AS "itemId", i.session_id AS "sessionId", i.barcode, i.item_name AS "itemName",
+              i.expected_qty AS "expectedQty", i.total_scanned_qty AS "totalScannedQty",
+              s.plant, s.csv_file_name AS "csvFileName", s.order_date AS "orderDate",
+              COALESCE(adj.adjust_qty, 0) AS "reopenQty", adj.adjust_event_id AS "reopenEventId",
+              (i.expected_qty - (i.total_scanned_qty - COALESCE(adj.adjust_qty, 0)))::int AS "shortfallReal"
+         FROM order_scan_items i
+         JOIN order_import_sessions s ON s.id = i.session_id
+         LEFT JOIN adj ON adj.scan_item_id = i.id
+        WHERE s.is_deleted = false AND LOWER(s.plant) = LOWER($1) AND s.order_date <= $2${barcodeClause}
+          AND (i.expected_qty - (i.total_scanned_qty - COALESCE(adj.adjust_qty, 0))) > 0
+        ORDER BY s.order_date ASC, i.id ASC`,
+      params,
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Error listing exchange shortfalls:', error);
+    res.status(500).json({ message: 'Failed to load previous-date shortfalls' });
+  }
+});
+
+// POST /api/order-scan/exchange/credit — body: { extraEventId, targetItemId, qty }. Writes the
+// manual cross-date credit: bumps the target item's total_scanned_qty by qty, marks that much of
+// the source Extra as claimed, and logs a linked is_credit event on the target session — the
+// same three writes reconcileCredits makes for its own (same-group, forward-only) case.
+router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), async (req: Request, res: Response) => {
+  const extraEventId = Number(req.body?.extraEventId);
+  const targetItemId = Number(req.body?.targetItemId);
+  const qty = Number(req.body?.qty);
+  if (!Number.isFinite(extraEventId) || !Number.isFinite(targetItemId) || !Number.isInteger(qty) || qty <= 0) {
+    return res.status(400).json({ message: 'extraEventId, targetItemId and a positive integer qty are required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: extraRows } = await client.query(
+      `SELECT e.*, s.plant AS session_plant, s.order_date AS session_order_date
+         FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
+        WHERE e.id = $1 FOR UPDATE OF e`,
+      [extraEventId],
+    );
+    const extra = extraRows[0];
+    if (!extra || !extra.is_extra) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Extra scan not found' }); }
+    if (extra.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This Extra is voided — it has nothing left to give.' }); }
+
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes(String(extra.session_plant ?? '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+
+    const { rows: targetRows } = await client.query(
+      `SELECT i.*, s.plant AS session_plant, s.order_date AS session_order_date, s.csv_file_name
+         FROM order_scan_items i JOIN order_import_sessions s ON s.id = i.session_id
+        WHERE i.id = $1 FOR UPDATE OF i`,
+      [targetItemId],
+    );
+    const target = targetRows[0];
+    if (!target) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Target item not found' }); }
+    if (String(target.session_plant ?? '').toLowerCase() !== String(extra.session_plant ?? '').toLowerCase()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'The Extra and the shortfall must be at the same plant.' });
+    }
+    if (String(target.barcode ?? '').toLowerCase() !== String(extra.barcode ?? '').toLowerCase()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'The Extra and the shortfall must be the same product.' });
+    }
+    if (Number(target.session_id) === Number(extra.session_id)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Use Void/backfill for a shortfall on the same CSV — Adjust Exchange Extra is for a different one.' });
+    }
+    if (String(target.session_order_date) > String(extra.session_order_date)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'The shortfall must be on or before the Extra\'s own order date.' });
+    }
+
+    const available = Number(extra.total_qty) - Number(extra.credited_qty ?? 0);
+    const shortfall = Number(target.expected_qty ?? 0) - Number(target.total_scanned_qty ?? 0);
+    if (available <= 0) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This Extra has already been fully given elsewhere.' }); }
+    if (shortfall <= 0) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'That item has no shortfall left to give to — void its Adjust Remaining entry first if it was closed that way.' }); }
+    if (qty > available || qty > shortfall) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: `qty can be at most ${Math.min(available, shortfall)} (the smaller of what's available and what's short).` });
+    }
+
+    const { userCode, userName } = { userCode: (req.user as any)?.userCode ?? null, userName: (req.user as any)?.name ?? null };
+
+    await client.query(
+      `UPDATE order_scan_items
+          SET total_scanned_qty = COALESCE(total_scanned_qty, 0) + $1,
+              status = CASE
+                WHEN COALESCE(total_scanned_qty, 0) + $1 >= expected_qty THEN 'complete'
+                WHEN COALESCE(total_scanned_qty, 0) + $1 > 0             THEN 'partial'
+                ELSE 'pending'
+              END,
+              last_scanned_at = NOW()
+        WHERE id = $2`,
+      [qty, target.id],
+    );
+
+    const { rows: creditRows } = await client.query(
+      `INSERT INTO order_scan_events
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+          items_per_pallet, is_extra, is_credit, credit_source_event_id, scanned_by_code, scanned_by_name, scanned_at)
+       VALUES ($1,$2,$3,$4,0,0,$5,0,false,true,$6,$7,$8,NOW())
+       RETURNING *`,
+      [target.session_id, target.id, target.barcode, target.item_name, qty, extra.id, userCode,
+       `${userName ?? userCode ?? 'Someone'} (Adjust Exchange Extra, from ${extra.csv_file_name ?? 'a later CSV'})`],
+    );
+
+    await client.query(`UPDATE order_scan_events SET credited_qty = COALESCE(credited_qty, 0) + $1 WHERE id = $2`, [qty, extra.id]);
+
+    await client.query('COMMIT');
+    broadcastOrderImportUpdate();
+    res.json({ credit: creditRows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error crediting exchange:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to credit this exchange' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/order-scan/exchange/events/:id/delete-permanent — admin-only. Actually deletes the
+// row, unlike Remove (hidden_in_history=true, on Scan History) which only hides it. Only allowed
+// once the row is already voided — the same eligibility Remove itself uses — which guarantees its
+// stock impact was already reversed and (for a credit row) its qty already handed back to its
+// source, so nothing more needs undoing here.
+router.post('/order-scan/exchange/events/:id/delete-permanent', requirePageWrite('adjust-exchange'), async (req: Request, res: Response) => {
+  try {
+    const role = String((req.user as any)?.role ?? '').toLowerCase();
+    if (!WRITE_ADMIN_ROLES.includes(role)) {
+      return res.status(403).json({ message: 'Only an admin can permanently delete a scan.' });
+    }
+    const eventId = parseInt(req.params.id);
+    if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+
+    const { rows } = await pool.query(`SELECT * FROM order_scan_events WHERE id = $1`, [eventId]);
+    const event = rows[0];
+    if (!event) return res.status(404).json({ message: 'Scan event not found' });
+    if (!event.voided) return res.status(400).json({ message: 'Only a voided scan can be permanently deleted — void it first.' });
+
+    await pool.query(`DELETE FROM order_scan_events WHERE id = $1`, [eventId]);
+
+    const { userCode, userName } = { userCode: (req.user as any)?.userCode ?? null, userName: (req.user as any)?.name ?? null };
+    await storage.logActivity({
+      pageName: 'Adjust Exchange Extra', action: 'delete', entityType: 'order_scan_event', entityId: eventId,
+      details: `Permanently deleted a voided ${event.is_extra ? 'Extra' : event.is_credit ? 'Credit' : event.is_adjust ? 'Adjust' : 'Regular'} scan — barcode ${event.barcode}, qty ${event.total_qty}, session ${event.session_id}`,
+      userCode, userName,
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error permanently deleting scan:', error);
+    res.status(500).json({ message: 'Failed to permanently delete this scan' });
+  }
+});
+
+// POST /api/order-scan/exchange/events/:id/reassign-product — body: { newBarcode }. "Exchange":
+// this Extra was scanned as the wrong product — it's re-labelled to whatever product it actually
+// is, ANY product in Product Master (not limited to this order's own items — a box can turn out
+// to be something this order never even expected), and its stock moves with it: the qty this scan
+// already added to the old barcode's stock is taken back and given to the new barcode instead —
+// the same physical boxes, just correctly identified now. Stays an Extra under its new identity;
+// if it also happens to be an item genuinely expected on this same order, its scan_item_id links
+// to that row too (so its own Adjust button can credit a shortfall afterwards) — otherwise it's
+// simply an Extra for that product with no particular order tying it down, same as any other.
+router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite('adjust-exchange'), async (req: Request, res: Response) => {
+  const eventId = parseInt(req.params.id);
+  const newBarcode = String(req.body?.newBarcode ?? '').trim();
+  if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
+  if (!newBarcode) return res.status(400).json({ message: 'newBarcode is required' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: eventRows } = await client.query(
+      `SELECT e.*, s.plant FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
+        WHERE e.id = $1 FOR UPDATE OF e`,
+      [eventId],
+    );
+    const event = eventRows[0];
+    if (!event || !event.is_extra) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Extra scan not found' }); }
+    if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This Extra is voided — nothing to exchange.' }); }
+
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes(String(event.plant ?? '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+    if (newBarcode.toLowerCase() === String(event.barcode).toLowerCase()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'That is already this Extra\'s product.' });
+    }
+
+    // Must be a real product (Product Master) — a plain sanity check against a typo'd barcode,
+    // not a restriction on which order it belongs to.
+    const { rows: productRows } = await client.query(
+      `SELECT name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
+      [newBarcode],
+    );
+    if (!productRows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'That barcode is not in Product Master — check it and try again.' });
+    }
+    const newItemName = productRows[0].name;
+
+    // Opportunistic link: if this barcode is ALSO genuinely expected on this same order, tie the
+    // event to that row so its own shortfall can be credited afterwards. Not required otherwise.
+    const { rows: sameOrderItemRows } = await client.query(
+      `SELECT id FROM order_scan_items WHERE session_id = $1 AND LOWER(barcode) = LOWER($2) FOR UPDATE`,
+      [event.session_id, newBarcode],
+    );
+    const newScanItemId = sameOrderItemRows[0]?.id ?? null;
+
+    const qty = Number(event.total_qty ?? 0);
+    if (qty > 0 && event.plant) {
+      await reverseLiveScanStock(client, event.plant, event.barcode, 0, qty, event.session_id);
+      await applyLiveScanStock(client, event.plant, newBarcode, 0, qty, event.session_id);
+    }
+
+    const { rows: updatedRows } = await client.query(
+      `UPDATE order_scan_events SET barcode = $1, item_name = $2, scan_item_id = $3 WHERE id = $4 RETURNING *`,
+      [newBarcode, newItemName, newScanItemId, eventId],
+    );
+
+    const { userCode, userName } = { userCode: (req.user as any)?.userCode ?? null, userName: (req.user as any)?.name ?? null };
+    await storage.logActivity({
+      pageName: 'Adjust Exchange Extra', action: 'update', entityType: 'order_scan_event', entityId: eventId,
+      details: `Exchanged Extra scan from barcode ${event.barcode} to ${newBarcode} (${newItemName ?? ''}) — qty ${qty}`,
+      userCode, userName,
+    });
+
+    await client.query('COMMIT');
+    broadcastOrderImportUpdate();
+    res.json({ event: updatedRows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error exchanging product:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to exchange this product' });
   } finally {
     client.release();
   }

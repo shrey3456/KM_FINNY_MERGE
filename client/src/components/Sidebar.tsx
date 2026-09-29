@@ -36,6 +36,7 @@ import {
   Eye,
   PackageOpen,
   ClipboardList,
+  ArrowLeftRight,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -239,6 +240,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: <HistoryIcon className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/scan-history",
           pageKey: "scan-history",
+        },
+        {
+          label: "Adjust Exchange Extra",
+          icon: <ArrowLeftRight className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/adjust-exchange",
+          pageKey: "adjust-exchange",
         },
         {
           label: "Stock Overview",

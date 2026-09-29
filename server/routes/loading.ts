@@ -176,6 +176,26 @@ async function plantStvList(plant: string | null | undefined): Promise<string[]>
   return rows.map((r: any) => String(r.stv));
 }
 
+// Whether this plant requires a Sort Slip to already exist before Create Operation is allowed —
+// the Plant Management toggle (plants.require_sort_slip_first). Defaults to false (no such
+// requirement) for a plant with no row at all, same fallback every other plant flag here uses.
+async function plantRequiresSortSlipFirst(plant: string | null | undefined): Promise<boolean> {
+  const name = String(plant ?? '').trim();
+  if (!name) return false;
+  const { rows } = await pool.query(
+    `SELECT require_sort_slip_first FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+    [name],
+  );
+  return !!rows[0]?.require_sort_slip_first;
+}
+
+// Any Sort Slip for this order counts — not necessarily a completed one (see sortSlips.status in
+// shared/schema.ts). Create Operation only cares that sorting has been set up, not finished.
+async function orderHasSortSlip(orderNumber: string): Promise<boolean> {
+  const { rows } = await pool.query(`SELECT 1 FROM sort_slips WHERE order_number = $1 LIMIT 1`, [orderNumber]);
+  return rows.length > 0;
+}
+
 // StoreKeeper Info = everyone who has held this load, in the order they took it, then the STV name
 // exactly as configured for the plant: "YASH, PLT-05", and after a handoff "YASH, RAHUL, PLT-05".
 // First names only, upper-cased. It used to reduce the STV to a bare platform number ("YASH, pt: 5"),
@@ -394,7 +414,11 @@ router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
-    res.json({ slip: await withRto(slip), items, allComplete, loadedVolume });
+    // Told to the Create Operation dialog up front, so it can warn and disable its button before
+    // the operator even tries — POST /start below is the real enforcement either way.
+    const sortSlipRequired = await plantRequiresSortSlipFirst(slip.plant);
+    const sortSlipExists = sortSlipRequired ? await orderHasSortSlip(slip.orderNumber) : true;
+    res.json({ slip: await withRto(slip), items, allComplete, loadedVolume, sortSlipRequired, sortSlipExists });
   } catch (error) {
     console.error('Error fetching proforma slip for loading:', error);
     res.status(500).json({ message: 'Failed to fetch proforma slip' });
@@ -417,6 +441,15 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
     // go through this endpoint at all) — this only guards the "start a new one" entry point.
     if (isAlreadyLoading(slip.notionStatus)) {
       return res.status(409).json({ message: 'Status is already Loading — not able to load.' });
+    }
+
+    // Plant Management can require a Sort Slip to exist for this order before loading is allowed
+    // to start at all — any Sort Slip, not necessarily a completed one. Checked here (not just
+    // in the GET lookup that feeds the dialog) so this holds even for a direct API call.
+    if (await plantRequiresSortSlipFirst(slip.plant)) {
+      if (!(await orderHasSortSlip(slip.orderNumber))) {
+        return res.status(400).json({ message: `Create a Sort Slip for order ${slip.orderNumber} before starting this load operation.` });
+      }
     }
 
     // STV is mandatory here and ONLY here: this is the one moment it can be set, and every other

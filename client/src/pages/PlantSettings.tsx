@@ -16,7 +16,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import type { LucideIcon } from "lucide-react";
-import { Trash2, Edit, Plus, Factory, Printer, Lock, Unlock, FileText, ScrollText, ChevronDown, ChevronRight, Tag, CheckCircle2, Hand, Zap } from "lucide-react";
+import { Trash2, Edit, Plus, Factory, Printer, Lock, Unlock, FileText, ScrollText, ChevronDown, ChevronRight, Tag, CheckCircle2, Hand, Zap, ClipboardCheck } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Link } from "wouter";
@@ -38,6 +38,7 @@ const plantFormSchema = z.object({
   isSplitPagesEnabled: z.boolean().default(false),
   isAutoCompleteEnabled: z.boolean().default(false),
   isAutoScanEnabled: z.boolean().default(false),
+  requireSortSlipFirst: z.boolean().default(false),
 });
 
 type PlantFormValues = z.infer<typeof plantFormSchema>;
@@ -130,6 +131,7 @@ export default function PlantSettings() {
       isSplitPagesEnabled: false,
       isAutoCompleteEnabled: false,
       isAutoScanEnabled: false,
+      requireSortSlipFirst: false,
     },
   });
 
@@ -442,6 +444,7 @@ export default function PlantSettings() {
       isSplitPagesEnabled: plant.isSplitPagesEnabled !== undefined && plant.isSplitPagesEnabled !== null ? plant.isSplitPagesEnabled : false,
       isAutoCompleteEnabled: plant.isAutoCompleteEnabled !== undefined && plant.isAutoCompleteEnabled !== null ? plant.isAutoCompleteEnabled : false,
       isAutoScanEnabled: plant.isAutoScanEnabled !== undefined && plant.isAutoScanEnabled !== null ? plant.isAutoScanEnabled : false,
+      requireSortSlipFirst: plant.requireSortSlipFirst !== undefined && plant.requireSortSlipFirst !== null ? plant.requireSortSlipFirst : false,
     });
     setIsDialogOpen(true);
   };
@@ -458,6 +461,7 @@ export default function PlantSettings() {
         isSplitPagesEnabled: false,
         isAutoCompleteEnabled: false,
         isAutoScanEnabled: false,
+        requireSortSlipFirst: false,
     });
     setIsDialogOpen(true);
   }
@@ -477,6 +481,7 @@ export default function PlantSettings() {
         isSplitPagesEnabled: false,
         isAutoCompleteEnabled: false,
         isAutoScanEnabled: false,
+        requireSortSlipFirst: false,
       });
     }
   }
@@ -598,6 +603,19 @@ export default function PlantSettings() {
         <Zap className="h-3.5 w-3.5" />, "Auto",
         <FileText className="h-3.5 w-3.5" />, "Confirm",
         "text-amber-600",
+      ),
+    },
+    {
+      id: "requireSortSlip",
+      header: "Sort Slip",
+      width: 100,
+      sortable: true,
+      accessor: (p) => (p.requireSortSlipFirst ? 1 : 0),
+      render: (p) => statusCell(
+        !!p.requireSortSlipFirst,
+        <ClipboardCheck className="h-3.5 w-3.5" />, "Required",
+        <Hand className="h-3.5 w-3.5" />, "Not required",
+        "text-purple-600",
       ),
     },
     {
@@ -937,6 +955,21 @@ export default function PlantSettings() {
                             />
                           )}
                         />
+                        <FormField
+                          control={form.control}
+                          name="requireSortSlipFirst"
+                          render={({ field }) => (
+                            <SettingToggle
+                              icon={ClipboardCheck}
+                              title="Require Sort Slip First"
+                              tone="text-purple-600"
+                              checked={field.value}
+                              onChange={field.onChange}
+                              onText="Create Operation (Loading) is refused unless a Sort Slip already exists for that order — the slip just needs to exist, not be completed"
+                              offText="Create Operation needs no Sort Slip (default)"
+                            />
+                          )}
+                        />
                       </div>
                     </FormSection>
 
@@ -985,6 +1018,7 @@ export default function PlantSettings() {
                             <div>{form.watch("isSplitPagesEnabled") ? "Multi-page mode" : "Continuous mode"}</div>
                             <div>{form.watch("isAutoCompleteEnabled") ? "Auto Complete on" : "Manual Complete only"}</div>
                             <div>{form.watch("isAutoScanEnabled") ? "Auto Scan on" : "Confirm every scan"}</div>
+                            <div>{form.watch("requireSortSlipFirst") ? "Sort Slip required before loading" : "No Sort Slip requirement"}</div>
                           </div>
                         </div>
                       </div>
@@ -1103,6 +1137,7 @@ export default function PlantSettings() {
                   {statusCell(!!plant.isSplitPagesEnabled, <FileText className="h-3.5 w-3.5" />, "Split Pages", <ScrollText className="h-3.5 w-3.5" />, "Continuous", "text-blue-600")}
                   {statusCell(!!plant.isAutoCompleteEnabled, <CheckCircle2 className="h-3.5 w-3.5" />, "Auto Complete", <Hand className="h-3.5 w-3.5" />, "Manual Complete", "text-emerald-600")}
                   {statusCell(!!plant.isAutoScanEnabled, <Zap className="h-3.5 w-3.5" />, "Auto Scan", <FileText className="h-3.5 w-3.5" />, "Confirm Scan", "text-amber-600")}
+                  {statusCell(!!plant.requireSortSlipFirst, <ClipboardCheck className="h-3.5 w-3.5" />, "Sort Slip Required", <Hand className="h-3.5 w-3.5" />, "No Sort Slip Requirement", "text-purple-600")}
                 </div>
 
                 <Button

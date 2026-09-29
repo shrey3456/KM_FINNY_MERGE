@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, Search, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, Eye, FileText, Layers, ListFilter, Loader2, Pencil, Plus, RotateCw, ScanLine, Search, Wrench, X } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { useSidebarContext } from "@/lib/sidebarContext";
@@ -142,6 +142,13 @@ function fmtIST(value: string | Date | null | undefined): string {
 // reaching into a feature page's own module.
 const palletsOf = (qty: number, itemsPerPallet: number | null | undefined) =>
   (qty > 0 && (itemsPerPallet ?? 0) > 0 ? (qty / (itemsPerPallet as number)).toFixed(2) : "0.00");
+
+// "Today" in IST — matching the app-wide convention (Daily Reports, etc.) and the server's own
+// check on POST .../adjust-remaining, so the button only shows when that endpoint would actually
+// accept the request.
+function todayIST(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+}
 
 // Totals-row counterpart to palletsOf, for columns that stack qty over its pallets in one cell:
 // the column's qty summed, with the pallet figure underneath — each row's qty ÷ ITS OWN pallet
@@ -792,6 +799,30 @@ export default function ScanViewer() {
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
     },
     onError: (err: any) => toast({ title: "Failed to void scan", description: err?.message, variant: "destructive" }),
+  });
+
+  // "Adjust Remaining" — settles the shortfall on a past-dated CSV that was already completed
+  // with items still short: every short item gets written up to its expected qty as a "Scan
+  // Adjust" event (see POST .../adjust-remaining). One-way and bulk, so a confirm dialog sits in
+  // front of it rather than firing straight from the button (adjustRemainTarget holds the
+  // session about to be adjusted while that dialog is open).
+  const [adjustRemainTarget, setAdjustRemainTarget] = useState<{ id: number; csvFileName: string } | null>(null);
+  const adjustRemainMutation = useMutation({
+    mutationFn: (sessionId: number) =>
+      apiRequest("POST", `/api/order-scan/sessions/${sessionId}/adjust-remaining`, {}).then((r) => r.json()),
+    onSuccess: (data: { adjustedCount: number; adjustedQty: number }) => {
+      qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
+      qc.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
+      qc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
+      qc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setAdjustRemainTarget(null);
+      toast({
+        title: "Remaining quantity adjusted",
+        description: `${data.adjustedCount} item${data.adjustedCount === 1 ? "" : "s"} fulfilled (${data.adjustedQty.toLocaleString()} units) and added to stock.`,
+      });
+    },
+    onError: (err: any) => toast({ title: "Could not adjust remaining", description: err?.message, variant: "destructive" }),
   });
 
   // Extras that don't match ANY CSV item — not on this part's CSV, and not on any other part's
@@ -1779,6 +1810,20 @@ export default function ScanViewer() {
             const pct = expectedQty > 0 ? Math.min(100, Math.round((receivedQty / expectedQty) * 100)) : 0;
             return <ProgressReadout pct={pct} doneItems={fullyDone} totalItems={realItems.length} />;
           })()}
+          {/* Settles the shortfall left on a CSV that was already COMPLETED with items still short —
+              only for a PAST order date (a current one should be settled by scanning it). Same
+              write-access gate as Void on this page. */}
+          {canVoidScan && selectedSession && selectedSession.scanStatus === "completed"
+            && (selectedSession.orderDate ?? date) < todayIST()
+            && items.some((i) => (i.expectedQty ?? 0) > (i.totalScannedQty ?? 0)) && (
+            <Button
+              size="sm" variant="outline"
+              className="h-8 shrink-0 gap-1.5 border-amber-200 text-xs text-amber-700 hover:bg-amber-50"
+              onClick={() => setAdjustRemainTarget({ id: selectedSession.id, csvFileName: selectedSession.csvFileName })}
+            >
+              <Wrench className="h-3.5 w-3.5" /> Adjust Remaining
+            </Button>
+          )}
         </div>
         </div>
 
@@ -2743,6 +2788,29 @@ export default function ScanViewer() {
               onClick={() => voidTarget && voidMutation.mutate({ id: voidTarget.id, reason: voidReason.trim() })}
             >
               {voidMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Void Scan"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Adjust Remaining — one-way and bulk, so this confirms before firing rather than acting
+          straight from the button. */}
+      <Dialog open={!!adjustRemainTarget} onOpenChange={(o) => { if (!o) setAdjustRemainTarget(null); }}>
+        <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-amber-700">Adjust remaining on this CSV?</DialogTitle>
+            <DialogDescription>
+              Every item still short on <strong>{adjustRemainTarget?.csvFileName}</strong> will be written up to its full expected quantity as a "Scan Adjust" entry — added to stock and shown in Scan History. This CSV is already completed and stays that way. This can't be undone from here.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAdjustRemainTarget(null)}>Cancel</Button>
+            <Button
+              className="bg-amber-600 text-white hover:bg-amber-700"
+              disabled={adjustRemainMutation.isPending}
+              onClick={() => adjustRemainTarget && adjustRemainMutation.mutate(adjustRemainTarget.id)}
+            >
+              {adjustRemainMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Adjust Remaining"}
             </Button>
           </DialogFooter>
         </DialogContent>

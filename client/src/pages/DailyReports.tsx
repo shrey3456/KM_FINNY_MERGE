@@ -1,7 +1,11 @@
+import { PlantBadge } from "@/components/PlantBadge";
+import { PageScrollButtons } from "@/components/PageScrollButtons";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { usePageWidth } from "@/hooks/usePageWidth";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { DateInput } from "@/components/ui/date-input";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -12,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   Download, FileBarChart, Truck, Clock, Loader2, ChevronDown,
-  Package, ListChecks, CalendarClock, FileSpreadsheet,
+  Package, ListChecks, CalendarClock, FileSpreadsheet, Eye,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -46,11 +50,16 @@ type ReportRow = {
   receivedPallets?: number;
   extraPallets?: number;
 };
-type ItemTotal = { barcode: string; itemName: string | null; expectedQty: number; actualQty: number; extraQty: number; pallets: number };
+// `pallets` = pallets actually received (scanned); `expectedPallets` = expected qty / pallet size.
+type ItemTotal = { barcode: string; itemName: string | null; srNo?: string | null; expectedQty: number; expectedPallets?: number; actualQty: number; extraQty: number; pallets: number };
 type Activity = {
   barcode: string; itemName: string | null; qty: number; pallets?: number; stv?: string | null;
   isExtra: boolean; scannedByName: string | null; scannedAt: string;
   groupKey?: string | null; groupLabel?: string | null;
+  // A voided scan stays in the activity list, clearly marked, so the report says the entry
+  // happened and was cancelled; totals/item-wise figures already exclude it server-side. An
+  // entry someone REMOVED from Scan History is dropped by the server and never arrives here.
+  voided?: boolean; voidReason?: string | null; voidedAt?: string | null;
 };
 type ReportData = {
   date: string;
@@ -91,14 +100,29 @@ function fmtIST(dt: string | null): string {
   return isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 }
 
-// The report date is already selected above the summary, so these cards need only the complete
-// clock value. This keeps the important time visible instead of truncating a repeated date-time.
-function fmtISTClock(dt: string | null): string {
+// Date AND clock time in IST — an order's scanning can start on one day and finish days later
+// (an order dated the 19th completed on the 25th), so a bare clock time made End look earlier
+// than Start.
+function fmtISTDateTime(dt: string | null): string {
   if (!dt) return "—";
   const d = new Date(dt);
-  return isNaN(d.getTime()) ? "—" : d.toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
-  });
+  if (isNaN(d.getTime())) return "—";
+  const date = d.toLocaleDateString("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric" });
+  const time = d.toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+  return `${date}, ${time}`;
+}
+
+// Elapsed time from Start to End, e.g. "6d 0h 49m" / "3h 12m 05s" / "4m 10s". "—" until both
+// ends exist (a not-yet-completed CSV/vehicle has no End).
+function fmtTotalTime(start: string | null, end: string | null): string {
+  if (!start || !end) return "—";
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const total = Math.round(ms / 1000);
+  const d = Math.floor(total / 86400), h = Math.floor((total % 86400) / 3600), m = Math.floor((total % 3600) / 60), sec = total % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m ${String(sec).padStart(2, "0")}s`;
+  return `${m}m ${String(sec).padStart(2, "0")}s`;
 }
 
 // An item's physical received quantity includes both its regular receipt and any extra receipt.
@@ -205,7 +229,7 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: ExportRow[]
 // A small icon-only dropdown (not a full labeled button) — every report on this page gets one of
 // these next to its own header instead of one big button up top, so downloading a specific
 // report is a click on that report, not a separate control elsewhere on the page.
-function DownloadMenu({ onExport }: { onExport: (fmt: Fmt) => void }) {
+function DownloadMenu({ onExport, formats = ["CSV", "Excel", "PDF"] }: { onExport: (fmt: Fmt) => void; formats?: Fmt[] }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -214,9 +238,7 @@ function DownloadMenu({ onExport }: { onExport: (fmt: Fmt) => void }) {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => onExport("CSV")}>CSV</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onExport("Excel")}>Excel</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onExport("PDF")}>PDF</DropdownMenuItem>
+        {formats.map((fmt) => <DropdownMenuItem key={fmt} onClick={() => onExport(fmt)}>{fmt}</DropdownMenuItem>)}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -240,7 +262,17 @@ const TABS: { key: Tab; label: string; breakdownLabel: string }[] = [
   { key: "scan", label: "Scan Operations", breakdownLabel: "CSV / Order" },
 ];
 
+// The wide tables only fit when the page itself is wide enough — below this width the row cards
+// are used instead, so nothing ever needs scrolling sideways. usePageWidth itself now lives in
+// its own hook file, shared with AdjustExchange.tsx.
+const TABLE_MIN_PAGE_WIDTH = 900;
+
 export default function DailyReports() {
+  const [rootRef, pageWidth] = usePageWidth();
+  // Until measured (first paint) fall back to the old viewport rule so nothing flashes.
+  const useCards = pageWidth > 0 ? pageWidth < TABLE_MIN_PAGE_WIDTH : false;
+  const tableBoxClass = pageWidth > 0 ? (useCards ? "hidden" : "block") : "hidden md:block";
+  const cardBoxClass = pageWidth > 0 ? (useCards ? "" : "hidden") : "md:hidden";
   // Which top-level tab and which report sub-tab were open last — remembered across visits
   // (sessionStorage, same convention as every other page's filter/view state) rather than
   // always resetting to Loading/Total Summary.
@@ -251,7 +283,8 @@ export default function DailyReports() {
   const [date, setDate] = useState(todayIST());
   const [selectedPlant, setSelectedPlant] = usePersistentFilter("dailyReports:plant", "");
   const activeTab = TABS.find((t) => t.key === tab)!;
-  const showActivitySummary = tab === "unloading" || tab === "scan";
+  // Every tab (Loading, Unloading, Scan) has the Total Summary + Activities Summary pair.
+  const showActivitySummary = true;
   const { data: allPlants = [] } = useQuery<Array<{ name: string }>>({
     queryKey: ["/api/plants", "daily-reports"],
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
@@ -269,6 +302,13 @@ export default function DailyReports() {
   const [openVehicle, setOpenVehicle] = useState<string | null>(null);
   const [openOrder, setOpenOrder] = useState<string | null>(null);
   const [openCsv, setOpenCsv] = useState<string | null>(null);
+  // The row's own plant travels with the drill-down: the same CSV file name (or vehicle number)
+  // can exist in two plants on one date, and without it the popup mixed both plants' scans.
+  const [openPlant, setOpenPlant] = useState<string | null>(null);
+  // Small screens only: which of the two summary cards is showing (both show from lg up).
+  const [summaryCard, setSummaryCard] = useState<"total" | "activity">("total");
+  const pickVehicle = (row: ReportRow) => { setOpenPlant(row.plant); setOpenVehicle(row.key); };
+  const pickCsv = (row: ReportRow) => { setOpenPlant(row.plant); setOpenCsv(row.key); };
   const [openDetailTab, setOpenDetailTab] = useState<"items" | "activities">("items");
   const effectiveReportTab = tab === "scan"
     ? reportTab
@@ -296,15 +336,15 @@ export default function DailyReports() {
   const handleExportSummaryReport = (fmt: Fmt) => {
     if (!data?.itemTotals) return;
     const totals = data.itemTotals.reduce(
-      (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, pallets: acc.pallets + i.pallets }),
-      { expectedQty: 0, actualQty: 0, extraQty: 0, pallets: 0 },
+      (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, expectedPallets: acc.expectedPallets + (i.expectedPallets ?? 0), pallets: acc.pallets + i.pallets }),
+      { expectedQty: 0, actualQty: 0, extraQty: 0, expectedPallets: 0, pallets: 0 },
     );
     const rows: ExportRow[] = [
-      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime)],
+      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime), "Total Time", fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)],
       [],
-      ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Pallets"],
-      ...data.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
-      ["TOTAL", "", totals.expectedQty, totals.actualQty, totals.extraQty, totals.pallets.toFixed(2)],
+      ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Expected Pallets", "Received Pallets"],
+      ...data.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, (i.expectedPallets ?? 0).toFixed(2), i.pallets.toFixed(2)]),
+      ["TOTAL", "", totals.expectedQty, totals.actualQty, totals.extraQty, totals.expectedPallets.toFixed(2), totals.pallets.toFixed(2)],
     ];
     exportRows(fmt, `${tab}-summary-report-${data.date}`, `${activeTab.label} — Total Summary Report — ${data.date}`, rows);
   };
@@ -312,20 +352,20 @@ export default function DailyReports() {
   const handleExportActivitiesReport = (fmt: Fmt) => {
     if (!data?.activities) return;
     const rows: ExportRow[] = [
-      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime)],
+      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime), "Total Time", fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)],
       [],
-      ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra?", "Scanned By"],
+      ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra?", "Scanned By", "Voided"],
       ...data.activities.map((a) => [
         fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
-        a.isExtra ? "Yes" : "No", a.scannedByName ?? "",
+        a.isExtra ? "Yes" : "No", a.scannedByName ?? "", voidedCell(a),
       ]),
     ];
     exportRows(fmt, `${tab}-activities-report-${data.date}`, `${activeTab.label} — Activities Report — ${data.date}`, rows);
   };
 
   const summaryTotals = data?.itemTotals?.reduce(
-    (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, pallets: acc.pallets + i.pallets }),
-    { expectedQty: 0, actualQty: 0, extraQty: 0, pallets: 0 },
+    (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, expectedPallets: acc.expectedPallets + (i.expectedPallets ?? 0), pallets: acc.pallets + i.pallets }),
+    { expectedQty: 0, actualQty: 0, extraQty: 0, expectedPallets: 0, pallets: 0 },
   );
 
   // Same shared DataTable/TableCard the rest of the app's tables use (Overall Stock, Scan
@@ -346,7 +386,8 @@ export default function DailyReports() {
       id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty,
       render: (r) => <span className={r.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}>{r.extraQty}</span>,
     },
-    { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets.toFixed(2) },
+    { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-gray-700", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0).toFixed(2) },
+    { id: "pallets", header: "Received Pallets", align: "right", accessor: (r) => r.pallets, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets.toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + r.pallets, 0).toFixed(2) },
   ];
 
   const activitiesColumns: DataTableColumn<Activity>[] = [
@@ -358,36 +399,55 @@ export default function DailyReports() {
       render: (r) => (
         <>
           {r.itemName || "—"}
-          {r.isExtra && <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Extra</span>}
+          {r.isExtra && !r.voided && <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Extra</span>}
+          <VoidedBadge a={r} />
         </>
       ),
     },
-    { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, cellClassName: "tabular-nums font-medium text-emerald-600", render: qtyCellFor },
     { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? null, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets?.toFixed(2) ?? "—" },
     { id: "stv", header: "STV", width: 100, accessor: (r) => r.stv, totalable: false, cellClassName: "text-gray-500", render: (r) => r.stv || "—" },
     { id: "scannedByName", header: "By", width: 140, accessor: (r) => r.scannedByName, totalable: false, cellClassName: "text-gray-500", render: (r) => r.scannedByName || "—" },
   ];
 
-  const breakdownColumns: DataTableColumn<ReportRow>[] = [
+  // Opens the vehicle / slip / CSV popup for a row. Only the "View" button calls this — the row
+  // itself is not clickable, so selecting text or scrolling never opens a popup by accident.
+  const openRow = (row: ReportRow, detailTab: "items" | "activities") => {
+    if (row.key === "—") return;
+    // A CSV opens on its item list (the activities are one tab over, in the same popup).
+    setOpenDetailTab(tab === "scan" ? "items" : detailTab);
+    if (tab === "unloading") pickVehicle(row);
+    else if (tab === "loading") setOpenOrder(row.key);
+    else pickCsv(row);
+  };
+
+  const breakdownColumnsFor = (detailTab: "items" | "activities"): DataTableColumn<ReportRow>[] => [
     {
       id: "label", header: activeTab.breakdownLabel, accessor: (r) => r.label, totalable: false,
       cellClassName: "font-medium text-gray-900",
-      render: (r) => {
-        const clickable = (tab === "loading" || tab === "unloading" || tab === "scan") && r.key !== "—";
-        return clickable ? <span className="text-[#001d6e] underline decoration-dotted">{r.label}</span> : r.label;
-      },
     },
-    { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => r.plant ?? "—" },
+    { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => (r.plant ? <PlantBadge plant={r.plant} /> : "—") },
     { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
     { id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
     { id: "eventCount", header: "Events", align: "right", accessor: (r) => r.eventCount, cellClassName: "tabular-nums" },
     { id: "startTime", header: "Start", width: 140, accessor: (r) => r.startTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.startTime) },
     { id: "endTime", header: "End", width: 140, accessor: (r) => r.endTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.endTime) },
+    {
+      id: "open", header: "", width: 96, fixedWidth: true, sortable: false, hideable: false, totalable: false,
+      render: (r) => r.key === "—" ? null : (
+        <Button type="button" size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={() => openRow(r, detailTab)}>
+          <Eye className="h-3.5 w-3.5" /> View
+        </Button>
+      ),
+    },
   ];
+  const summaryBreakdownColumns = breakdownColumnsFor("items");
+  const activitiesBreakdownColumns = breakdownColumnsFor("activities");
 
   return (
-    <div className="container-fluid max-w-full space-y-5 overflow-x-hidden px-3 py-6 sm:px-4 md:px-6">
+    <div ref={rootRef} className="container-fluid max-w-full space-y-5 overflow-x-hidden px-3 py-6 sm:px-4 md:px-6">
+      <PageScrollButtons />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="flex items-center text-2xl font-bold tracking-tight">
           <FileBarChart className="mr-2 h-6 w-6 text-[#001d6e]" />
@@ -432,8 +492,28 @@ export default function DailyReports() {
       ) : data ? (
         <>
           {/* Total Summary + Activities Summary, side by side in one row. */}
+          {/* Below lg the two summary cards are too tall stacked, so a small switch shows one at a
+              time (same pill style as the Loading/Unloading/Scan switch); from lg up both show. */}
+          {showActivitySummary && (
+            <div className="flex items-center gap-2 lg:hidden">
+              {([["total", "Total Summary"], ["activity", "Activities Summary"]] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setSummaryCard(key)}
+                  className={
+                    summaryCard === key
+                      ? "rounded-full bg-[#001d6e] px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
+                      : "rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className={`grid gap-3 ${showActivitySummary ? "lg:grid-cols-2" : "grid-cols-1"}`}>
-            <Card className="border-gray-200 shadow-sm">
+            <Card className={`border-gray-200 shadow-sm ${showActivitySummary && summaryCard === "activity" ? "hidden lg:block" : ""}`}>
               <CardContent className="p-3">
                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   <SectionIcon icon={Package} /> Total Summary
@@ -447,15 +527,16 @@ export default function DailyReports() {
                 </div>
               </CardContent>
             </Card>
-            {showActivitySummary && <Card className="border-gray-200 shadow-sm">
+            {showActivitySummary && <Card className={`border-gray-200 shadow-sm ${summaryCard === "total" ? "hidden lg:block" : ""}`}>
               <CardContent className="p-3">
                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
                   <SectionIcon icon={CalendarClock} /> Activities Summary
                 </p>
-                <div className="grid grid-cols-[minmax(3.75rem,0.6fr)_minmax(0,1.7fr)_minmax(0,1.7fr)] gap-2">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-[auto_minmax(0,1.5fr)_minmax(0,1.5fr)_minmax(0,1fr)]">
                   <StatBox label="Events" value={data.activitySummary.eventCount} />
-                  <StatBox label="Start Time" text={fmtISTClock(data.activitySummary.startTime)} title={fmtIST(data.activitySummary.startTime)} />
-                  <StatBox label="End Time" text={fmtISTClock(data.activitySummary.endTime)} title={fmtIST(data.activitySummary.endTime)} />
+                  <StatBox label="Start Time" text={fmtISTDateTime(data.activitySummary.startTime)} />
+                  <StatBox label="End Time" text={fmtISTDateTime(data.activitySummary.endTime)} />
+                  <StatBox label="Total Time" text={fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)} />
                 </div>
               </CardContent>
             </Card>}
@@ -509,20 +590,14 @@ export default function DailyReports() {
               }
               className="rounded-xl border-gray-300 shadow-none"
             >
-              <div className="hidden md:block">
+              <div className={tableBoxClass}>
               <DataTable<ReportRow>
                 className="space-y-0"
                 containerClassName="rounded-none border-0"
-                columns={breakdownColumns}
+                columns={summaryBreakdownColumns}
                 data={data.breakdown}
                 getRowId={(row, idx) => `${row.key}-${idx}`}
                 emptyState="No activity for this date"
-                onRowClick={(row) => {
-                  setOpenDetailTab("items");
-                  if (tab === "unloading") setOpenVehicle(row.key);
-                  else setOpenOrder(row.key);
-                }}
-                isRowClickable={() => true}
                 enableZebraStripes
                 enableTotalsRow
                 totalsLabel="TOTAL"
@@ -534,11 +609,8 @@ export default function DailyReports() {
                 headerClassName={REPORT_TABLE_HEADER_CLASS}
               />
               </div>
-              <div className="md:hidden">
-                <ReportRowCards rows={data.breakdown} tab={tab} onRowClick={(row) => {
-                  setOpenDetailTab("items");
-                  if (tab === "unloading") setOpenVehicle(row.key); else setOpenOrder(row.key);
-                }} />
+              <div className={cardBoxClass}>
+                <ReportRowCards rows={data.breakdown} tab={tab} onOpen={(row) => openRow(row, "items")} />
               </div>
             </TableCard>
           ) : effectiveReportTab === "summary" && tab === "scan" ? (
@@ -549,7 +621,7 @@ export default function DailyReports() {
               className="rounded-xl border-gray-300 shadow-none"
               headerActions={<DownloadMenu onExport={handleExportSummaryReport} />}
             >
-              <div className="hidden md:block">
+              <div className={tableBoxClass}>
                 <DataTable<ItemTotal>
                   className="space-y-0"
                   containerClassName="rounded-none border-0"
@@ -568,16 +640,17 @@ export default function DailyReports() {
                   headerClassName={REPORT_TABLE_HEADER_CLASS}
                 />
               </div>
-              <div className="space-y-2 p-3 md:hidden">
+              <div className={`space-y-2 p-3 ${cardBoxClass}`}>
                 {(data.itemTotals ?? []).map((item) => (
-                  <div key={item.barcode} className="rounded-lg border border-gray-200 p-3 text-sm">
-                    <p className="font-medium text-gray-900">{item.itemName || "—"}</p>
-                    <p className="mt-1 break-all font-mono text-xs text-gray-500">{item.barcode}</p>
-                    <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-gray-600">
-                      <span>Expected: <strong>{item.expectedQty}</strong></span>
-                      <span>Received: <strong className="text-emerald-600">{receivedIncludingExtra(item)}</strong></span>
-                      <span>Extra: <strong className="text-amber-600">{item.extraQty}</strong></span>
-                      <span>Pallets: <strong>{item.pallets.toFixed(2)}</strong></span>
+                  <div key={item.barcode} className="rounded-lg border border-gray-200 p-3">
+                    <p className="text-base font-semibold text-gray-900">{item.itemName || "—"}</p>
+                    <p className="mt-1 break-all font-mono text-sm text-gray-500">{item.barcode}</p>
+                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm text-gray-600">
+                      <span>Expected: <strong className="text-base text-gray-900">{item.expectedQty}</strong></span>
+                      <span>Received: <strong className="text-base text-emerald-600">{receivedIncludingExtra(item)}</strong></span>
+                      <span>Extra: <strong className="text-base text-amber-600">{item.extraQty}</strong></span>
+                      <span>Expected Pallets: <strong className="text-base text-gray-900">{(item.expectedPallets ?? 0).toFixed(2)}</strong></span>
+                      <span className="col-span-2">Received Pallets: <strong className="text-base text-[#001d6e]">{item.pallets.toFixed(2)}</strong></span>
                     </div>
                   </div>
                 ))}
@@ -591,8 +664,9 @@ export default function DailyReports() {
               className="rounded-xl shadow-none border-gray-300"
               headerActions={<DownloadMenu onExport={handleExportActivitiesReport} />}
             >
-              <div className="hidden md:block">
+              <div className={tableBoxClass}>
                 <DataTable<Activity>
+                rowClassName={voidedRowClass}
                   className="space-y-0"
                   containerClassName="rounded-none border-0"
                   columns={activitiesColumns}
@@ -607,12 +681,12 @@ export default function DailyReports() {
                   headerClassName={REPORT_TABLE_HEADER_CLASS}
                 />
               </div>
-              <div className="space-y-2 p-3 md:hidden">
+              <div className={`space-y-2 p-3 ${cardBoxClass}`}>
                 {(data.activities ?? []).map((activity, index) => (
-                  <div key={`${activity.barcode}-${index}`} className="rounded-lg border border-gray-200 p-3 text-xs">
+                  <div key={`${activity.barcode}-${index}`} className={`rounded-lg border p-3 text-sm ${activity.voided ? "border-red-200 bg-red-50/60 text-gray-400" : "border-gray-200"}`}>
                     <div className="flex justify-between gap-3">
-                      <span className="font-medium text-gray-900">{activity.itemName || "—"}</span>
-                      <span className="font-semibold text-emerald-600">{activity.qty}</span>
+                      <span className={activity.voided ? "text-base font-semibold text-gray-400" : "text-base font-semibold text-gray-900"}>{activity.itemName || "—"}<VoidedBadge a={activity} /></span>
+                      <span className={activity.voided ? "text-lg font-bold text-gray-400 line-through" : "text-lg font-bold text-emerald-600"}>{activity.qty}</span>
                     </div>
                     <p className="mt-1 break-all font-mono text-gray-500">{activity.barcode}</p>
                     <p className="mt-1 text-gray-500">{fmtIST(activity.scannedAt)} · {activity.scannedByName || "—"}</p>
@@ -627,33 +701,22 @@ export default function DailyReports() {
               subtitle={`${data.breakdown.length} ${tab === "unloading" ? "vehicle" : tab === "loading" ? "slip" : "CSV"}${data.breakdown.length === 1 ? "" : "s"}`}
               className="rounded-xl shadow-none border-gray-300"
             >
-              <div className="hidden md:block">
+              <div className={tableBoxClass}>
               <DataTable<ReportRow>
                 className="space-y-0"
                 containerClassName="rounded-none border-0"
-                columns={breakdownColumns}
+                columns={activitiesBreakdownColumns}
                 data={data.breakdown}
                 getRowId={(row, idx) => `${row.key}-${idx}`}
                 emptyState="No activity for this date"
-                onRowClick={(row) => {
-                  setOpenDetailTab("activities");
-                  if (tab === "unloading") setOpenVehicle(row.key);
-                  else if (tab === "loading") setOpenOrder(row.key);
-                  else setOpenCsv(row.key);
-                }}
-                isRowClickable={() => true}
                 enableZebraStripes
                 enableColumnResizing
                 showMobileSwipeHint
                 headerClassName={REPORT_TABLE_HEADER_CLASS}
               />
               </div>
-              <div className="md:hidden">
-                <ReportRowCards rows={data.breakdown} tab={tab} onRowClick={(row) => {
-                  setOpenDetailTab("activities");
-                  if (tab === "unloading") setOpenVehicle(row.key);
-                  else if (tab === "loading") setOpenOrder(row.key); else setOpenCsv(row.key);
-                }} />
+              <div className={cardBoxClass}>
+                <ReportRowCards rows={data.breakdown} tab={tab} onOpen={(row) => openRow(row, "activities")} />
               </div>
             </TableCard>
           ) : (
@@ -663,39 +726,114 @@ export default function DailyReports() {
               subtitle={`${data.breakdown.length} row${data.breakdown.length === 1 ? "" : "s"}`}
               className="rounded-xl shadow-none border-gray-300"
             >
-              <div className="hidden md:block">
+              <div className={tableBoxClass}>
               <DataTable<ReportRow>
                 className="space-y-0"
                 containerClassName="rounded-none border-0"
-                columns={breakdownColumns}
+                columns={activitiesBreakdownColumns}
                 data={data.breakdown}
                 getRowId={(row, idx) => `${row.key}-${idx}`}
                 emptyState="No activity for this date"
-                onRowClick={(row) => {
-                  if (row.key === "—") return;
-                  if (tab === "scan") setOpenCsv(row.key);
-                }}
-                isRowClickable={(row) => tab === "scan" && row.key !== "—"}
                 enableZebraStripes
                 enableColumnResizing
                 showMobileSwipeHint
                 headerClassName={REPORT_TABLE_HEADER_CLASS}
               />
               </div>
-              <div className="md:hidden">
-                <ReportRowCards rows={data.breakdown} tab={tab} onRowClick={(row) => {
-                  if (tab === "scan") { setOpenDetailTab("activities"); setOpenCsv(row.key); }
-                }} />
+              <div className={cardBoxClass}>
+                <ReportRowCards rows={data.breakdown} tab={tab} onOpen={(row) => openRow(row, "activities")} />
               </div>
             </TableCard>
           )}
         </>
       ) : null}
 
-      <VehicleDetailDialog date={date} vehicle={openVehicle} initialTab={openDetailTab} onClose={() => setOpenVehicle(null)} />
+      <VehicleDetailDialog date={date} plant={openPlant} vehicle={openVehicle} initialTab={openDetailTab} onClose={() => setOpenVehicle(null)} />
       <LoadingSlipDetailDialog date={date} order={openOrder} initialTab={openDetailTab} onClose={() => setOpenOrder(null)} />
-      <CsvDetailDialog date={date} csv={openCsv} initialTab={openDetailTab} onClose={() => setOpenCsv(null)} />
+      <CsvDetailDialog date={date} plant={openPlant} csv={openCsv} initialTab={openDetailTab} onClose={() => setOpenCsv(null)} />
     </div>
+  );
+}
+
+// The item list / activity list inside a View popup. On a phone the wide tables forced sideways
+// scrolling (and a scroll box inside the popup's own scroll, which swallowed touch scrolling), so
+// small screens get plain cards that fit the width and scroll with the popup; wider screens keep
+// the tables.
+function DetailLists({ detailTab, itemTotals, activities, maxHeight }: { detailTab: "items" | "activities"; itemTotals: ItemTotal[]; activities: Activity[]; maxHeight: string }) {
+  const isMobile = useIsMobile();
+  if (isMobile) {
+    if (detailTab === "items") {
+      if (itemTotals.length === 0) return <p className="py-6 text-center text-sm text-gray-400">No items</p>;
+      return (
+        <div className="space-y-2">
+          {itemTotals.map((item) => (
+            <div key={item.barcode} className="rounded-lg border border-gray-200 px-3 py-2">
+              <p className="text-sm font-semibold leading-snug text-gray-900">
+                {item.srNo && <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-xs font-bold text-gray-600">{item.srNo}</span>}
+                {item.itemName || "—"}
+              </p>
+              <p className="break-all font-mono text-xs text-gray-500">{item.barcode}</p>
+              <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-600">
+                <span>Expected: <strong className="text-sm text-gray-900">{item.expectedQty}</strong></span>
+                <span>Received: <strong className="text-sm text-emerald-600">{receivedIncludingExtra(item)}</strong></span>
+                <span>Extra: <strong className="text-sm text-amber-600">{item.extraQty}</strong></span>
+                <span>Exp. Pallets: <strong className="text-sm text-gray-900">{(item.expectedPallets ?? 0).toFixed(2)}</strong></span>
+                <span className="col-span-2">Received Pallets: <strong className="text-sm text-[#001d6e]">{item.pallets.toFixed(2)}</strong></span>
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    if (activities.length === 0) return <p className="py-6 text-center text-sm text-gray-400">No scans</p>;
+    return (
+      <div className="space-y-2">
+        {activities.map((a, index) => (
+          <div key={`${a.barcode}-${index}`} className={`rounded-lg border px-3 py-2 text-xs ${a.voided ? "border-red-200 bg-red-50/60 text-gray-400" : "border-gray-200"}`}>
+            <div className="flex justify-between gap-3">
+              <span className={`text-sm font-semibold leading-snug ${a.voided ? "text-gray-400" : "text-gray-900"}`}>{a.itemName || "—"}<VoidedBadge a={a} /></span>
+              <span className={`text-base font-bold ${a.voided ? "text-gray-400 line-through" : "text-emerald-600"}`}>{a.qty}</span>
+            </div>
+            <p className="break-all font-mono text-gray-500">{a.barcode}</p>
+            <p className="text-gray-500">
+              {fmtIST(a.scannedAt)} · {a.scannedByName || "—"}
+              {a.pallets != null ? ` · ${a.pallets.toFixed(2)} pallets` : ""}
+            </p>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return detailTab === "items" ? (
+    <DataTable<ItemTotal>
+      className="space-y-0"
+      columns={itemTotals.some((i) => i.srNo) ? summaryColumnsForDetail : summaryColumnsForDetail.filter((c) => c.id !== "srNo")}
+      data={itemTotals}
+      getRowId={(row) => row.barcode}
+      emptyState="No items"
+      enableZebraStripes
+      enableTotalsRow
+      totalsLabel="TOTAL"
+      totalsLabelColumnId="itemName"
+      enableColumnResizing
+      isStickyHeader
+      maxHeight={maxHeight}
+      headerClassName={REPORT_TABLE_HEADER_CLASS}
+    />
+  ) : (
+    <DataTable<Activity>
+      rowClassName={voidedRowClass}
+      className="space-y-0"
+      columns={activitiesColumnsForDetail}
+      data={activities}
+      getRowId={(_row, index) => String(index)}
+      emptyState="No scans"
+      enableZebraStripes
+      enableColumnResizing
+      isStickyHeader
+      maxHeight={maxHeight}
+      headerClassName={REPORT_TABLE_HEADER_CLASS}
+    />
   );
 }
 
@@ -725,7 +863,7 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
             <FileSpreadsheet className="h-5 w-5" /> {order}
           </DialogTitle>
           <DialogDescription>
-            {detail?.partyName ?? ""}{detail?.vehicleNumber ? ` · ${detail.vehicleNumber}` : ""} · {detail?.plant ?? ""} · {date}
+            {detail?.partyName ?? ""}{detail?.vehicleNumber ? ` · ${detail.vehicleNumber}` : ""} · {detail?.plant ? <PlantBadge plant={detail.plant} className="px-2 py-0 text-[11px]" /> : ""} · {date}
           </DialogDescription>
         </DialogHeader>
 
@@ -734,12 +872,13 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
         ) : detailQuery.isError ? (
           <p className="text-sm text-red-600">{(detailQuery.error as Error).message}</p>
         ) : detail ? (
-          <div className="space-y-4">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overflow-x-hidden">
             <div className="grid grid-cols-2 gap-3 sm:flex sm:gap-4">
               <StatBox label="Expected" value={detail.itemTotals.reduce((sum, item) => sum + item.expectedQty, 0)} />
               <StatBox label="Received" value={detail.itemTotals.reduce((sum, item) => sum + receivedIncludingExtra(item), 0)} />
               <StatBox label="Extra" value={detail.itemTotals.reduce((sum, item) => sum + item.extraQty, 0)} />
-              <StatBox label="Pallets" text={detail.itemTotals.reduce((sum, item) => sum + item.pallets, 0).toFixed(2)} />
+              <StatBox label="Expected Pallets" text={detail.itemTotals.reduce((sum, item) => sum + (item.expectedPallets ?? 0), 0).toFixed(2)} />
+              <StatBox label="Received Pallets" text={detail.itemTotals.reduce((sum, item) => sum + item.pallets, 0).toFixed(2)} />
             </div>
             <div className="flex items-center gap-2">
               {initialTab === "items" && (
@@ -753,30 +892,7 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
                 </Button>
               )}
             </div>
-            {detailTab === "items" ? (
-              <DataTable<ItemTotal>
-                columns={summaryColumnsForDetail}
-                data={detail.itemTotals}
-                getRowId={(row) => row.barcode}
-                enableZebraStripes
-                enableTotalsRow
-                totalsLabel="TOTAL"
-                totalsLabelColumnId="itemName"
-                emptyState="No items"
-                headerClassName={REPORT_TABLE_HEADER_CLASS}
-                maxHeight="calc(100vh - 300px)"
-              />
-            ) : (
-              <DataTable<Activity>
-                columns={activitiesColumnsForDetail}
-                data={detail.activities}
-                getRowId={(_row, idx) => String(idx)}
-                enableZebraStripes
-                emptyState="No scans"
-                headerClassName={REPORT_TABLE_HEADER_CLASS}
-                maxHeight="calc(100vh - 300px)"
-              />
-            )}
+            <DetailLists detailTab={detailTab} itemTotals={detail.itemTotals} activities={detail.activities} maxHeight="calc(100vh - 300px)" />
           </div>
         ) : null}
       </DialogContent>
@@ -785,19 +901,36 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
 }
 
 const summaryColumnsForDetail: DataTableColumn<ItemTotal>[] = [
+  // Loading slips carry the proforma slip's Sr. No.; the list already arrives in that order.
+  { id: "srNo", header: "Sr", width: 60, fixedWidth: true, sortable: true, totalable: false, accessor: (r) => r.srNo ?? "", cellClassName: "text-xs font-semibold text-gray-600", render: (r) => r.srNo || "—" },
   { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
   { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => r.itemName || "—" },
   { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty },
   { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra },
   { id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty },
-  { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets, render: (r) => r.pallets.toFixed(2) },
+  { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0).toFixed(2) },
+  { id: "pallets", header: "Received Pallets", align: "right", accessor: (r) => r.pallets, render: (r) => r.pallets.toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + r.pallets, 0).toFixed(2) },
 ];
+
+// Voided scans stay listed (so the report shows the entry existed and was cancelled) but are
+// greyed out with a badge; the server already leaves them out of every total.
+const voidedRowClass = (r: Activity) => (r.voided ? "bg-red-50/60 text-gray-400" : undefined);
+const voidedCell = (a: Activity) => (a.voided ? `Voided${a.voidReason ? ` — ${a.voidReason}` : ""}` : "");
+function VoidedBadge({ a }: { a: Activity }) {
+  if (!a.voided) return null;
+  return (
+    <span title={a.voidReason ?? undefined} className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
+      Voided
+    </span>
+  );
+}
+const qtyCellFor = (r: Activity) => (r.voided ? <span className="text-gray-400 line-through">{r.qty}</span> : r.qty);
 
 const activitiesColumnsForDetail: DataTableColumn<Activity>[] = [
   { id: "scannedAt", header: "Time", width: 150, accessor: (r) => r.scannedAt, totalable: false, render: (r) => fmtIST(r.scannedAt) },
   { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
-  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => r.itemName || "—" },
-  { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty },
+  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => <>{r.itemName || "—"}<VoidedBadge a={r} /></> },
+  { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, render: qtyCellFor },
   { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? 0, render: (r) => r.pallets?.toFixed(2) ?? "—" },
   { id: "scannedByName", header: "By", accessor: (r) => r.scannedByName, totalable: false, render: (r) => r.scannedByName || "—" },
 ];
@@ -806,14 +939,14 @@ const activitiesColumnsForDetail: DataTableColumn<Activity>[] = [
 // Start/End time (End = when its session was actually marked Complete, not its last scan), an
 // item-wise total, and the full list of its individual scan events, with its own CSV download
 // separate from the main page's summary export.
-function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: string; vehicle: string | null; initialTab: "items" | "activities"; onClose: () => void }) {
+function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { date: string; plant: string | null; vehicle: string | null; initialTab: "items" | "activities"; onClose: () => void }) {
   const [detailTab, setDetailTab] = useState<"items" | "activities">(initialTab);
   useEffect(() => { if (vehicle) setDetailTab(initialTab); }, [vehicle, initialTab]);
   const detailQuery = useQuery({
-    queryKey: ["/api/daily-reports/unloading/vehicle", date, vehicle],
+    queryKey: ["/api/daily-reports/unloading/vehicle", date, vehicle, plant],
     enabled: !!vehicle,
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/daily-reports/unloading/vehicle?date=${encodeURIComponent(date)}&vehicle=${encodeURIComponent(vehicle!)}`);
+      const res = await apiRequest("GET", `/api/daily-reports/unloading/vehicle?date=${encodeURIComponent(date)}&vehicle=${encodeURIComponent(vehicle!)}${plant ? `&plant=${encodeURIComponent(plant)}` : ""}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.message ?? "Failed to load this vehicle's report");
@@ -828,17 +961,17 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
   const handleExport = (fmt: Fmt) => {
     if (!detail) return;
     const header: ExportRow = ["Vehicle", detail.vehicle, "Plant", detail.plant ?? ""];
-    const timing: ExportRow = ["Start", fmtIST(detail.startTime), "End", fmtIST(detail.endTime)];
+    const timing: ExportRow = ["Start", fmtIST(detail.startTime), "End", fmtIST(detail.endTime), "Total Time", fmtTotalTime(detail.startTime, detail.endTime)];
     const rows: ExportRow[] = detailTab === "items"
       ? [
           header, timing, [],
-          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Pallets"],
-          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
+          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Expected Pallets", "Received Pallets"],
+          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, (i.expectedPallets ?? 0).toFixed(2), i.pallets.toFixed(2)]),
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "Qty", "Extra?", "Scanned By"],
-          ...detail.activities.map((a) => [fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.isExtra ? "Yes" : "No", a.scannedByName ?? ""]),
+          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "Extra?", "Scanned By", "Voided"],
+          ...detail.activities.map((a) => [fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.isExtra ? "Yes" : "No", a.scannedByName ?? "", voidedCell(a)]),
         ];
     const suffix = detailTab === "items" ? "items" : "activities";
     exportRows(fmt, `unloading-${detail.vehicle}-${suffix}-${detail.date}`, `Unloading — ${detail.vehicle} — ${detailTab === "items" ? "Item-wise Total" : "Activity Report"} — ${detail.date}`, rows);
@@ -851,7 +984,7 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
           <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
             <Truck className="h-5 w-5" /> {vehicle}
           </DialogTitle>
-          <DialogDescription>{detail?.plant ?? ""} · {date}</DialogDescription>
+          <DialogDescription>{detail?.plant ? <PlantBadge plant={detail.plant} className="px-2 py-0 text-[11px]" /> : ""} · {date}</DialogDescription>
         </DialogHeader>
 
         {detailQuery.isLoading ? (
@@ -861,7 +994,7 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
         ) : detailQuery.isError ? (
           <p className="text-sm text-red-600">{(detailQuery.error as Error).message}</p>
         ) : detail ? (
-          <div className="space-y-4">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overflow-x-hidden">
             <div className="flex items-center justify-between gap-3">
               <div className="grid grid-cols-2 gap-3 sm:flex sm:gap-4">
                 <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-1.5">
@@ -876,8 +1009,14 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
                   </p>
                   <p className="text-xs font-bold text-gray-900">{fmtIST(detail.endTime)}</p>
                 </div>
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-1.5">
+                  <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                    <Clock className="h-3 w-3" /> Total Time
+                  </p>
+                  <p className="text-xs font-bold text-gray-900">{fmtTotalTime(detail.startTime, detail.endTime)}</p>
+                </div>
               </div>
-              <DownloadMenu onExport={handleExport} />
+              <DownloadMenu onExport={handleExport} formats={["CSV", "PDF"]} />
             </div>
 
             <div className="flex items-center gap-2">
@@ -907,36 +1046,7 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
               </button>}
             </div>
 
-            {detailTab === "items" ? (
-              <DataTable<ItemTotal>
-                className="space-y-0"
-                columns={summaryColumnsForDetail}
-                data={detail.itemTotals}
-                getRowId={(row) => row.barcode}
-                emptyState="No items"
-                enableZebraStripes
-                enableTotalsRow
-                totalsLabel="TOTAL"
-                totalsLabelColumnId="itemName"
-                enableColumnResizing
-                isStickyHeader
-                maxHeight="16rem"
-                headerClassName={REPORT_TABLE_HEADER_CLASS}
-              />
-            ) : (
-              <DataTable<Activity>
-                className="space-y-0"
-                columns={activitiesColumnsForDetail}
-                data={detail.activities}
-                getRowId={(_row, index) => String(index)}
-                emptyState="No scans yet"
-                enableZebraStripes
-                enableColumnResizing
-                isStickyHeader
-                maxHeight="16rem"
-                headerClassName={REPORT_TABLE_HEADER_CLASS}
-              />
-            )}
+            <DetailLists detailTab={detailTab} itemTotals={detail.itemTotals} activities={detail.activities} maxHeight="16rem" />
           </div>
         ) : null}
       </DialogContent>
@@ -948,14 +1058,14 @@ function VehicleDetailDialog({ date, vehicle, initialTab, onClose }: { date: str
 // equivalent of VehicleDetailDialog above (Order Scan has no vehicle concept, so this groups by
 // CSV/session instead), with its own Start/End, item-wise total, and activity report (including
 // Pallets/STV per event, which Scan's events actually carry).
-function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv: string | null; initialTab: "items" | "activities"; onClose: () => void }) {
+function CsvDetailDialog({ date, plant, csv, initialTab, onClose }: { date: string; plant: string | null; csv: string | null; initialTab: "items" | "activities"; onClose: () => void }) {
   const [detailTab, setDetailTab] = useState<"items" | "activities">(initialTab);
   useEffect(() => { if (csv) setDetailTab(initialTab); }, [csv, initialTab]);
   const detailQuery = useQuery({
-    queryKey: ["/api/daily-reports/scan/csv", date, csv],
+    queryKey: ["/api/daily-reports/scan/csv", date, csv, plant],
     enabled: !!csv,
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/daily-reports/scan/csv?date=${encodeURIComponent(date)}&csv=${encodeURIComponent(csv!)}`);
+      const res = await apiRequest("GET", `/api/daily-reports/scan/csv?date=${encodeURIComponent(date)}&csv=${encodeURIComponent(csv!)}${plant ? `&plant=${encodeURIComponent(plant)}` : ""}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.message ?? "Failed to load this CSV's report");
@@ -970,19 +1080,19 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
   const handleExport = (fmt: Fmt) => {
     if (!detail) return;
     const header: ExportRow = ["CSV / Order", detail.csv, "Plant", detail.plant ?? ""];
-    const timing: ExportRow = ["Start", fmtIST(detail.startTime), "End", fmtIST(detail.endTime)];
+    const timing: ExportRow = ["Start", fmtIST(detail.startTime), "End", fmtIST(detail.endTime), "Total Time", fmtTotalTime(detail.startTime, detail.endTime)];
     const rows: ExportRow[] = detailTab === "items"
       ? [
           header, timing, [],
-          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Pallets"],
-          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
+          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Expected Pallets", "Received Pallets"],
+          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, (i.expectedPallets ?? 0).toFixed(2), i.pallets.toFixed(2)]),
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra?", "Scanned By"],
+          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra?", "Scanned By", "Voided"],
           ...detail.activities.map((a) => [
             fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
-            a.isExtra ? "Yes" : "No", a.scannedByName ?? "",
+            a.isExtra ? "Yes" : "No", a.scannedByName ?? "", voidedCell(a),
           ]),
         ];
     const suffix = detailTab === "items" ? "items" : "activities";
@@ -996,7 +1106,7 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
           <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
             <FileSpreadsheet className="h-5 w-5" /> {csv}
           </DialogTitle>
-          <DialogDescription>{detail?.plant ?? ""} · {date}</DialogDescription>
+          <DialogDescription>{detail?.plant ? <PlantBadge plant={detail.plant} className="px-2 py-0 text-[11px]" /> : ""} · {date}</DialogDescription>
         </DialogHeader>
 
         {detailQuery.isLoading ? (
@@ -1006,7 +1116,7 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
         ) : detailQuery.isError ? (
           <p className="text-sm text-red-600">{(detailQuery.error as Error).message}</p>
         ) : detail ? (
-          <div className="space-y-4">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overflow-x-hidden">
             <div className="flex items-center justify-between gap-3">
               <div className="grid grid-cols-2 gap-3 sm:flex sm:gap-4">
                 <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-1.5">
@@ -1021,12 +1131,20 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
                   </p>
                   <p className="text-xs font-bold text-gray-900">{fmtIST(detail.endTime)}</p>
                 </div>
+                <div className="rounded-xl border border-gray-100 bg-gray-50/70 px-3 py-1.5">
+                  <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                    <Clock className="h-3 w-3" /> Total Time
+                  </p>
+                  <p className="text-xs font-bold text-gray-900">{fmtTotalTime(detail.startTime, detail.endTime)}</p>
+                </div>
               </div>
-              <DownloadMenu onExport={handleExport} />
+              <DownloadMenu onExport={handleExport} formats={["CSV", "PDF"]} />
             </div>
 
             <div className="flex items-center gap-2">
-              {initialTab === "items" && <button
+              {/* Both tabs, whichever way the popup was opened — the CSV's item list AND its activities
+                  live behind the one View button. */}
+              <button
                 type="button"
                 onClick={() => setDetailTab("items")}
                 className={
@@ -1036,8 +1154,8 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
                 }
               >
                 Item-wise Total ({detail.itemTotals.length})
-              </button>}
-              {initialTab === "activities" && <button
+              </button>
+              <button
                 type="button"
                 onClick={() => setDetailTab("activities")}
                 className={
@@ -1047,39 +1165,10 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
                 }
               >
                 Activity Report ({detail.activities.length})
-              </button>}
+              </button>
             </div>
 
-            {detailTab === "items" ? (
-              <DataTable<ItemTotal>
-                className="space-y-0"
-                columns={summaryColumnsForDetail}
-                data={detail.itemTotals}
-                getRowId={(row) => row.barcode}
-                emptyState="No items"
-                enableZebraStripes
-                enableTotalsRow
-                totalsLabel="TOTAL"
-                totalsLabelColumnId="itemName"
-                enableColumnResizing
-                isStickyHeader
-                maxHeight="16rem"
-                headerClassName={REPORT_TABLE_HEADER_CLASS}
-              />
-            ) : (
-              <DataTable<Activity>
-                className="space-y-0"
-                columns={activitiesColumnsForDetail}
-                data={detail.activities}
-                getRowId={(_row, index) => String(index)}
-                emptyState="No scans yet"
-                enableZebraStripes
-                enableColumnResizing
-                isStickyHeader
-                maxHeight="16rem"
-                headerClassName={REPORT_TABLE_HEADER_CLASS}
-              />
-            )}
+            <DetailLists detailTab={detailTab} itemTotals={detail.itemTotals} activities={detail.activities} maxHeight="16rem" />
           </div>
         ) : null}
       </DialogContent>
@@ -1087,31 +1176,39 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
   );
 }
 
-function ReportRowCards({ rows, tab, onRowClick }: { rows: ReportRow[]; tab: Tab; onRowClick: (row: ReportRow) => void }) {
+function ReportRowCards({ rows, tab, onOpen }: { rows: ReportRow[]; tab: Tab; onOpen: (row: ReportRow) => void }) {
   if (rows.length === 0) return <p className="py-10 text-center text-sm text-gray-400">No activity for this date</p>;
   const identityLabel = tab === "unloading" ? "Vehicle" : tab === "loading" ? "Slip / Order" : "CSV / Order";
   return (
     <div className="space-y-2 p-3">
       {rows.map((row, index) => (
-        <button
+        <div
           key={`${row.key}-${index}`}
-          type="button"
-          onClick={() => onRowClick(row)}
-          className="block w-full rounded-lg border border-gray-200 bg-white p-3 text-left shadow-sm transition-colors hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5"
+          className="block w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-left shadow-sm"
         >
           <div className="flex min-w-0 items-center justify-between gap-3">
-            <span className="min-w-0 truncate font-semibold text-[#001d6e]">{row.label}</span>
-            <span className="shrink-0 text-[11px] text-gray-500">{identityLabel}</span>
+            <div className="min-w-0">
+              <span className="block truncate text-sm font-bold text-[#001d6e]">{row.label}</span>
+              <span className="text-[11px] leading-none text-gray-500">{identityLabel}</span>
+            </div>
+            {row.key !== "—" && (
+              <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1 px-2.5 text-xs" onClick={() => onOpen(row)}>
+                <Eye className="h-3.5 w-3.5" /> View
+              </Button>
+            )}
           </div>
-          <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-600">
-            <span>Plant: <strong className="text-gray-900">{row.plant ?? "—"}</strong></span>
-            <span>Orders: <strong className="text-gray-900">{row.orderCount}</strong></span>
-            <span>Expected: <strong className="text-gray-900">{row.expectedQty.toLocaleString()}</strong></span>
-            <span>Received: <strong className="text-emerald-600">{row.actualQty.toLocaleString()}</strong></span>
-            <span>Events: <strong className="text-gray-900">{row.eventCount}</strong></span>
-            <span>Start: <strong className="text-gray-900">{fmtIST(row.startTime)}</strong></span>
+          <div className="mt-1.5 grid grid-cols-3 items-center gap-x-2 gap-y-1 text-xs text-gray-600">
+            <span className="flex items-center">{row.plant ? <PlantBadge plant={row.plant} className="px-1.5 py-0 text-[11px]" /> : <strong className="text-gray-900">—</strong>}</span>
+            <span>Orders: <strong className="text-sm text-gray-900">{row.orderCount}</strong></span>
+            <span>Events: <strong className="text-sm text-gray-900">{row.eventCount}</strong></span>
+            <span>Expected: <strong className="text-sm text-gray-900">{row.expectedQty.toLocaleString()}</strong></span>
+            <span className="col-span-2">Received: <strong className="text-sm text-emerald-600">{row.actualQty.toLocaleString()}</strong></span>
+            <span className="col-span-3 flex flex-wrap gap-x-4">
+              <span>Start: <strong className="text-gray-900">{fmtIST(row.startTime)}</strong></span>
+              <span>End: <strong className="text-gray-900">{fmtIST(row.endTime)}</strong></span>
+            </span>
           </div>
-        </button>
+        </div>
       ))}
     </div>
   );
@@ -1121,7 +1218,7 @@ function StatBox({ label, value, text, title }: { label: string; value?: number;
   return (
     <div className="rounded-lg border border-gray-100 bg-gray-50/70 px-2.5 py-1.5">
       <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
-      <p title={title} className={`mt-0.5 font-bold tabular-nums text-gray-900 ${text !== undefined ? "whitespace-nowrap text-xs" : "truncate text-base"}`}>
+      <p title={title} className={`mt-0.5 font-bold tabular-nums text-gray-900 ${text !== undefined ? "text-xs" : "whitespace-nowrap text-base"}`}>
         {text ?? value!.toLocaleString()}
       </p>
     </div>

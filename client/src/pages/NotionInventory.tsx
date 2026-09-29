@@ -68,6 +68,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Product } from "@shared/schema";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { ZoomableImg } from "@/components/ProductPhoto";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 type SyncStatus = {
@@ -1007,9 +1008,10 @@ export default function NotionInventory() {
                               {/* Both pictures are cached files, so the cell shows the thumbnail
                                   rather than the filename the column actually holds. */}
                               {(col.key === "productImage" || col.key === "boxImage") && !isEmpty ? (
-                                <img
+                                <ZoomableImg
                                   src={`/api/products/${col.key === "boxImage" ? "box-image-by-id" : "image-by-id"}?id=${product.id}`}
-                                  alt=""
+                                  alt={product.name}
+                                  title={product.name}
                                   className="h-8 w-8 rounded border border-gray-200 bg-gray-50 object-contain"
                                   onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
                                 />

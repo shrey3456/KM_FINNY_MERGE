@@ -15,6 +15,7 @@ import { type FilterableColumn, type FilterCondition, type FilterOption, matchAl
 import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
+import { PageScrollButtons } from "@/components/PageScrollButtons";
 import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -61,6 +62,29 @@ type ProformaSuggestion = {
   id: number; orderNumber: string; partyName: string; plant: string | null;
   orderDate: string | null; vehicleNumber: string | null;
 };
+// Sr. No. compare: same prefix letters, then the number by value (so C2 sorts before C10);
+// items without one go last.
+function compareSrNo(a: string | null | undefined, b: string | null | undefined): number {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+}
+
+// Small product picture beside an item name; renders nothing (no gap) when the product has none.
+function ItemRowThumb({ name }: { name: string | null }) {
+  const [failed, setFailed] = useState(false);
+  if (!name || failed) return null;
+  return (
+    <ProductPhoto
+      name={name}
+      zoomable
+      onLoadState={setFailed}
+      className="h-10 w-10 shrink-0 rounded border border-gray-200 bg-white object-contain"
+    />
+  );
+}
+
 type ProformaItem = {
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
   srNo: string | null; volumeInCuFt: string | null;
@@ -707,7 +731,12 @@ export default function LoadOperation() {
   // dialog — same intermediate step Load Operations puts between finding a slip and actually
   // starting work on it. Only the user-driven search/scan path goes through it (confirmRef);
   // resuming a remembered order or opening one from the landing list skips straight in.
-  type SlipLookup = { slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number };
+  // sortSlipRequired/sortSlipExists: the plant's "require Sort Slip first" setting and whether
+  // this order already has one — sortSlipExists is always true when the plant doesn't require it.
+  type SlipLookup = {
+    slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number;
+    sortSlipRequired?: boolean; sortSlipExists?: boolean;
+  };
   const confirmRef = useRef(false);
   const [pendingSlip, setPendingSlip] = useState<SlipLookup | null>(null);
   // The STV chosen in the Create Operation dialog. Deliberately NOT pre-filled from the
@@ -776,6 +805,18 @@ export default function LoadOperation() {
           toast({
             title: "Load operation already exists",
             description: `#${data.slip.orderNumber} was already created — opened the existing load.`,
+          });
+          return;
+        }
+        // Plant Management's "require Sort Slip first" — refused before the Create Operation
+        // dialog ever opens, not as a warning banner inside it. Opening a whole vehicle/STV/items
+        // dialog just to tell the operator "no, go create a Sort Slip first" was the wrong shape
+        // for this: it looked like Create Operation was in progress when it never could succeed.
+        if (data.sortSlipRequired && !data.sortSlipExists) {
+          toast({
+            title: "Sort Slip required first",
+            description: `This plant requires a Sort Slip before Create Operation. Create one for order ${data.slip.orderNumber} on the Sort Slip page first.`,
+            variant: "destructive",
           });
           return;
         }
@@ -1024,6 +1065,11 @@ export default function LoadOperation() {
   // Over capacity doesn't block the load outright (a part-load onto a smaller vehicle is a real
   // thing to do) — it has to be ticked deliberately, so nobody starts one by habit.
   const [capacityAck, setCapacityAck] = useState(false);
+  // Plant Management's "require Sort Slip first" setting — blocks Create Operation outright
+  // (unlike the capacity warning above, there's no "carry on anyway" for this one; the server
+  // refuses it the same way if this is bypassed somehow). sortSlipExists defaults true so a
+  // plant with the setting off (the common case) never shows this warning.
+  const pendingMissingSortSlip = !!pendingSlip?.sortSlipRequired && !pendingSlip?.sortSlipExists;
 
   const vehicleSuggestionsQuery = useQuery<{ results: VehicleSuggestion[] }>({
     queryKey: ["/api/loading/vehicles/search", debouncedVehicleSearch],
@@ -1867,7 +1913,14 @@ export default function LoadOperation() {
       if (!hay.includes(q)) return false;
     }
     return true;
-  }).sort((a, b) => (itemScanSeqRef.current.byId.get(b.id) ?? 0) - (itemScanSeqRef.current.byId.get(a.id) ?? 0));
+  }).sort((a, b) => {
+    // "All" follows the proforma slip's own Sr. No. (C001, C002, …; numeric-aware so 2 < 10), so the
+    // list reads in slip order. Pallet / Loose keep the newest-scanned-first order below.
+    if (itemUnitTab === "all") {
+      return compareSrNo(a.srNo, b.srNo) || a.id - b.id;
+    }
+    return (itemScanSeqRef.current.byId.get(b.id) ?? 0) - (itemScanSeqRef.current.byId.get(a.id) ?? 0);
+  });
 
   // Items table — same shared DataTable (navy sticky header, resizable/sortable columns, totals
   // row) Order Scan and Unloading's own items tables use. Item Name and Barcode/SAP are merged
@@ -1918,8 +1971,15 @@ export default function LoadOperation() {
     );
   };
 
-  const loadingItemColumns: DataTableColumn<ProformaItem>[] = [
-    {
+  // "All" shows the slip's Sr. No.; Pallet and Loose keep the per-item progress ring.
+  const srColumn: DataTableColumn<ProformaItem> = {
+    id: "srNo", header: "Sr", align: "center", width: 56, minWidth: 48, fixedWidth: true, sortable: true, totalable: false,
+    accessor: (row) => row.srNo ?? "",
+    cellClassName: "align-top px-1 text-xs font-semibold tabular-nums text-gray-600",
+    headerClassName: "px-1",
+    render: (row) => row.srNo || "—",
+  };
+  const progressColumn: DataTableColumn<ProformaItem> = {
       // Same ring pattern as Scan Order/Master View's own state column: one aggregate "% loaded"
       // ring in the header, each row gets its own ring showing that item's own % loaded.
       id: "pct",
@@ -1941,7 +2001,9 @@ export default function LoadOperation() {
         const pct = row.expected > 0 ? Math.min(100, Math.round((row.loaded / row.expected) * 100)) : (row.loaded > 0 ? 100 : 0);
         return <CircularProgress percent={pct} size={20} strokeWidth={2} />;
       },
-    },
+  };
+  const loadingItemColumns: DataTableColumn<ProformaItem>[] = [
+    itemUnitTab === "all" ? srColumn : progressColumn,
     {
       // minWidth kept low (not the ~180 a stacked name+barcode+pallet cell would suggest) so the
       // resize grip can actually shrink this column — DataTable floors a drag at minWidth, and a
@@ -1955,15 +2017,19 @@ export default function LoadOperation() {
       cellClassName: "whitespace-normal break-words text-left text-gray-700 text-xs sm:text-xs leading-tight",
       totalable: false,
       render: (row) => (
-        <>
-          <span className="font-medium text-gray-900">{row.itemName ?? "—"}</span>
-          {(row.stockAvailable ?? 0) <= 0 && <span className="ml-1.5 rounded-full bg-red-100 px-1 py-px text-[8px] font-bold text-red-700">NO STOCK</span>}
-          {row.isComplete && <CheckCircle2 className="ml-1.5 inline h-3 w-3 text-emerald-600" />}
-          <p className="font-mono text-[10px] leading-tight text-gray-400">
-            {row.barcode || "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
-          </p>
-          {(row.itemsPerPallet ?? 0) > 0 && <p className="text-[10px] font-semibold leading-tight text-gray-500">{row.itemsPerPallet} per pallet</p>}
-        </>
+        <div className="flex items-start gap-2">
+          {/* Product picture — tap it to see it enlarged (the row itself expands the item history). */}
+          <ItemRowThumb name={row.itemName} />
+          <div className="min-w-0">
+            <span className="font-medium text-gray-900">{row.itemName ?? "—"}</span>
+            {(row.stockAvailable ?? 0) <= 0 && <span className="ml-1.5 rounded-full bg-red-100 px-1 py-px text-[8px] font-bold text-red-700">NO STOCK</span>}
+            {row.isComplete && <CheckCircle2 className="ml-1.5 inline h-3 w-3 text-emerald-600" />}
+            <p className="font-mono text-[10px] leading-tight text-gray-400">
+              {row.barcode || "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+            </p>
+            {(row.itemsPerPallet ?? 0) > 0 && <p className="text-[10px] font-semibold leading-tight text-gray-500">{row.itemsPerPallet} per pallet</p>}
+          </div>
+        </div>
       ),
     },
     {
@@ -2164,6 +2230,7 @@ export default function LoadOperation() {
              wall-mounted station can rotate the landing list too, not just an open order. ──── */}
         {view === "list" && (
           <div className={`space-y-6 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            <PageScrollButtons />
             <button
               onClick={rotateNext}
               className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -2992,6 +3059,7 @@ export default function LoadOperation() {
                   physically mounted at an angle next to the loading bay. Fixed positioning
                   inside the (transform:rotate) wrapper above keeps it pinned to a natural
                   on-screen corner from the viewer's rotated perspective. */}
+              <PageScrollButtons />
               <button
                 onClick={rotateNext}
                 className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
@@ -3729,6 +3797,12 @@ export default function LoadOperation() {
                     Status is already Loading — not able to load.
                   </div>
                 )}
+                {pendingMissingSortSlip && !pendingSlipAlreadyLoading && (
+                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    <span className="font-semibold">This plant requires a Sort Slip before Create Operation.</span>{" "}
+                    Create one for order {pendingSlip?.slip?.orderNumber} on the Sort Slip page first.
+                  </div>
+                )}
                 {pendingOverCapacity && !pendingSlipAlreadyLoading && (
                   <div className="mt-3 space-y-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
                     <p>
@@ -3893,7 +3967,7 @@ export default function LoadOperation() {
                 <Button
                   variant="default"
                   className="w-full bg-[#001d6e] hover:bg-[#001d6e]/90"
-                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading || !pendingStv || (pendingOverCapacity && !capacityAck)}
+                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading || pendingMissingSortSlip || !pendingStv || (pendingOverCapacity && !capacityAck)}
                   onClick={() => { if (pendingSlip && pendingStv) startLoadMutation.mutate({ orderNumber: pendingSlip.slip.orderNumber, stv: pendingStv }); }}
                 >
                   {startLoadMutation.isPending ? (
@@ -4016,6 +4090,8 @@ export default function LoadOperation() {
                 <ProductPhoto
                   productId={extraTarget.id}
                   className="max-h-56 w-full object-contain sm:max-h-64"
+                  name={extraTarget.name}
+                  zoomable
                 />
               </div>
             )}

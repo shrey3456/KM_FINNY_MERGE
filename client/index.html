@@ -5,41 +5,46 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>KM Finny</title>
     <meta name="description" content="KM Finny inventory management system" />
-    <meta name="theme-color" content="#001d6e" />
+    <!-- White, matching manifest.json's theme_color/background_color — Android's own splash
+         screen/adaptive-icon compositing was filling behind the logo with the OLD navy value
+         here, which is the background the "loading" screen showed; this is what actually
+         controls that, not the icon files themselves. -->
+    <meta name="theme-color" content="#ffffff" />
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
     <meta name="msapplication-config" content="none" />
-    <meta name="theme-color" content="#001d6e" />
-    
-    <!-- Ensure manifest is properly loaded -->
-    <link rel="manifest" href="/manifest-final.json" crossorigin="use-credentials" />
-    
-    <!-- PWA icons -->
+
+    <!-- The one canonical manifest — never rename this file or its URL again. Android ties an
+         installed PWA's identity to this exact URL (plus the manifest's own "id" field); renaming
+         it (manifest-final.json, manifest-new.json, ... — all now deleted) is what previously made
+         every deploy look like a brand-new app that needed reinstalling, wiping the home-screen
+         icon each time along with it. -->
+    <link rel="manifest" href="/manifest.json" crossorigin="use-credentials" />
+
+    <!-- PWA icons — same rule: keep these filenames stable, replace their contents in place. -->
     <link rel="icon" href="/favicon-new-v2.ico" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-new-v2.ico" />
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-new-v2.ico" />
     <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192-v2.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512-v2.png" />
     <link rel="apple-touch-startup-image" href="/icons/icon-512-v2.png" />
-    
+
     <!-- iOS specific PWA meta tags -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="KM Finny" />
-    
+
     <!-- Prevent telephone number detection -->
     <meta name="format-detection" content="telephone=no" />
-    
+
     <!-- Ensure proper Android display -->
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="application-name" content="KM Finny" />
-    
+
     <!-- Add splash screen for Android -->
-    <meta name="msapplication-TileImage" content="/icons/icon-512-maskable.png" />
-    <meta name="msapplication-TileColor" content="#001d6e" />
+    <meta name="msapplication-TileImage" content="/icons/icon-512-maskable-v2.png" />
+    <meta name="msapplication-TileColor" content="#ffffff" />
     
     <!-- Fix for white screen on Android -->
     <style>

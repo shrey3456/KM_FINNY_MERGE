@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 
 // The one photo shown for a product across the scanning pages (Scan Operations, Loading,
 // Unloading) — box shot preferred, product shot as the fallback, in that order, then nothing.
@@ -24,8 +25,45 @@ function urlFor(source: Source, productId: number | null | undefined, name: stri
   }
 }
 
+// Click-to-enlarge popup for a product picture — the small thumbnails/cards are hard to read on a
+// phone or a wall-mounted screen, so tapping one opens it big in a dialog.
+export function ImageLightbox({ src, title, open, onClose }: { src: string; title?: string | null; open: boolean; onClose: () => void }) {
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-3xl flex-col items-center gap-3 overflow-hidden p-4">
+        <DialogHeader className="w-full text-left">
+          <DialogTitle className="break-words pr-6 text-base text-[#001d6e]">{title || "Product image"}</DialogTitle>
+          <DialogDescription className="sr-only">Enlarged product image</DialogDescription>
+        </DialogHeader>
+        <img src={src} alt={title ?? ""} className="max-h-[75vh] w-full min-h-0 rounded-md bg-gray-50 object-contain" />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// A plain <img> that opens in the lightbox when clicked (used where the image URL is already known).
+export function ZoomableImg({ src, alt = "", title, className, style, onError }: {
+  src: string; alt?: string; title?: string | null; className?: string; style?: React.CSSProperties; onError?: React.ReactEventHandler<HTMLImageElement>;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        className={`${className ?? ""} cursor-zoom-in`}
+        style={style}
+        onError={onError}
+        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+      />
+      <ImageLightbox src={src} title={title ?? alt} open={open} onClose={() => setOpen(false)} />
+    </>
+  );
+}
+
 export function ProductPhoto({
-  productId, name, className, style, alt = "", onLoadState,
+  productId, name, className, style, alt = "", onLoadState, zoomable = false,
 }: {
   productId?: number | null;
   name?: string | null;
@@ -36,8 +74,11 @@ export function ProductPhoto({
    *  (e.g. the caller wants to reflow layout instead of leaving a blank gap — see the callers'
    *  own former imageFailed state, which this replaces). */
   onLoadState?: (failed: boolean) => void;
+  /** Clicking the picture opens it enlarged in a popup. */
+  zoomable?: boolean;
 }) {
   const [sourceIndex, setSourceIndex] = useState(0);
+  const [zoomOpen, setZoomOpen] = useState(false);
 
   // A different product (id or name changed) starts the cascade over from the top. Straight to
   // "failed" when there's nothing at all to try (neither an id nor a name given) — otherwise the
@@ -57,18 +98,22 @@ export function ProductPhoto({
   const src = urlFor(SOURCES[index], productId, name)!;
 
   return (
-    <img
-      key={`${productId ?? ""}:${name ?? ""}`}
-      src={src}
-      alt={alt}
-      loading="lazy"
-      className={className}
-      style={style}
-      onError={() => {
-        const next = index + 1;
-        if (next >= SOURCES.length) onLoadState?.(true);
-        setSourceIndex(next);
-      }}
-    />
+    <>
+      <img
+        key={`${productId ?? ""}:${name ?? ""}`}
+        src={src}
+        alt={alt}
+        loading="lazy"
+        className={zoomable ? `${className ?? ""} cursor-zoom-in` : className}
+        style={style}
+        onClick={zoomable ? (e) => { e.stopPropagation(); setZoomOpen(true); } : undefined}
+        onError={() => {
+          const next = index + 1;
+          if (next >= SOURCES.length) onLoadState?.(true);
+          setSourceIndex(next);
+        }}
+      />
+      {zoomable && <ImageLightbox src={src} title={name ?? alt} open={zoomOpen} onClose={() => setZoomOpen(false)} />}
+    </>
   );
 }

@@ -1,15 +1,19 @@
 // Service Worker for KM Finny - Enhanced for Android Compatibility
-const CACHE_NAME = 'km-finny-v7'; // Update cache version with every significant change
-const DATA_CACHE_NAME = 'km-finny-data-v7'; // Separate cache for API data
-const APP_SHELL_CACHE_NAME = 'km-finny-shell-v7'; // Cache for application shell
+//
+// IMPORTANT: this file's own URL (/sw.js) must never be renamed — same rule as manifest.json.
+// Bump CACHE_NAME (etc.) on any deploy that should force old clients to drop their cached shell;
+// that's the only thing that needs to change here from one deploy to the next.
+const CACHE_NAME = 'km-finny-v8'; // Update cache version with every significant change
+const DATA_CACHE_NAME = 'km-finny-data-v8'; // Separate cache for API data
+const APP_SHELL_CACHE_NAME = 'km-finny-shell-v8'; // Cache for application shell
 
 // Core application shell files to cache for offline functionality
 const APP_SHELL_FILES = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/assets/icon-512-maskable.png',
-  '/assets/finny-logo.png'
+  '/icons/icon-512-maskable-v2.png',
+  '/icons/icon-192-v2.png'
 ];
 
 // Dynamically cache these file types when they're used

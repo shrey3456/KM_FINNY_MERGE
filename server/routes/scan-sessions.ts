@@ -1242,7 +1242,15 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
         `SELECT
            COUNT(*) AS total,
            COALESCE(SUM("totalQty") FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')), 0)  AS "totalBoxes",
-           COALESCE(SUM(pallets)    FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')), 0)  AS "totalPallets",
+           -- Fractional (qty ÷ itemsPerPallet), not the row's own floor()'d "pallets" column —
+           -- that column means "whole physical pallets in THIS ONE scan" (a real, separate fact
+           -- used for the pallets/loose breakdown elsewhere), which is legitimately 0 for a scan
+           -- smaller than one pallet even though it's still, say, 0.07 of a pallet. Summing the
+           -- floored figure made a handful of small scans silently disappear from this total —
+           -- matches the fractional convention every other pallet total in the app already uses
+           -- (Scan Operations' own Expected/Received/Remaining tiles, Sort Slip, etc.).
+           COALESCE(SUM(CASE WHEN "itemsPerPallet" > 0 THEN "totalQty"::numeric / "itemsPerPallet" ELSE 0 END)
+             FILTER (WHERE barcode <> 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')), 0)  AS "totalPallets",
            COUNT(*) FILTER (WHERE "isExtra" = true AND barcode <> 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')) AS "extraCount",
            COALESCE(SUM("totalQty") FILTER (WHERE barcode = 'EMPTY_BOX' AND "sourceKind" NOT IN ('stock', 'sorting')), 0)   AS "emptyBoxCount",
            -- Stock corrections (a delete, a void or a manual Adjust writes a signed ledger row)
@@ -1250,7 +1258,8 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
            -- below what was actually scanned — a day with one big correction could even read as
            -- a minus. Counted the same way the tiles above already count: scans only.
            COALESCE(SUM("totalQty") FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" NOT IN ('stock', 'sorting')), 0) AS "qtyTotal",
-           COALESCE(SUM(pallets)    FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" NOT IN ('stock', 'sorting')), 0) AS "palletsTotal"
+           COALESCE(SUM(CASE WHEN "itemsPerPallet" > 0 THEN "totalQty"::numeric / "itemsPerPallet" ELSE 0 END)
+             FILTER (WHERE NOT COALESCE(voided, false) AND "sourceKind" NOT IN ('stock', 'sorting')), 0) AS "palletsTotal"
          ${baseFrom}`,
         params,
       ),

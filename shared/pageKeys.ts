@@ -16,6 +16,7 @@ export const CONTROLLABLE_PAGES = [
   { key: "daily-reports", label: "Reports" },
   { key: "scan-viewer", label: "Overall Scan Ops" },
   { key: "scan-history", label: "Scan History" },
+  { key: "adjust-exchange", label: "Adjust Exchange Extra" },
   { key: "overall-stock", label: "Stock Overview" },
   // SALES
   { key: "dispatch", label: "Dispatch" },

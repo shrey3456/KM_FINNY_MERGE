@@ -10,6 +10,7 @@ import ScanOrder from "@/pages/Scanning/Scan";
 import ScanViewer from "@/pages/ScanViewer";
 import SortSlips from "@/pages/SortSlip/SortSlips";
 import DailyReports from "@/pages/DailyReports";
+import AdjustExchange from "@/pages/AdjustExchange";
 import NotionInventory from "@/pages/NotionInventory";
 import Reports from "@/pages/Scanning/Reports.tsx";
 import Users from "@/pages/Users";
@@ -273,6 +274,7 @@ function Router() {
         <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />
         <Route path="/stock-sheets" component={StockSheets} />
         <ProtectedRoute path="/scan-history" component={Reports} requiredPage="scan-history" />
+        <ProtectedRoute path="/adjust-exchange" component={AdjustExchange} requiredPage="adjust-exchange" />
         {/* /reports was the old path for this page — kept as a redirect so any existing
             bookmark/browser history still lands somewhere instead of 404ing. */}
         <Route path="/reports"><Redirect to="/scan-history" /></Route>

@@ -547,25 +547,28 @@ router.post('/plants', async (req: Request, res: Response) => {
 
     const existing = await storage.getPlantByName(upperName);
 
+    // Every toggle the Plant Management form has, not just the two this used to pass through —
+    // state/isAutoCompleteEnabled/isAutoScanEnabled were silently dropped here (the form showed a
+    // success toast, but the value never reached the database), and requireSortSlipFirst would
+    // have hit the exact same bug.
+    const commonFields = {
+      bgColor: payload.bgColor,
+      textColor: payload.textColor,
+      borderColor: payload.borderColor,
+      state: payload.state || null,
+      isLockingEnabled: payload.isLockingEnabled !== undefined ? payload.isLockingEnabled : true,
+      isSplitPagesEnabled: payload.isSplitPagesEnabled !== undefined ? payload.isSplitPagesEnabled : false,
+      isAutoCompleteEnabled: payload.isAutoCompleteEnabled !== undefined ? payload.isAutoCompleteEnabled : false,
+      isAutoScanEnabled: payload.isAutoScanEnabled !== undefined ? payload.isAutoScanEnabled : false,
+      requireSortSlipFirst: payload.requireSortSlipFirst !== undefined ? payload.requireSortSlipFirst : false,
+    };
+
     let saved;
     if (existing) {
-      saved = await storage.updatePlant(existing.id, {
-        bgColor: payload.bgColor,
-        textColor: payload.textColor,
-        borderColor: payload.borderColor,
-        isLockingEnabled: payload.isLockingEnabled !== undefined ? payload.isLockingEnabled : true,
-        isSplitPagesEnabled: payload.isSplitPagesEnabled !== undefined ? payload.isSplitPagesEnabled : false,
-      });
+      saved = await storage.updatePlant(existing.id, commonFields);
       console.log('✅ Plant updated:', saved);
     } else {
-      saved = await storage.createPlant({
-        name: upperName,
-        bgColor: payload.bgColor,
-        textColor: payload.textColor,
-        borderColor: payload.borderColor,
-        isLockingEnabled: payload.isLockingEnabled !== undefined ? payload.isLockingEnabled : true,
-        isSplitPagesEnabled: payload.isSplitPagesEnabled !== undefined ? payload.isSplitPagesEnabled : false,
-      });
+      saved = await storage.createPlant({ name: upperName, ...commonFields });
       console.log('✅ Plant created:', saved);
     }
 
@@ -596,8 +599,12 @@ router.put('/plants/:id', async (req: Request, res: Response) => {
       bgColor: payload.bgColor,
       textColor: payload.textColor,
       borderColor: payload.borderColor,
+      state: payload.state || null,
       isLockingEnabled: payload.isLockingEnabled !== undefined ? payload.isLockingEnabled : true,
       isSplitPagesEnabled: payload.isSplitPagesEnabled !== undefined ? payload.isSplitPagesEnabled : false,
+      isAutoCompleteEnabled: payload.isAutoCompleteEnabled !== undefined ? payload.isAutoCompleteEnabled : false,
+      isAutoScanEnabled: payload.isAutoScanEnabled !== undefined ? payload.isAutoScanEnabled : false,
+      requireSortSlipFirst: payload.requireSortSlipFirst !== undefined ? payload.requireSortSlipFirst : false,
     });
 
     console.log('✅ Plant updated via PUT:', updated);

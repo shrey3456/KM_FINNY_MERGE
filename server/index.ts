@@ -87,6 +87,10 @@ app.use((req, res, next) => {
       ADD COLUMN IF NOT EXISTS is_auto_scan_enabled BOOLEAN DEFAULT false
     `);
     await pool.query(`
+      ALTER TABLE plants
+      ADD COLUMN IF NOT EXISTS require_sort_slip_first BOOLEAN DEFAULT false
+    `);
+    await pool.query(`
       ALTER TABLE order_scan_events
       ADD COLUMN IF NOT EXISTS credited_qty INTEGER DEFAULT 0
     `);
@@ -324,6 +328,25 @@ app.use((req, res, next) => {
         transferred_at TIMESTAMP DEFAULT NOW(),
         reason TEXT
       )
+    `);
+    // managed_by_code/name — the supervisor who currently owns a slip's assignment (see the
+    // column's comment in shared/schema.ts). Backfilled once from what ownership already meant
+    // before this column existed (the active assignee's assigned_by_code, or the slip's own
+    // creator when nobody's currently assigned) so existing slips don't silently change hands the
+    // moment this ships.
+    await pool.query(`ALTER TABLE sort_slips ADD COLUMN IF NOT EXISTS managed_by_code TEXT REFERENCES users(user_code)`);
+    await pool.query(`ALTER TABLE sort_slips ADD COLUMN IF NOT EXISTS managed_by_name TEXT`);
+    await pool.query(`
+      UPDATE sort_slips s SET
+        managed_by_code = COALESCE(
+          (SELECT a.assigned_by_code FROM sort_slip_assignees a WHERE a.sort_slip_id = s.id AND a.removed_at IS NULL LIMIT 1),
+          s.created_by_code
+        ),
+        managed_by_name = COALESCE(
+          (SELECT a.assigned_by_name FROM sort_slip_assignees a WHERE a.sort_slip_id = s.id AND a.removed_at IS NULL LIMIT 1),
+          s.created_by_name
+        )
+      WHERE s.managed_by_code IS NULL
     `);
     // Unloading (server/routes/unloading.ts) — vehicle-wise receiving. See unloadImportSessions'
     // comment in shared/schema.ts: FIFO grouping like order_import_sessions, but scoped one level

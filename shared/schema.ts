@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, jsonb, customType } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -486,6 +486,14 @@ export const sortSlips = pgTable("sort_slips", {
   completedAt: timestamp("completed_at"),
   completedByCode: text("completed_by_code"),
   completedByName: text("completed_by_name"),
+  // The supervisor who currently owns this slip's assignment — the one allowed to Pause it or
+  // Transfer its loader (see canManageAssignment in server/routes/sort-slips.ts). Starts as
+  // whoever created the slip; moves to whoever does a loader Transfer (that IS them taking it
+  // over); and can also move directly, loader untouched, via POST .../transfer-supervisor — the
+  // "hand this off to another supervisor" action, for when the loader should keep working but a
+  // different supervisor should be the one managing it.
+  managedByCode: text("managed_by_code"),
+  managedByName: text("managed_by_name"),
   notes: text("notes"),
 });
 
@@ -929,13 +937,19 @@ export const plants = pgTable("plants", {
   // dialog. OFF by default → every scan opens the confirm dialog. See _resolveOsScan in
   // client/src/pages/Scanning/Scan.tsx.
   isAutoScanEnabled: boolean("is_auto_scan_enabled").default(false),
+  // Loading: when ON, Create Operation (server/routes/loading.ts's POST .../start) refuses to
+  // start a load unless a Sort Slip already exists for that order number — any Sort Slip, not
+  // necessarily a completed one; see the check next to isAlreadyLoading there. OFF by default so
+  // existing plants keep today's behavior (Create Operation needs no Sort Slip at all) until an
+  // admin opts in on the Plant Management page.
+  requireSortSlipFirst: boolean("require_sort_slip_first").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const insertPlantSchema = createInsertSchema(plants).pick({
   name: true, bgColor: true, textColor: true, borderColor: true, state: true,
   isLockingEnabled: true, isSplitPagesEnabled: true, isAutoCompleteEnabled: true,
-  isAutoScanEnabled: true,
+  isAutoScanEnabled: true, requireSortSlipFirst: true,
 });
 
 // STV codes associated with a plant (e.g. for truck/dispatch routing)
@@ -1098,6 +1112,22 @@ export type InsertVoucherPrefix = z.infer<typeof insertVoucherPrefixSchema>;
 // Used by : Order Import page (/order-import, admin only).
 // ============================================================================
 
+// A naive `timestamp` column whose digits are IST wall-clock time. Every writer of these columns
+// (raw pg with a JS Date on an IST server, or now() under the Asia/Calcutta session TimeZone)
+// stores India time digits, but Drizzle's plain timestamp() reads naive digits as UTC — so a scan
+// activated at 6:56 pm IST came back as 12:26 am next day (+5:30). This reads them as IST, so
+// the value is the correct instant, and writes them back the same way.
+const istTimestamp = customType<{ data: Date; driverData: string }>({
+  dataType() { return "timestamp"; },
+  fromDriver(value: string): Date {
+    return new Date(`${String(value).replace(" ", "T")}+05:30`);
+  },
+  toDriver(value: Date): string {
+    const ist = new Date(value.getTime() + 5.5 * 3600 * 1000).toISOString(); // UTC fields now hold IST wall-clock
+    return ist.replace("T", " ").replace("Z", "");
+  },
+});
+
 export const orderImportSessions = pgTable("order_import_sessions", {
   id: serial("id").primaryKey(),
   plant: text("plant").notNull(),
@@ -1108,8 +1138,8 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   // Scan tracking
   scanStatus: text("scan_status").default("available"), // available | active | completed
   scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
-  scanActivatedAt: timestamp("scan_activated_at"),
-  scanCompletedAt: timestamp("scan_completed_at"),
+  scanActivatedAt: istTimestamp("scan_activated_at"),
+  scanCompletedAt: istTimestamp("scan_completed_at"),
   // Who completed this part: the user who pressed Complete, the scanner whose scan finished it
   // (Auto Complete), or 'system' when it closed with no person involved. Null for parts completed
   // before this was recorded.
