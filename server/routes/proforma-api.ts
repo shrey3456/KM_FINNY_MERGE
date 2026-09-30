@@ -3,7 +3,6 @@ import { storage } from '../storage';
 import { Client } from '@notionhq/client';
 import type { Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
-import { plants, insertPlantSchema } from '../../shared/schema';
 import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
 
 const router = Router();
@@ -526,110 +525,6 @@ router.get('/plants/by-name/:name', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Get plant by name error:', error);
     return res.status(500).json({ success: false, message: 'Failed to fetch plant' });
-  }
-});
-
-// Create/Update a Plant (admin/super-admin only)
-router.post('/plants', async (req: Request, res: Response) => {
-  try {
-    const role = String((req as any)?.user?.role ?? '').toLowerCase();
-    const allowed = ['admin','superadmin','super admin','super_admin','super-admin'];
-    if (!allowed.includes(role)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
-
-    console.log('💾 Plant POST payload:', req.body); // DEBUG
-
-    const payload = insertPlantSchema.parse(req.body);
-    const upperName = String(payload.name).toUpperCase();
-
-    console.log('🔍 Parsed payload:', payload); // DEBUG
-
-    const existing = await storage.getPlantByName(upperName);
-
-    // Every toggle the Plant Management form has, not just the two this used to pass through —
-    // state/isAutoCompleteEnabled/isAutoScanEnabled were silently dropped here (the form showed a
-    // success toast, but the value never reached the database), and requireSortSlipFirst would
-    // have hit the exact same bug.
-    const commonFields = {
-      bgColor: payload.bgColor,
-      textColor: payload.textColor,
-      borderColor: payload.borderColor,
-      state: payload.state || null,
-      isLockingEnabled: payload.isLockingEnabled !== undefined ? payload.isLockingEnabled : true,
-      isSplitPagesEnabled: payload.isSplitPagesEnabled !== undefined ? payload.isSplitPagesEnabled : false,
-      isAutoCompleteEnabled: payload.isAutoCompleteEnabled !== undefined ? payload.isAutoCompleteEnabled : false,
-      isAutoScanEnabled: payload.isAutoScanEnabled !== undefined ? payload.isAutoScanEnabled : false,
-      requireSortSlipFirst: payload.requireSortSlipFirst !== undefined ? payload.requireSortSlipFirst : false,
-    };
-
-    let saved;
-    if (existing) {
-      saved = await storage.updatePlant(existing.id, commonFields);
-      console.log('✅ Plant updated:', saved);
-    } else {
-      saved = await storage.createPlant({ name: upperName, ...commonFields });
-      console.log('✅ Plant created:', saved);
-    }
-
-    return res.json({ success: true, plant: saved });
-  } catch (error: any) {
-    console.error('❌ Create plant error:', error);
-    return res.status(400).json({ success: false, message: error?.message || 'Invalid payload' });
-  }
-});
-
-// Update existing plant
-router.put('/plants/:id', async (req: Request, res: Response) => {
-  try {
-    const role = String((req as any)?.user?.role ?? '').toLowerCase();
-    const allowed = ['admin','superadmin','super admin','super_admin','super-admin'];
-    if (!allowed.includes(role)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
-
-    const id = parseInt(req.params.id);
-    console.log('💾 Plant PUT payload:', req.body); // DEBUG
-
-    const payload = insertPlantSchema.parse(req.body);
-    console.log('🔍 Parsed PUT payload:', payload); // DEBUG
-
-    const updated = await storage.updatePlant(id, {
-      name: String(payload.name).toUpperCase(),
-      bgColor: payload.bgColor,
-      textColor: payload.textColor,
-      borderColor: payload.borderColor,
-      state: payload.state || null,
-      isLockingEnabled: payload.isLockingEnabled !== undefined ? payload.isLockingEnabled : true,
-      isSplitPagesEnabled: payload.isSplitPagesEnabled !== undefined ? payload.isSplitPagesEnabled : false,
-      isAutoCompleteEnabled: payload.isAutoCompleteEnabled !== undefined ? payload.isAutoCompleteEnabled : false,
-      isAutoScanEnabled: payload.isAutoScanEnabled !== undefined ? payload.isAutoScanEnabled : false,
-      requireSortSlipFirst: payload.requireSortSlipFirst !== undefined ? payload.requireSortSlipFirst : false,
-    });
-
-    console.log('✅ Plant updated via PUT:', updated);
-    return res.json({ success: true, plant: updated });
-  } catch (error: any) {
-    console.error('❌ Update plant error:', error);
-    return res.status(400).json({ success: false, message: error?.message || 'Invalid payload' });
-  }
-});
-
-// Delete plant
-router.delete('/plants/:id', async (req: Request, res: Response) => {
-  try {
-    const role = String((req as any)?.user?.role ?? '').toLowerCase();
-    const allowed = ['admin','superadmin','super admin','super_admin','super-admin'];
-    if (!allowed.includes(role)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
-
-    const id = parseInt(req.params.id);
-    await storage.deletePlant(id);
-    return res.json({ success: true });
-  } catch (error) {
-    console.error('Delete plant error:', error);
-    return res.status(500).json({ success: false, message: 'Failed to delete plant' });
   }
 });
 

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
-  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
+  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
@@ -130,6 +130,11 @@ type ProformaSlip = {
 type VehicleSuggestion = {
   id: number; vehicleNumber: string; rtoNumber: string | null; driver: string | null;
   company: string | null; manufacturer: string | null; volume: number | null;
+  // Set only when the local Vehicle Master search found nothing and the server fell back to a
+  // live Notion lookup (server/routes/loading.ts) — the row is already upserted into
+  // vehicle_info by then, so it links exactly like any other suggestion; this just flags it as
+  // freshly pulled in, for the "from Notion" tag in the dropdown.
+  fromNotion?: boolean;
 };
 type LoadingRecord = {
   id: number; orderNumber: string; partyName: string | null; plant: string | null;
@@ -276,6 +281,13 @@ function canCompleteLoadClient(): boolean {
   const designation = (u.designation ?? "").toLowerCase().trim();
   return !["loader", "helper", "driver", "scanner"].includes(designation);
 }
+// Mirrors the server's isSupervisor (server/routes/loading.ts) — Supervisor gets the same
+// ownership-bypass as admin here (open/view/scan/pause any load, change its STV, reopen it),
+// but never delete/void/edit-quantity, which aren't gated on ownership or designation at all.
+function isSupervisor(): boolean {
+  const u = currentUser();
+  return (u.designation ?? "").toLowerCase().trim() === "supervisor";
+}
 
 const normalize = (v?: string | number | null) => String(v ?? "").trim().toLowerCase();
 
@@ -324,9 +336,19 @@ const LOADING_EVENT_ID_OFFSET = 3000000000;
 
 export default function LoadOperation() {
   const { toast } = useToast();
-  const canWrite = hasPageWriteAccess("loading");
+  // Mirrors the server's requireLoadingWrite (server/routes/loading.ts): a Supervisor gets
+  // write access to Loading's own actions (scan/pause/claim/link-vehicle/STV/complete/reopen)
+  // even without a separately-granted Write Access page permission — most Supervisor-designated
+  // accounts have role "read" with no such grant, so without this every one of those buttons
+  // would stay hidden despite the server now accepting the request.
+  const canWrite = hasPageWriteAccess("loading") || isSupervisor();
   const admin = isAdminOrSuper();
   const canComplete = canCompleteLoadClient();
+  // Kept separate from `admin` — Supervisor gets the same ownership-bypass admin gets (open/
+  // view/scan/pause/STV-change/reopen ANY load), but not everything `admin` implies elsewhere on
+  // this page (e.g. canResetLoad below stays admin-only, mirroring the server's
+  // requireLoadingVoidAccess, which never checks designation).
+  const canBypassOwnership = admin || isSupervisor();
   // Mirrors the server's requireLoadingVoidAccess (server/routes/loading.ts): admin, or write
   // access to BOTH "loading" and "scan-history" — same rule individual Void uses, since Delete
   // is exactly that applied to every event on the order at once.
@@ -352,6 +374,13 @@ export default function LoadOperation() {
     setSearchOpen(false);
     setOrderSearch("");
     setOrderFocused(false);
+    // Explicitly dismiss the on-screen keyboard here rather than leaving it to whatever comes
+    // next (e.g. the vehicle-picker dialog's own autoFocus) — inputMode="none" on that next
+    // input stops IT from opening the keyboard, but doesn't reliably force-close one that's
+    // already open when focus just moves from this input to that one with no gap; blurring
+    // here, before anything else takes focus, avoids the keyboard staying stuck up over the
+    // next screen.
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   }
 
   // Server-paginated (20/page by default, matching Scan History) rather than fetching every
@@ -427,9 +456,10 @@ export default function LoadOperation() {
   const recordOwner = (r: LoadingRecord) => r.loadingOwnerName ?? r.loadingOwnerCode ?? "";
   const recordCompletedBy = (r: LoadingRecord) =>
     r.loadingCompletedAt ? (r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "") : "";
-  // Reopen: an admin/super-admin, or the load's current owner (server enforces the same rule).
+  // Reopen: an admin/super-admin, Supervisor, or the load's current owner (server enforces the
+  // same rule).
   const canReopenRecord = (r: LoadingRecord) =>
-    !!r.loadingCompletedAt && (admin || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
+    !!r.loadingCompletedAt && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
   const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
     { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
     { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
@@ -800,7 +830,7 @@ export default function LoadOperation() {
         // Create Operation) — open that load instead of offering to create it a second time. The
         // Create dialog is only for a slip that has never been started here.
         if (data.slip.loadDate) {
-          setSearchOpen(false);
+          closeOrderSearch();
           commitSlip(data);
           toast({
             title: "Load operation already exists",
@@ -821,8 +851,12 @@ export default function LoadOperation() {
           return;
         }
         // Hold it in the dialog — nothing is opened until "Create Operation" is clicked.
+        // closeOrderSearch() first: this branch used to leave the search dialog's own `open`
+        // state untouched while ALSO opening the pendingSlip dialog on top of it, so the
+        // search input never blurred — its keyboard stayed stuck open (and technically two
+        // Dialogs were mounted open at once) straight through into this next screen.
+        closeOrderSearch();
         setPendingSlip(data);
-        setOrderFocused(false);
         return;
       }
       commitSlip(data); // also sets view to "create"
@@ -1226,10 +1260,10 @@ export default function LoadOperation() {
     return matches[0];
   }
 
-  // The plant's STV list, needed only by the Create Operation dialog — the one place an STV is
-  // ever chosen. The scan view has no picker at all: it just displays whatever the slip was
-  // started with, and only an admin can change that afterwards (Proforma Slips page).
-  const stvPlant = pendingSlip?.slip?.plant ?? "";
+  // The plant's STV list — originally needed only by the Create Operation dialog (the one place
+  // an STV was ever chosen), now also reused by the "Change STV" control below, so it falls back
+  // to the OPEN slip's plant too, not just pendingSlip's.
+  const stvPlant = pendingSlip?.slip?.plant ?? slip?.plant ?? "";
   const stvsQuery = useQuery<string[]>({
     queryKey: ["/api/order-scan/stvs", stvPlant],
     queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(stvPlant)}`).then((r) => r.json()),
@@ -1240,6 +1274,27 @@ export default function LoadOperation() {
   // STV became mandatory — those scan with no STV rather than being blocked, since there's no
   // longer any in-page control for someone to set one with.
   const lockedStv = slip?.loadingStv ?? "";
+
+  // Change STV — admin/Supervisor/current-owner (server-enforced identically; see
+  // requireLoadingWrite + the current-owner check in PATCH /loading/proforma/:orderNumber/stv).
+  // The endpoint itself keeps every platform this load has ever used (storeKeeperInfo grows,
+  // never overwrites) and pushes that to Notion, unchanged from the Proforma Slips page's own
+  // Edit STV action — this is just a second entry point straight from the scan view.
+  const [stvChangeOpen, setStvChangeOpen] = useState(false);
+  const [stvChangeValue, setStvChangeValue] = useState("");
+  const changeStvMutation = useMutation({
+    mutationFn: async (newStv: string) => {
+      const res = await apiRequest("PATCH", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/stv`, { stv: newStv });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to change STV");
+      return res.json() as Promise<{ slip: ProformaSlip }>;
+    },
+    onSuccess: (data) => {
+      setSlip(data.slip);
+      setStvChangeOpen(false);
+      toast({ title: "STV updated", description: `Now on ${data.slip.loadingStv}` });
+    },
+    onError: (err: any) => toast({ title: "Failed to change STV", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
 
   const [itemScanMode, setItemScanMode] = useState<"camera" | "manual">("manual");
   const [itemBarcode, setItemBarcode] = useState("");
@@ -1448,7 +1503,7 @@ export default function LoadOperation() {
   // for EVERYONE, including the owner, until someone claims it.
   const isLoadPaused = !!slip?.loadingPausedAt;
   const isLoadOwner = !slip?.loadingOwnerCode || slip.loadingOwnerCode === currentUser()?.userCode;
-  const canScanThisLoad = canWrite && !locked && !isLoadPaused && (isLoadOwner || admin);
+  const canScanThisLoad = canWrite && !locked && !isLoadPaused && (isLoadOwner || canBypassOwnership);
 
   function stopItemCamera() {
     itemScannerRef.current?.stop();
@@ -1834,7 +1889,7 @@ export default function LoadOperation() {
   // in server/routes/loading.ts, which gates on the same vehicleAssignedByCode field) — this is
   // just the matching UI gate.
   const isVehicleClaimed = !!slip?.vehicleAssignedByCode;
-  const canEditVehicle = !isVehicleClaimed || admin || slip?.vehicleAssignedByCode === currentUser()?.userCode;
+  const canEditVehicle = !isVehicleClaimed || canBypassOwnership || slip?.vehicleAssignedByCode === currentUser()?.userCode;
 
   // Keeps Layout's sidebar turning in sync with this page's own rotation. Both the landing list
   // and the Stage-B scan view now render the same rotated wrapper when `rotated`, so — unlike
@@ -2315,10 +2370,19 @@ export default function LoadOperation() {
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
                       <Input
                         ref={orderInputRef}
+                        // This input auto-focuses as soon as the list view opens, ready for the
+                        // barcode gun — inputMode="none" keeps it focusable (so the gun's
+                        // keystrokes land here) without popping the on-screen keyboard. A real
+                        // tap flips it to "text" (written straight to the DOM node so it takes
+                        // effect before that same tap's own focus event, showing the keyboard on
+                        // the first tap rather than a second one) and it reverts to "none" on
+                        // blur, so the next auto-focus starts blocked again.
+                        inputMode="none"
+                        onPointerDown={(e) => { (e.currentTarget as HTMLInputElement).inputMode = "text"; }}
                         value={orderSearch}
                         onChange={(e) => { setOrderSearch(e.target.value); setOrderSuggIdx(-1); }}
                         onFocus={() => setOrderFocused(true)}
-                        onBlur={() => setTimeout(() => setOrderFocused(false), 150)}
+                        onBlur={(e) => { (e.currentTarget as HTMLInputElement).inputMode = "none"; setTimeout(() => setOrderFocused(false), 150); }}
                         onKeyDown={(e) => {
                           if (orderFocused && orderSuggestions.length > 0) {
                             if (e.key === "ArrowDown") { e.preventDefault(); setOrderSuggIdx((i) => Math.min(i + 1, orderSuggestions.length - 1)); return; }
@@ -2422,8 +2486,10 @@ export default function LoadOperation() {
             </div>
 
             {/* One stable toolbar for calendar, filters, statuses, and the primary action.
-                Tablet uses horizontal scrolling instead of splitting related controls apart. */}
-            <div className="flex items-center gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+                Wraps onto a second row on a narrow screen instead of scrolling horizontally —
+                every button stays visible without needing a left/right scroll to reach any of
+                them, at the cost of the toolbar sometimes being two rows tall on mobile. */}
+            <div className="flex flex-wrap items-center gap-2">
               <div className="shrink-0">
                 <SingleDateFilter
                   pageKey="loading-page"
@@ -2972,10 +3038,17 @@ export default function LoadOperation() {
                   <div className="relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
                     <Input
+                      // Auto-focuses as soon as this dialog opens, ready for the gun to scan a
+                      // vehicle barcode — same inputMode trick as the order-search input: stays
+                      // focusable for the gun without popping the keyboard, and a real tap
+                      // (onPointerDown, written straight to the DOM node so it lands before that
+                      // tap's own focus event) opens it on demand instead.
+                      inputMode="none"
+                      onPointerDown={(e) => { (e.currentTarget as HTMLInputElement).inputMode = "text"; }}
                       value={vehicleSearch}
                       onChange={(e) => { setVehicleSearch(e.target.value); setSelectedVehicle(null); setVehicleSuggIdx(-1); }}
                       onFocus={() => setVehicleFocused(true)}
-                      onBlur={() => setTimeout(() => setVehicleFocused(false), 150)}
+                      onBlur={(e) => { (e.currentTarget as HTMLInputElement).inputMode = "none"; setTimeout(() => setVehicleFocused(false), 150); }}
                       onKeyDown={(e) => {
                         if (vehicleFocused && vehicleSuggestions.length > 0) {
                           if (e.key === "ArrowDown") { e.preventDefault(); setVehicleSuggIdx((i) => Math.min(i + 1, vehicleSuggestions.length - 1)); return; }
@@ -3008,7 +3081,14 @@ export default function LoadOperation() {
                               className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === vehicleSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
                             >
                               <div className="min-w-0">
-                                <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                <div className="flex items-center gap-1.5">
+                                  <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                  {v.fromNotion && (
+                                    <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                                      From Notion
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="text-xs text-gray-500 truncate">{[v.rtoNumber && `RTO ${v.rtoNumber}`, v.driver, v.company].filter(Boolean).join(" · ") || "—"}</div>
                               </div>
                               <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
@@ -3178,6 +3258,19 @@ export default function LoadOperation() {
                         <span className="inline-flex h-6 items-center gap-1 rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-3 text-xs font-semibold text-[#001d6e]">
                           <Lock className="h-3 w-3" />{lockedStv}
                         </span>
+                        {/* Admin/Supervisor/current-owner — same rule the server enforces (see
+                            requireLoadingWrite + the current-owner check in the PATCH /stv
+                            route). Everyone else still only ever sees the read-only pill above. */}
+                        {canWrite && !locked && (canBypassOwnership || isLoadOwner) && (
+                          <button
+                            type="button"
+                            onClick={() => { setStvChangeValue(lockedStv); setStvChangeOpen(true); }}
+                            title="Change this load's STV/platform"
+                            className="ml-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </button>
+                        )}
                       </div>
                     )}
                     {canWrite && !locked && canEditVehicle && (
@@ -3204,7 +3297,7 @@ export default function LoadOperation() {
                     {/* Shift handoff — Pause (owner/admin only, while active) hands this load
                         off to whoever claims it next; Claim (anyone with write access, only
                         while paused) picks it up. Never both shown at once. */}
-                    {canWrite && !locked && !isLoadPaused && (isLoadOwner || admin) && (
+                    {canWrite && !locked && !isLoadPaused && (isLoadOwner || canBypassOwnership) && (
                       <Button
                         size="sm"
                         variant="outline"
@@ -3269,7 +3362,7 @@ export default function LoadOperation() {
                     )}
                   </div>
                 )}
-                {!locked && !isLoadPaused && !isLoadOwner && !admin && (
+                {!locked && !isLoadPaused && !isLoadOwner && !canBypassOwnership && (
                   <div className="px-4 sm:px-5 py-1.5 border-b border-gray-100 text-xs text-gray-500">
                     Owned by {slip.loadingOwnerName ?? slip.loadingOwnerCode} — you can view this but can't scan until they pause it.
                   </div>
@@ -3387,7 +3480,14 @@ export default function LoadOperation() {
                                 className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === vehicleSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
                               >
                                 <div className="min-w-0">
-                                  <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                  <div className="flex items-center gap-1.5">
+                                    <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                    {v.fromNotion && (
+                                      <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                                        From Notion
+                                      </span>
+                                    )}
+                                  </div>
                                   <div className="text-xs text-gray-500 truncate">{[v.rtoNumber && `RTO ${v.rtoNumber}`, v.driver, v.company].filter(Boolean).join(" · ") || "—"}</div>
                                 </div>
                                 <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
@@ -3446,6 +3546,19 @@ export default function LoadOperation() {
                 >
                   Scanner
                 </button>
+                {/* Moved here (next to Total/Scanner, not buried inside the Scanner-only panel)
+                    so it stays reachable from the Total tab too, not just Scanner — deliberately
+                    loud/solid, not an outline pill like Total/Scanner, since it opens the
+                    dedicated Add Extra popup, the ONLY way to log an item not on this slip or
+                    more than what's remaining. */}
+                <button
+                  type="button"
+                  onClick={() => setExtraDialogOpen(true)}
+                  title="Add an item not on this slip, or more than what's remaining"
+                  className="ml-auto flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500 px-3.5 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
+                >
+                  <PackagePlus className="h-3.5 w-3.5" /> Add Extra
+                </button>
               </div>
             )}
 
@@ -3463,7 +3576,10 @@ export default function LoadOperation() {
                     <p className="text-sm font-medium text-gray-400">{itemPct}% complete</p>
                   )}
                 </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {/* Always 4 columns, even on the narrowest phone — was grid-cols-2 below sm
+                    (wrapping to 2 rows); text/padding/gap now scale down with a sm: step
+                    instead of the column count changing, so all four stay in one row. */}
+                <div className="grid grid-cols-4 gap-1 sm:gap-2">
                   {([
                     { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
                     { key: "done" as const, label: "Loaded", value: itemTotals.loaded, plt: itemTotals.pltLoaded, dot: "bg-emerald-500", text: "text-emerald-600" },
@@ -3478,16 +3594,16 @@ export default function LoadOperation() {
                         onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
                         aria-pressed={isActive}
                         title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                        className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                        className={`min-w-0 rounded-xl border px-1 py-1 text-center transition-colors sm:px-2.5 ${
                           isActive ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30" : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
                         }`}
                       >
-                        <div className="flex items-center justify-center gap-1.5">
-                          <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                        <div className="flex items-center justify-center gap-1 sm:gap-1.5">
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full sm:h-2 sm:w-2 ${s.dot}`} />
+                          <p className="truncate text-[9px] font-semibold uppercase tracking-wide text-gray-500 sm:text-xs">{s.label}</p>
                         </div>
-                        <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
-                        <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                        <p className={`text-base font-bold leading-tight sm:text-2xl ${s.text}`}>{s.value}</p>
+                        <p className={`text-xs font-bold sm:text-lg ${s.text}`}>{s.plt.toFixed(2)} plt</p>
                       </button>
                     );
                   })}
@@ -3513,19 +3629,8 @@ export default function LoadOperation() {
                   <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
                     <span className="text-sm font-semibold text-gray-900">Scan Items</span>
-                    {/* Deliberately loud/solid (not an outline pill like the other header
-                        buttons) — opens the dedicated Add Extra popup, the ONLY way to log an
-                        item not on this slip or more than what's remaining (a regular scan
-                        refuses it and points here instead), so it needs to read as distinct from
-                        a routine action. */}
-                    <button
-                      type="button"
-                      onClick={() => setExtraDialogOpen(true)}
-                      title="Add an item not on this slip, or more than what's remaining"
-                      className="ml-auto flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500 px-3.5 py-2 text-sm font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
-                    >
-                      <PackagePlus className="h-4 w-4" /> Add Extra
-                    </button>
+                    {/* Add Extra moved up to the Total/Scanner tab row (above), so it's visible
+                        from both tabs instead of only here. */}
                   </div>
                   <div className="px-4 sm:px-5 py-4 space-y-3">
                     <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
@@ -3565,6 +3670,14 @@ export default function LoadOperation() {
                         <Input
                           ref={itemInputRef}
                           autoFocus
+                          // Auto-focuses so the gun can scan items immediately — inputMode
+                          // "none" keeps it focusable for the gun's keystrokes (onChange below
+                          // still fires normally; only the on-screen keyboard is suppressed)
+                          // without popping the keyboard on a tablet. A real tap opens it on
+                          // demand, same trick as the order-search and vehicle-search inputs.
+                          inputMode="none"
+                          onPointerDown={(e) => { (e.currentTarget as HTMLInputElement).inputMode = "text"; }}
+                          onBlur={(e) => { (e.currentTarget as HTMLInputElement).inputMode = "none"; }}
                           value={itemBarcode}
                           onChange={(e) => setItemBarcode(e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter") handleItemBarcode(itemBarcode); }}
@@ -3901,7 +4014,14 @@ export default function LoadOperation() {
                                 className={`flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left border-b border-gray-100 last:border-0 ${i === vehicleSuggIdx ? "bg-[#001d6e]/10" : "hover:bg-[#001d6e]/5"}`}
                               >
                                 <div className="min-w-0">
-                                  <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                  <div className="flex items-center gap-1.5">
+                                    <div className="text-sm font-semibold text-[#001d6e] truncate">{v.vehicleNumber}</div>
+                                    {v.fromNotion && (
+                                      <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                                        From Notion
+                                      </span>
+                                    )}
+                                  </div>
                                   <div className="text-xs text-gray-500 truncate">{[v.rtoNumber && `RTO ${v.rtoNumber}`, v.driver, v.company].filter(Boolean).join(" · ") || "—"}</div>
                                 </div>
                                 <ChevronRight className="h-4 w-4 shrink-0 text-gray-300" />
@@ -4358,6 +4478,42 @@ export default function LoadOperation() {
           stock reversed, kept in history marked Voided (never deleted). */}
       {/* Confirm before completing — the same "say what is still short, then let them decide"
           dialog Unloading uses, instead of completing straight from the button click. */}
+      <Dialog open={stvChangeOpen} onOpenChange={(o) => { if (!o) setStvChangeOpen(false); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Change STV / Platform</DialogTitle>
+            <DialogDescription>
+              #{slip?.orderNumber} is currently on <span className="font-semibold text-[#001d6e]">{lockedStv}</span>.
+              Every platform this load has ever used stays on record — picking a new one adds to
+              that history, it doesn't erase {lockedStv}.
+            </DialogDescription>
+          </DialogHeader>
+          <Select value={stvChangeValue} onValueChange={setStvChangeValue}>
+            <SelectTrigger>
+              <SelectValue placeholder="Select STV…" />
+            </SelectTrigger>
+            <SelectContent>
+              {stvs.map((st) => (
+                <SelectItem key={st} value={st}>{st}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStvChangeOpen(false)} disabled={changeStvMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-[#001d6e] text-white hover:bg-[#001552]"
+              disabled={changeStvMutation.isPending || !stvChangeValue || stvChangeValue === lockedStv}
+              onClick={() => changeStvMutation.mutate(stvChangeValue)}
+            >
+              {changeStvMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={confirmCompleteOpen} onOpenChange={(o) => { if (!o) setConfirmCompleteOpen(false); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>

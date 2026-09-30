@@ -311,13 +311,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/vehicle-master",
           pageKey: "vehicle-master",
         },
-        {
-          label: "Purchases",
-          icon: <ShoppingCart className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/purchases",
-          pageKey: "purchases",
-          permission: "canAccessInventory",
-        },
       ],
     },
     {

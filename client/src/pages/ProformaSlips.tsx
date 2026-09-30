@@ -339,9 +339,17 @@ export default function ProformaSlips() {
   
   const currentUserRole = String(currentUserInfo?.role || '').toLowerCase();
   const isAdminOrSuper = ['admin', 'super-admin', 'super admin', 'super_admin'].includes(currentUserRole);
+  // Kept separate from isAdminOrSuper (used for several unrelated permissions on this page) —
+  // admin, Supervisor, or the load's own current owner can correct its STV
+  // (server/routes/loading.ts's PATCH /loading/proforma/:orderNumber/stv already accepts all
+  // three), but nothing else isAdminOrSuper gates here. Per-slip since "current owner" depends
+  // on which row this is.
+  const isSupervisorUser = String(currentUserInfo?.designation || '').toLowerCase().trim() === 'supervisor';
+  const canEditStv = (slip: LockedProformaSlip) =>
+    isAdminOrSuper || isSupervisorUser || (!!(slip as any).loadingOwnerCode && (slip as any).loadingOwnerCode === currentUserInfo?.userCode);
 
-  // Admin-only STV correction. The slip being edited, plus the pending pick — see the Edit STV
-  // action in the row menu and the dialog at the end of this file.
+  // Admin/supervisor STV correction. The slip being edited, plus the pending pick — see the Edit
+  // STV action in the row menu and the dialog at the end of this file.
   const [stvEditSlip, setStvEditSlip] = useState<LockedProformaSlip | null>(null);
   const [stvEditValue, setStvEditValue] = useState('');
   const stvEditOptionsQuery = useQuery<string[]>({
@@ -1544,9 +1552,10 @@ export default function ProformaSlips() {
             <DropdownMenuSeparator />
 
             {/* The only place a started load's STV can be corrected — the Loading page has no
-                STV control at all, by design. Admin-only, and only once a load exists to
-                correct (loadingStv is stamped by Create Operation). */}
-            {isAdminOrSuper && slip.loadingStv && (
+                STV control at all, by design. Admin, Supervisor, or this load's current owner,
+                and only once a load exists to correct (loadingStv is stamped by Create
+                Operation). */}
+            {canEditStv(slip) && slip.loadingStv && (
               <DropdownMenuItem onClick={() => { setStvEditSlip(slip); setStvEditValue(slip.loadingStv ?? ''); }}>
                 <Pencil className="mr-2 h-4 w-4" /> Edit STV ({slip.loadingStv})
               </DropdownMenuItem>

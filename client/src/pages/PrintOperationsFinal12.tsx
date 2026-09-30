@@ -20,7 +20,11 @@ import { hasPageWriteAccess } from '../lib/permissions';
 // needs to load jsbarcode itself; they just display an already-rendered image.
 function generateBarcodeDataUrl(text: string): string {
   const canvas = document.createElement('canvas');
-  JsBarcode(canvas, text, { format: 'CODE128', displayValue: false, margin: 4, height: 40, width: 3 });
+  // width:2.6 (bar-module thickness) — widened again from 2.3 per explicit request; safe now
+  // that the barcode's flex item can shrink to fit via min-width:0/max-width:100%, so growth
+  // here (which, since the barcode is left-anchored in its column, extends it to the right)
+  // can no longer bleed past the page's right margin the way width:2.8 did before that fix.
+  JsBarcode(canvas, text, { format: 'CODE128', displayValue: false, margin: 4, height: 40, width: 2.6 });
   return canvas.toDataURL('image/png');
 }
 
@@ -35,6 +39,28 @@ const SHOW_ORDER_BARCODE = true;
 function vehicleCircleFontPt(text: string | null | undefined): number {
   const len = String(text ?? '').trim().length;
   return len <= 2 ? 16 : len === 3 ? 12 : len === 4 ? 10 : 8;
+}
+
+// Party name's font size scales to the longest of its (up to two) lines — bigger when there's
+// room to spare, shrinking as needed so a long company/area name doesn't wrap or run past its
+// column instead of just always sitting at a fixed 10pt regardless of length. Long names were
+// still sitting noticeably smaller than the width they had to fill (visible empty space to the
+// right of the text on print), so every tier is bumped up a step from before, with a new tier
+// added past the old ceiling instead of just dropping straight to the smallest size.
+function partyNameFontPt(lines: string[]): number {
+  const len = Math.max(0, ...lines.map(l => l.trim().length));
+  return len <= 10 ? 14 : len <= 15 ? 13 : len <= 20 ? 12 : len <= 25 ? 11 : len <= 32 ? 10 : len <= 40 ? 9 : 8;
+}
+
+// partyName is stored as one combined "COMPANY - AREA" string (there's no separate area field on
+// the slip) — on a narrow 95mm label a long one wraps wherever the browser happens to break it,
+// which can split a word oddly. Splitting on the FIRST " - " puts the area on its own, deliberate
+// second line instead, and falls back to the single line unchanged when there's no " - " at all.
+function splitPartyNameLines(name: string | null | undefined): string[] {
+  const s = String(name ?? '');
+  const idx = s.indexOf(' - ');
+  if (idx < 0) return [s];
+  return [s.slice(0, idx), s.slice(idx + 3)];
 }
 
 // Product/order interfaces
@@ -331,32 +357,60 @@ const PrintOperations: React.FC = () => {
     });
     
     // Function to create header HTML
-    const createHeaderHTML = () => `
+    const createHeaderHTML = () => {
+      // Party name's two lines: left-aligned, in the column beside the vehicle circle.
+      const partyNameLines = splitPartyNameLines(proformaData.slip.partyName);
+      const partyNameFontSize = partyNameFontPt(partyNameLines);
+      const partyNameHTML = partyNameLines
+        .map(line => `<div style="text-align: left; font-size: ${partyNameFontSize}pt; font-weight: bold; line-height: 1.25;">${line}</div>`)
+        .join('');
+
+      return `
       <div style="text-align: center; font-weight: bold; font-size: 10pt; background-color: ${bgColor}; color: ${textColor}; padding: 2px 0; margin-bottom: 1mm; border-radius: 0; border-bottom: 1px solid ${borderColor};">
         KRUPA MARKETING - ${proformaData.slip.plant?.toUpperCase() || ''}
       </div>
 
       <div style="margin-bottom: 0.5mm;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2mm;">
+        <!-- Row 1: vehicle circle (left) and company name + area line (filling the rest of the
+             row, left-aligned text, font size adaptive to the name's length). -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5mm;">
           <div style="display: flex; width: 45px; height: 45px; border-radius: 50%; border: 2px solid #000000; background-color: transparent; color: #000000; font-size: ${vehicleCircleFontPt(proformaData.slip.vehicleNumber)}pt; font-weight: bold; line-height: 1; white-space: nowrap; overflow: hidden; text-align: center; align-items: center; justify-content: center; flex-shrink: 0;">${proformaData.slip.vehicleNumber || ''}</div>
-          <div style="text-align: center; font-size: 10pt; font-weight: bold; flex: 1; padding: 0 5mm;">
-            ${proformaData.slip.partyName}
-            <!-- Barcode with the slip number directly beneath it — moved here from the right
-                 column so both sit together under the party name. -->
-            <div style="margin-top: 2mm;">
-              ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" style="height: 13mm; width: auto; display: block; margin: 0 auto;" alt="Order barcode" />` : ''}
-              <div style="font-size: 11pt; font-weight: bold; text-align: center; color: #a10808; line-height: 1.1;">#${proformaData.slip.orderNumber}</div>
+          <div style="flex: 1; padding-left: 2mm;">
+            ${partyNameHTML}
+          </div>
+        </div>
+        <!-- Row 2: barcode + order number (left) and the TIME box (right). min-width:0 on the
+             barcode's flex item overrides the flex default of min-width:auto (which sizes a
+             flex item to never shrink below its content's natural width) — without it, a wide
+             barcode plus the TIME box could together exceed the row's available width and
+             bleed past the page's right margin instead of shrinking to fit, which is what cut
+             the barcode off at the border. max-width:100% on the img now has a real effect
+             because the item can actually shrink. -->
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 2mm; padding-top: 1mm;">
+          <div style="text-align: left; flex: 1; min-width: 0; padding-right: 3mm;">
+            <!-- display:table (not inline-block) shrinks this wrapper to the barcode's own
+                 rendered width (the barcode's column is wider than the barcode itself) so
+                 text-align:center on it centers the order number under the barcode itself, not
+                 the whole column — inline-block did the same shrink-to-fit, but being an INLINE
+                 box, it sat on a text baseline and picked up the surrounding line's own leading
+                 space above it, pushing the barcode down out of line with the TIME box beside
+                 it in the row; table is block-level so it has no such baseline/leading gap. -->
+            <div style="display: table; max-width: 100%; text-align: center;">
+              ${barcodeDataUrl ? `<img src="${barcodeDataUrl}" style="height: 18mm; width: auto; max-width: 100%; display: block; margin: 0;" alt="Order barcode" />` : ''}
+              <div style="font-size: 11pt; font-weight: bold; color: #a10808; line-height: 1.1;">#${proformaData.slip.orderNumber}</div>
             </div>
           </div>
-          <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1mm;">
-            <!-- Time box for load start & end time — moved here from the party-name column.
-                 "TIME" is a plain label above the box now, not a title bar inside it, so the
-                 box itself is just its two equal rows split by one line. -->
+          <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 1mm; flex-shrink: 0; margin-top: -2mm;">
+            <!-- 20mm wide (widened again from 17mm — safe now that the barcode's flex item can
+                 shrink to fit via min-width:0/max-width:100%, so this can't bleed past the page
+                 border the way it did before that fix). align-items:flex-end anchors the box's
+                 RIGHT edge, so growing its width extends it to the left. margin-top:-2mm shifts
+                 the whole TIME block up relative to the barcode beside it, per explicit request. -->
             <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 0.5mm;">
               <div style="font-size: 7pt; font-weight: bold;">TIME</div>
-              <div style="border: 1px solid #000; width: 22mm; background-color: #ffffff;">
-                <div style="height: 4mm;"></div>
-                <div style="height: 4mm; border-top: 1px solid #000;"></div>
+              <div style="border: 1px solid #000; width: 20mm; background-color: #ffffff;">
+                <div style="height: 6mm;"></div>
+                <div style="height: 6mm; border-top: 1px solid #000;"></div>
               </div>
             </div>
             <div style="font-size: 10pt; font-weight: bold; line-height: 1.2; text-align: right;">${formatDate(proformaData.slip.orderDate)}</div>
@@ -364,6 +418,7 @@ const PrintOperations: React.FC = () => {
         </div>
       </div>
     `;
+    };
     
     // Function to generate item row HTML
     const generateItemRow = (item: ProformaSlipItem, actualIndex: number) => {
@@ -705,7 +760,13 @@ const PrintOperations: React.FC = () => {
               display: flex;
               flex-direction: column;
               margin: 0;
-              padding: 0;
+              /* Some printers/print dialogs ignore @page's own margin (set above), which left
+                 content flush against the physical page edge on every side with no gap — this
+                 padding is a second, guaranteed inset that doesn't depend on @page being
+                 honored. Kept inside width:95mm via box-sizing:border-box, so it eats into that
+                 width rather than growing past it; top/bottom don't have that same width cap to
+                 respect, so they just add to each page's own height. */
+              padding: 2mm 4mm 2mm 5mm;
             }
             .print-page.page-break {
               page-break-before: always;
@@ -786,7 +847,7 @@ const PrintOperations: React.FC = () => {
               thead {
                 display: table-header-group !important;
               }
-              tbody
+              tbody {
                 page-break-inside: ${isSplitPagesEnabled ? 'avoid' : 'auto'} !important;
                 break-inside: ${isSplitPagesEnabled ? 'avoid' : 'auto'} !important;
               }
@@ -1053,16 +1114,19 @@ const PrintOperations: React.FC = () => {
                     })()}
 
                     <div style={{ marginBottom: '0.5mm' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2mm' }}>
-                        <div style={{ 
+                      {/* Row 1: vehicle circle (left) and company name + area line (filling
+                          the rest of the row, left-aligned text, font size adaptive to the
+                          name's length). */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5mm' }}>
+                        <div style={{
                           display: 'flex',
-                          width: '45px', 
-                          height: '45px', 
-                          borderRadius: '50%', 
+                          width: '45px',
+                          height: '45px',
+                          borderRadius: '50%',
                           border: '2px solid #000000',
-                          backgroundColor: 'transparent', 
-                          color: '#000000', 
-                          fontSize: `${vehicleCircleFontPt(proformaData.slip.vehicleNumber)}pt`, 
+                          backgroundColor: 'transparent',
+                          color: '#000000',
+                          fontSize: `${vehicleCircleFontPt(proformaData.slip.vehicleNumber)}pt`,
                           fontWeight: 'bold',
                           alignItems: 'center',
                           justifyContent: 'center',
@@ -1074,27 +1138,48 @@ const PrintOperations: React.FC = () => {
                         }}>
                           {proformaData.slip.vehicleNumber || ''}
                         </div>
-                        <div style={{ textAlign: 'center', fontSize: '10pt', fontWeight: 'bold', flex: 1, padding: '0 5mm' }}>
-                          {proformaData.slip.partyName}
-                          {/* Barcode with the slip number directly beneath it — moved here from
-                              the right column so both sit together under the party name. */}
-                          <div style={{ marginTop: '2mm' }}>
+                        <div style={{ flex: 1, paddingLeft: '2mm' }}>
+                          {(() => {
+                            const partyNameLines = splitPartyNameLines(proformaData.slip.partyName);
+                            const partyNameFontSize = partyNameFontPt(partyNameLines);
+                            return partyNameLines.map((line, i) => (
+                              <div key={i} style={{ textAlign: 'left', fontSize: `${partyNameFontSize}pt`, fontWeight: 'bold', lineHeight: 1.25 }}>
+                                {line}
+                              </div>
+                            ));
+                          })()}
+                        </div>
+                      </div>
+                      {/* Row 2: barcode + order number (left) and the TIME box (right).
+                          minWidth: 0 on the barcode's flex item overrides the flex default of
+                          min-width:auto, so it can actually shrink to fit instead of bleeding
+                          past the page's right margin — that missing shrink is what cut the
+                          barcode off at the border before. */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2mm', paddingTop: '1mm' }}>
+                        <div style={{ textAlign: 'left', flex: 1, minWidth: 0, paddingRight: '3mm' }}>
+                          {/* display:'table' (not inline-block) shrinks this wrapper to the
+                              barcode's own rendered width, same as the print HTML — inline-block
+                              did the same shrink-to-fit but, being an INLINE box, picked up the
+                              surrounding line's own leading space above it, pushing the barcode
+                              down out of line with the TIME box beside it in the row. */}
+                          <div style={{ display: 'table', maxWidth: '100%', textAlign: 'center' }}>
                             {barcodeDataUrl && (
-                              <img src={barcodeDataUrl} alt="Order barcode" style={{ height: '13mm', width: 'auto', display: 'block', margin: '0 auto' }} />
+                              <img src={barcodeDataUrl} alt="Order barcode" style={{ height: '18mm', width: 'auto', maxWidth: '100%', display: 'block', margin: 0 }} />
                             )}
-                            <div style={{ fontSize: '11pt', fontWeight: 'bold', textAlign: 'center', color: '#a10808', lineHeight: '1.1' }}>#{proformaData.slip.orderNumber}</div>
+                            <div style={{ fontSize: '11pt', fontWeight: 'bold', color: '#a10808', lineHeight: '1.1' }}>#{proformaData.slip.orderNumber}</div>
                           </div>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm' }}>
-                          {/* Time box for load start & end time — moved here from the party-name
-                              column. "TIME" is a plain label above the box now, not a title bar
-                              inside it, so the box itself is just its two equal rows split by
-                              one line. */}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '1mm', flexShrink: 0, marginTop: '-2mm' }}>
+                          {/* 20mm wide (widened again from 17mm — safe now that the barcode's
+                              flex item can shrink to fit). align-items:flex-end anchors the
+                              box's right edge, so growing its width extends it to the left.
+                              marginTop:-2mm shifts the whole TIME block up relative to the
+                              barcode, per explicit request. */}
                           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5mm' }}>
                             <div style={{ fontSize: '7pt', fontWeight: 'bold' }}>TIME</div>
-                            <div style={{ border: '1px solid #000', width: '22mm', backgroundColor: '#ffffff' }}>
-                              <div style={{ height: '4mm' }}></div>
-                              <div style={{ height: '4mm', borderTop: '1px solid #000' }}></div>
+                            <div style={{ border: '1px solid #000', width: '20mm', backgroundColor: '#ffffff' }}>
+                              <div style={{ height: '6mm' }}></div>
+                              <div style={{ height: '6mm', borderTop: '1px solid #000' }}></div>
                             </div>
                           </div>
                           <div style={{ fontSize: '10pt', fontWeight: 'bold', lineHeight: '1.2', textAlign: 'right' }}>{formatDate(proformaData.slip.orderDate)}</div>

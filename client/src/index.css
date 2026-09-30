@@ -82,9 +82,25 @@ body[data-portal-rotation="270"] [data-radix-popper-content-wrapper]:not(#root [
   transform-origin: top left;
 }
 
-/* Quarter turns swap the box (100vh x 100vw) so the rotated content still fills the real
-   viewport; the half turn keeps the viewport's own dimensions. Each translate then pulls the
-   rotated box back over the viewport, since rotating about the top-left corner moves it off. */
+/* Quarter turns swap the box's axes (width becomes on-screen height, height becomes on-screen
+   width) so the rotated content still fills the real viewport; the half turn keeps the
+   viewport's own dimensions. Each translate then pulls the rotated box back over the viewport,
+   since rotating about the top-left corner moves it off.
+   height is a fixed 100vw (the on-screen-width axis, matching the full physical screen width) —
+   NOT auto/content-sized. A prior version tried height:auto (to stop a blank gap when content was
+   short) with max-height:100vw as a safety net for tall content, but that safety net was solving
+   a problem that didn't need solving: overflow-y:auto is already set on the shared rule below,
+   completely independent of this height value, and already lets content taller than the box
+   scroll into view (verified live: a 54-item order's content overflowed 1280px by 69px and
+   scrolled to the end fine). Meanwhile height:auto's own fix traded one visible problem for a
+   structurally identical one — being position:fixed, a shorter-than-100vw box doesn't cover the
+   full viewport, so whatever's behind it (the page's own background) shows through as the same
+   kind of "blank area" this was meant to eliminate, just one layer further out. Fixed 100vw avoids
+   both: it always exactly covers the physical screen width (no exposed background), and
+   overflow-y:auto (already there, always was) is what actually handles content taller than that.
+   width stays 100vh since that axis (on-screen height) genuinely needs to match the full device
+   height. translateY(-100%)/translateX(-100%) resolve against the box's own height/width, which
+   is now always exactly 100vh/100vw, so they stay correct. */
 .kiosk-rotate-90 {
   width: 100vh;
   height: 100vw;

@@ -9,6 +9,7 @@ import {
   type StockPullContribution,
 } from '../lib/statePool';
 import { pushOrderStatusToNotion, pushStoreKeeperInfoToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
+import { searchNotionVehicleByNumber } from '../services/notionVehicleSync';
 import { computeLoadDateReport, computeLoadDateActivity } from '../lib/loadDateReport';
 
 // Loading — two things happen here:
@@ -33,6 +34,32 @@ function actor(req: Request): { userCode?: string; userName?: string } {
 function isAdmin(req: Request): boolean {
   const role = ((req.user as any)?.role ?? '').toString().toLowerCase();
   return WRITE_ADMIN_ROLES.includes(role);
+}
+
+// Supervisor designation gets the same ownership-bypass as admin on Loading specifically (open/
+// view/scan/pause any load, change its STV, reopen it after completion) — explicit request, so
+// they're never blocked by "someone else owns this load". Deliberately does NOT touch
+// requireLoadingVoidAccess (delete/reset a load, void or edit a scan event) — that stays gated
+// on isAdmin or an explicit scan-history write grant, unrelated to designation, so Supervisor
+// never gets delete power through this.
+function isSupervisor(req: Request): boolean {
+  const designation = ((req.user as any)?.designation ?? '').toString().toLowerCase().trim();
+  return designation === 'supervisor';
+}
+
+// Drop-in replacement for requirePageWrite('loading') on every Loading write route below — the
+// designation-based ownership bypass above (isSupervisor, used inside checkLoadOwnership etc.)
+// never even runs for a Supervisor whose base role is "read" with no separately-granted Write
+// Access to Loading, because requirePageWrite('loading') rejects the request before any route
+// handler code executes. Most Supervisor-designated accounts in this database are exactly that
+// (role "read", no loading write grant) — so this middleware lets a Supervisor through
+// unconditionally here, same as WRITE_ADMIN_ROLES already does inside requirePageWrite itself,
+// instead of also requiring a separate manual grant on top of the designation. Scoped to this
+// file's own routes only — the shared requirePageWrite in lib/pageAccess.ts is untouched, so
+// Supervisor gets no write bypass on any OTHER page through this.
+function requireLoadingWrite(req: Request, res: Response, next: NextFunction) {
+  if (isSupervisor(req)) return next();
+  return requirePageWrite('loading')(req, res, next);
 }
 
 const normalize = (value?: string | number | null) => String(value ?? '').trim().toLowerCase();
@@ -136,7 +163,7 @@ function checkLoadOwnership(slip: any, req: Request, owner: { code: string | nul
   if (slip.loadingPausedAt) {
     return 'This load is paused — claim it from the list before scanning.';
   }
-  if (owner.code && owner.code !== actor(req).userCode && !isAdmin(req)) {
+  if (owner.code && owner.code !== actor(req).userCode && !isAdmin(req) && !isSupervisor(req)) {
     return `This load is currently owned by ${owner.name ?? owner.code} — ask them to pause it, or wait for a transfer.`;
   }
   return null;
@@ -149,7 +176,7 @@ function checkLoadOwnership(slip: any, req: Request, owner: { code: string | nul
 function checkLoadViewAccess(slip: any, req: Request, owner: { code: string | null; name: string | null }): string | null {
   if (!owner.code) return null;
   if (slip.loadingPausedAt) return null;
-  if (owner.code === actor(req).userCode || isAdmin(req)) return null;
+  if (owner.code === actor(req).userCode || isAdmin(req) || isSupervisor(req)) return null;
   return `This load is currently owned by ${owner.name ?? owner.code} — ask them to pause it before opening it.`;
 }
 
@@ -196,33 +223,54 @@ async function orderHasSortSlip(orderNumber: string): Promise<boolean> {
   return rows.length > 0;
 }
 
-// StoreKeeper Info = everyone who has held this load, in the order they took it, then the STV name
-// exactly as configured for the plant: "YASH, PLT-05", and after a handoff "YASH, RAHUL, PLT-05".
-// First names only, upper-cased. It used to reduce the STV to a bare platform number ("YASH, pt: 5"),
-// which hid which STV was picked and made "STV-01" read the same as "PLT-01".
-const firstNameOf = (userName: string | null | undefined) =>
-  String(userName ?? '').trim().split(/\s+/)[0]?.toUpperCase() ?? '';
+// StoreKeeper Info = everyone who has held this load, in the order they took it, then every
+// distinct platform/STV this load has ever recorded, exactly as configured for the plant:
+// "YASH PATEL, PLT-05", after a handoff "YASH PATEL, RAHUL SHARMA, PLT-05", and after the load
+// later moves to a second platform "YASH PATEL, RAHUL SHARMA, PLT-05, PLT-08" — same
+// append-only, never-remove treatment names already got, extended to platforms on explicit
+// request (previously a "correction" replaced the one-and-only STV outright, silently losing
+// which platform it actually started on). Full name, upper-cased — was first-name-only (just the
+// first word) until an explicit request to use the full name instead. It used to reduce the STV
+// to a bare platform number ("YASH, pt: 5"), which hid which STV was picked and made "STV-01"
+// read the same as "PLT-01".
+const fullNameOf = (userName: string | null | undefined) =>
+  String(userName ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
 
-function buildStoreKeeperInfo(names: string[], stv: string): string {
-  // Each person once, first appearance kept — someone who pauses and later claims the same load
-  // back is not listed twice.
+// Dedupes case/whitespace-insensitively, first appearance kept — someone who pauses and later
+// claims the same load back is not listed twice, and re-recording a platform that's already
+// there doesn't duplicate it either.
+function dedupeKeepFirst(values: string[]): string[] {
   const seen = new Set<string>();
-  const unique = names
-    .map((n) => n.trim().toUpperCase())
-    .filter((n) => n && !seen.has(n) && seen.add(n));
-  const stvName = stv.trim();
-  return unique.length ? `${unique.join(', ')}, ${stvName}` : stvName;
+  return values
+    .map((v) => v.trim().toUpperCase())
+    .filter((v) => v && !seen.has(v) && seen.add(v));
 }
 
-// The names already recorded: every comma-separated part except the last, which is the STV (in both
-// "YASH, RAHUL, PLT-05" and the older "YASH, pt: 5"). A value with no comma holds no names.
-function storeKeeperNames(info: string | null | undefined): string[] {
+function buildStoreKeeperInfo(names: string[], stvs: string[]): string {
+  const uniqueNames = dedupeKeepFirst(names);
+  const uniqueStvs = dedupeKeepFirst(stvs);
+  return [...uniqueNames, ...uniqueStvs].join(', ');
+}
+
+// Splits what's already recorded back into names vs. platforms — a plain "last part = STV"
+// split (the old single-platform assumption) can't work once there can be several trailing STV
+// parts, so this instead checks each part against the plant's OWN configured STV list: anything
+// that matches one (case/whitespace-insensitive) is a platform, everything else is a name. A
+// value with no comma holds no names (just the very first STV, if even that's been recorded).
+function storeKeeperNames(info: string | null | undefined, allowedStvs: string[]): string[] {
   const parts = String(info ?? '').split(',').map((p) => p.trim()).filter(Boolean);
-  return parts.length >= 2 ? parts.slice(0, -1) : [];
+  const stvSet = new Set(allowedStvs.map((s) => normalize(s)));
+  return parts.filter((p) => !stvSet.has(normalize(p)));
+}
+
+function storeKeeperStvsSoFar(info: string | null | undefined, allowedStvs: string[]): string[] {
+  const parts = String(info ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+  const stvSet = new Set(allowedStvs.map((s) => normalize(s)));
+  return parts.filter((p) => stvSet.has(normalize(p)));
 }
 
 function formatStoreKeeperInfo(userName: string | null | undefined, stv: string): string {
-  return buildStoreKeeperInfo([firstNameOf(userName)], stv);
+  return buildStoreKeeperInfo([fullNameOf(userName)], [stv]);
 }
 
 // Mirrors Order Scan's canCompletePart exactly (server/routes/order-scan.ts) — anyone can
@@ -430,7 +478,7 @@ router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async
 // locally and in Notion. Deliberately NOT done on lookup, so previewing a slip (or cancelling out
 // of that dialog) leaves its status alone. No-op on a load that's already complete — reopening is
 // its own explicit, admin-only action.
-router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'), async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (req: Request, res: Response) => {
   try {
     let slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -536,19 +584,26 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
   }
 });
 
-// PATCH /api/loading/proforma/:orderNumber/stv — the ONE way an STV changes after Create
-// Operation, and admin-only. The Loading page has no STV control at all any more: operators pick
-// it once when starting the load, and correcting a mistake afterwards is an admin action taken
-// from the Proforma Slips page. Rewrites storeKeeperInfo to match, keeping whatever name is
-// already recorded there (the person who started the load) rather than re-stamping it with the
-// admin doing the correction.
-router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), async (req: Request, res: Response) => {
+// PATCH /api/loading/proforma/:orderNumber/stv — admin, super-admin, Supervisor, or the load's
+// CURRENT owner. loadingStv (the single "current" platform column, used everywhere else the app
+// needs just one) is still replaced outright — but storeKeeperInfo now ADDS the new platform to
+// whatever's already recorded there instead of losing the earlier one: a load that genuinely
+// moved from PLT-05 to PLT-08 keeps both in its history ("YASH PATEL, PLT-05, PLT-08"), the same
+// append-only treatment names get, rather than the correction silently erasing which platform it
+// actually started on.
+router.patch('/loading/proforma/:orderNumber/stv', requireLoadingWrite, async (req: Request, res: Response) => {
   try {
-    if (!isAdmin(req)) {
-      return res.status(403).json({ message: 'Only an admin can change a load\'s STV.' });
-    }
     const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    // Was missing here even before today's Supervisor/current-owner extension — harmless while
+    // this was admin-only (admin is typically plant-unrestricted anyway), but a real gap now
+    // that a plant-restricted Supervisor or owner can reach this route too.
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    const isCurrentOwner = !!slip.loadingOwnerCode && slip.loadingOwnerCode === actor(req).userCode;
+    if (!isAdmin(req) && !isSupervisor(req) && !isCurrentOwner) {
+      return res.status(403).json({ message: 'Only an admin, supervisor, or this load\'s current owner can change its STV.' });
+    }
 
     const requestedStv = String(req.body?.stv ?? '').trim();
     if (!requestedStv) return res.status(400).json({ message: 'stv is required' });
@@ -558,14 +613,15 @@ router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), 
       return res.status(400).json({ message: `"${requestedStv}" is not an STV configured for plant ${slip.plant ?? '—'}.` });
     }
 
-    // Keep every name already recorded (all owners so far, in order) so a correction only changes
+    // Keep every name already recorded (all owners so far, in order) so a correction only adds
     // the STV. Falls back to the current owner for a slip whose storeKeeperInfo holds no names.
-    const existingNames = storeKeeperNames(slip.storeKeeperInfo);
+    const existingNames = storeKeeperNames(slip.storeKeeperInfo, allowedStvs);
+    const existingStvs = storeKeeperStvsSoFar(slip.storeKeeperInfo, allowedStvs);
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingStv: matchedStv,
       storeKeeperInfo: buildStoreKeeperInfo(
-        existingNames.length ? existingNames : [firstNameOf(slip.loadingOwnerName)],
-        matchedStv,
+        existingNames.length ? existingNames : [fullNameOf(slip.loadingOwnerName)],
+        [...existingStvs, matchedStv],
       ),
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to update STV' });
@@ -581,7 +637,7 @@ router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), 
 // this load. While paused, scanning/adjusting is blocked for EVERYONE — including the owner —
 // until someone runs Claim below. This is the "current slip pause" half of the handoff: pausing
 // alone never changes who owns it or writes a handoff row; that only happens on an actual Claim.
-router.post('/loading/proforma/:orderNumber/pause', requirePageWrite('loading'), async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/pause', requireLoadingWrite, async (req: Request, res: Response) => {
   try {
     const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -594,7 +650,7 @@ router.post('/loading/proforma/:orderNumber/pause', requirePageWrite('loading'),
     }
     const { userCode } = actor(req);
     const owner = await resolveLoadOwner(slip);
-    if (owner.code && owner.code !== userCode && !isAdmin(req)) {
+    if (owner.code && owner.code !== userCode && !isAdmin(req) && !isSupervisor(req)) {
       return res.status(403).json({ message: `This load is currently owned by ${owner.name ?? owner.code} — only they (or an admin) can pause it.` });
     }
     const updated = await storage.updateProformaSlip(slip.id, { loadingPausedAt: new Date() } as any);
@@ -610,7 +666,7 @@ router.post('/loading/proforma/:orderNumber/pause', requirePageWrite('loading'),
 // a PAUSED load (that's the "anybody can activate" half) — this is the ONE action that actually
 // moves ownership and, only when the claimer is a genuinely different person than whoever paused
 // it, writes the handoff record ("who load and what time it['s] given to other").
-router.post('/loading/proforma/:orderNumber/claim', requirePageWrite('loading'), async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/claim', requireLoadingWrite, async (req: Request, res: Response) => {
   try {
     const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -630,15 +686,20 @@ router.post('/loading/proforma/:orderNumber/claim', requirePageWrite('loading'),
     }
     // The person claiming is added to StoreKeeper Info after the earlier owners ("YASH, PLT-05" →
     // "YASH, RAHUL, PLT-05"). Only for a load started here with a recorded STV — a slip whose
-    // StoreKeeper Info was typed in Notion isn't rewritten.
+    // StoreKeeper Info was typed in Notion isn't rewritten. Re-derives the full platform history
+    // from what's already recorded (not just the current loadingStv) so an earlier STV correction
+    // that added a second platform isn't lost on a later handoff.
     const slipStv = (slip as any).loadingStv as string | null | undefined;
     const storeKeeperPatch = slipStv
-      ? {
-          storeKeeperInfo: buildStoreKeeperInfo(
-            [...storeKeeperNames(slip.storeKeeperInfo), firstNameOf(userName)],
-            slipStv,
-          ),
-        }
+      ? await (async () => {
+          const allowedStvs = await plantStvList(slip.plant);
+          return {
+            storeKeeperInfo: buildStoreKeeperInfo(
+              [...storeKeeperNames(slip.storeKeeperInfo, allowedStvs), fullNameOf(userName)],
+              [...storeKeeperStvsSoFar(slip.storeKeeperInfo, allowedStvs), slipStv],
+            ),
+          };
+        })()
       : {};
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingOwnerCode: userCode ?? null, loadingOwnerName: userName ?? null, loadingPausedAt: null,
@@ -691,21 +752,45 @@ router.get('/loading/proforma/:orderNumber/handoffs', requirePageAccess('loading
 // against vehicle number, driver, company, or manufacturer — "anything user can enter", per
 // spec. Vehicle Master is small enough (tens–low hundreds of rows) that filtering the already-
 // fetched list in memory is simpler and fast enough than building a dedicated SQL search.
+//
+// Local-only misses a vehicle that was just added in Notion but hasn't synced down yet — at
+// Create Operation that meant it simply couldn't be assigned. Falls back to a live Notion
+// lookup ONLY when the local search comes up empty (not merged in every time — this keeps the
+// common case, an already-synced vehicle, exactly as fast/cheap as before, and only pays for a
+// Notion round-trip when there's actually nothing local to show). Any Notion match found this
+// way is upserted into vehicle_info on the spot (searchNotionVehicleByNumber does this) so it
+// comes back through the exact same {id, vehicleNumber, ...} shape and can be linked immediately
+// with no special-casing on the frontend — fromNotion just flags it as freshly pulled in.
 router.get('/loading/vehicles/search', requirePageAccess('loading'), async (req: Request, res: Response) => {
   try {
     const q = String(req.query.q ?? '').trim().toLowerCase();
     if (q.length < 1) return res.json({ results: [] });
     const all = await storage.getAllVehicleInfo();
-    const results = all
-      .filter((v) =>
-        [v.vehicleNumber, v.driver, v.company, v.manufacturer, v.series, v.rtoNumber]
-          .some((f) => (f ?? '').toLowerCase().includes(q)))
-      .slice(0, 8)
-      .map((v) => ({
+    const localMatches = all.filter((v) =>
+      [v.vehicleNumber, v.driver, v.company, v.manufacturer, v.series, v.rtoNumber]
+        .some((f) => (f ?? '').toLowerCase().includes(q)));
+
+    if (localMatches.length > 0) {
+      const results = localMatches.slice(0, 8).map((v) => ({
         id: v.id, vehicleNumber: v.vehicleNumber, rtoNumber: v.rtoNumber, driver: v.driver,
         company: v.company, manufacturer: v.manufacturer, volume: v.volume,
       }));
-    res.json({ results });
+      return res.json({ results });
+    }
+
+    try {
+      const fromNotion = await searchNotionVehicleByNumber(q);
+      const results = fromNotion.map((v) => ({
+        id: v.id, vehicleNumber: v.vehicleNumber, rtoNumber: v.rtoNumber, driver: v.driver,
+        company: v.company, manufacturer: v.manufacturer, volume: v.volume, fromNotion: true,
+      }));
+      return res.json({ results });
+    } catch (notionError) {
+      // A Notion hiccup here shouldn't take down the whole picker — just fall through to "no
+      // matches" the way an unsynced vehicle already did before this fallback existed.
+      console.error('Notion vehicle fallback search failed:', notionError);
+      return res.json({ results: [] });
+    }
   } catch (error) {
     console.error('Error searching vehicles for loading:', error);
     res.status(500).json({ message: 'Failed to search vehicles' });
@@ -823,7 +908,7 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
 // The FIRST assignment is open to anyone with write access to Loading; once a vehicle is
 // assigned, changing it again is restricted to whoever assigned it or an admin (see
 // vehicleAssignedByCode in shared/schema.ts) — enforced here, not just hidden client-side.
-router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loading'), async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/link-vehicle', requireLoadingWrite, async (req: Request, res: Response) => {
   try {
     const vehicleId = req.body?.vehicleId != null ? Number(req.body.vehicleId) : null;
     const vehicleNumber = String(req.body?.vehicleNumber ?? '').trim();
@@ -835,7 +920,7 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
 
     const { userCode, userName } = actor(req);
     const alreadyAssigned = !!slip.vehicleNumber && !!(slip as any).vehicleAssignedByCode;
-    if (alreadyAssigned && !isAdmin(req) && (slip as any).vehicleAssignedByCode !== userCode) {
+    if (alreadyAssigned && !isAdmin(req) && !isSupervisor(req) && (slip as any).vehicleAssignedByCode !== userCode) {
       return res.status(403).json({ message: 'Only the person who assigned this vehicle, or an admin, can change it.' });
     }
 
@@ -900,7 +985,7 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requirePageWrite('loa
 // The actual "remove stock and load it onto the vehicle" step. qty is already resolved
 // client-side (pallets × itemsPerPallet + loose, or a full-pallet auto-scan amount) — this
 // endpoint independently re-validates against the same rules Order Scan uses server-side.
-router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const barcode = String(req.body?.barcode ?? '').trim();
@@ -1172,7 +1257,7 @@ router.post('/loading/proforma/:orderNumber/scan', requirePageWrite('loading'), 
 // real scan enforces (EXTRA_NOT_ALLOWED) — this is an explicit correction tool the operator chose
 // to use, not an accidental over-scan, so it's always allowed as long as stock/loaded bounds
 // themselves aren't violated (checked below, under the same FOR UPDATE lock /scan uses).
-router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('loading'), async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const barcode = String(req.body?.barcode ?? '').trim();
@@ -1316,7 +1401,7 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requirePageWrite('load
 // POST /api/loading/proforma/:orderNumber/complete — manual override, same designation-based
 // permission Order Scan uses for its Complete button ("complete button if not loaded, same as
 // Order Scan") — works even if items are still short, unlike the automatic path above.
-router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading'), requireCompleteLoadAccess, async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/complete', requireLoadingWrite, requireCompleteLoadAccess, async (req: Request, res: Response) => {
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -1351,13 +1436,13 @@ router.post('/loading/proforma/:orderNumber/complete', requirePageWrite('loading
 // POST /api/loading/proforma/:orderNumber/reopen — undoes Complete (auto or manual), same
 // permission as Complete itself. Purely a status flip: clears loadingCompletedAt/By so the order
 // can be scanned again; nothing else about the load (items already scanned, vehicle) is touched.
-router.post('/loading/proforma/:orderNumber/reopen', requirePageWrite('loading'), requireReopenAccess, async (req: Request, res: Response) => {
+router.post('/loading/proforma/:orderNumber/reopen', requireLoadingWrite, requireReopenAccess, async (req: Request, res: Response) => {
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
     const isCurrentOwner = !!slip.loadingOwnerCode && slip.loadingOwnerCode === (req.user as any)?.userCode;
-    if (!isAdmin(req) && !isCurrentOwner) {
+    if (!isAdmin(req) && !isSupervisor(req) && !isCurrentOwner) {
       return res.status(403).json({ message: 'Only the current owner of this load or an admin can reopen it.' });
     }
 

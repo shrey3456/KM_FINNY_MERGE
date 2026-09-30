@@ -7832,24 +7832,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Create a new plant
   app.post("/api/plants", requirePageWrite("plant-management"), async (req, res) => {
+    let data;
     try {
-      const data = insertPlantSchema.parse(req.body);
+      data = insertPlantSchema.parse(req.body);
+    } catch (error) {
+      console.error("Create plant validation error:", error);
+      return res.status(400).json({ message: "Invalid plant data" });
+    }
+    try {
       const newPlant = await storage.createPlant(data); // Ensure this method exists in storage.ts
       res.status(201).json(newPlant);
     } catch (error) {
-      res.status(400).json({ message: "Invalid plant data" });
+      // The insert may have already committed before this throws (e.g. a slow/dropped
+      // connection on the response write) — that's a server-side failure, not a client
+      // validation error, so it must not be reported as a 400.
+      console.error("Create plant error:", error);
+      res.status(500).json({ message: "Failed to create plant" });
     }
   });
 
   // Update a plant
   app.put("/api/plants/:id", requirePageWrite("plant-management"), async (req, res) => {
+    const id = parseInt(req.params.id);
+    if (Number.isNaN(id)) {
+      return res.status(400).json({ message: "Invalid plant id" });
+    }
+    let data;
     try {
-      const id = parseInt(req.params.id);
-      const data = insertPlantSchema.parse(req.body);
+      data = insertPlantSchema.parse(req.body);
+    } catch (error) {
+      console.error("Update plant validation error:", error);
+      return res.status(400).json({ message: "Invalid plant data" });
+    }
+    try {
       const updatedPlant = await storage.updatePlant(id, data); // Ensure this method exists
       res.json(updatedPlant);
     } catch (error) {
-      res.status(400).json({ message: "Failed to update plant" });
+      // Same reasoning as the create route above: an error thrown after the update already
+      // committed is a server-side failure, not a client validation error, so it must not be
+      // reported as a 400.
+      console.error("Update plant error:", error);
+      res.status(500).json({ message: "Failed to update plant" });
     }
   });
 

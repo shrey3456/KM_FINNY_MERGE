@@ -41,7 +41,14 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+        // Anchored near the top (not vertically centered) with its own scroll, instead of
+        // top-[50%]/translate-y-[-50%] — a perfectly-centered dialog sits at the mercy of
+        // whatever the mobile on-screen keyboard leaves as "50% of the viewport" once it opens,
+        // which can put a search input's own results (below the input, inside the dialog) right
+        // behind the keyboard. Top-anchored means the keyboard eats from the bottom without
+        // ever reaching the dialog's already-near-the-top position; max-h + overflow-y-auto is
+        // the safety net for a dialog taller than what's left once the keyboard is up.
+        "fixed left-[50%] top-[3%] z-50 grid max-h-[94vh] w-full max-w-lg translate-x-[-50%] translate-y-0 gap-4 overflow-y-auto border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
         rotateClass,
         className
       )}

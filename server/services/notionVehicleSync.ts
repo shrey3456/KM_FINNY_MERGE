@@ -213,6 +213,65 @@ async function fetchAllVehiclePages(): Promise<any[]> {
   return pages;
 }
 
+// On-demand lookup for Loading's Create Operation vehicle picker (server/routes/loading.ts's
+// /loading/vehicles/search) when the LOCAL search finds nothing — a vehicle just added in
+// Notion but not yet synced down would otherwise be impossible to assign at Create Operation.
+// Cheap first pass: fetch only the vehicle-number property for every row (same page_size/retry
+// safety as the full sync) and match client-side, since matching by number needs the exact
+// property TYPE to build a server-side Notion filter and that's one more thing to get wrong;
+// only the matched page(s) get a full property fetch, and only those get upserted into
+// vehicle_info — from that point on they're indistinguishable from a normally-synced vehicle.
+const NOTION_SEARCH_MATCH_CAP = 5;
+
+export async function searchNotionVehicleByNumber(query: string): Promise<VehicleInfo[]> {
+  const q = query.trim().toLowerCase();
+  if (!NOTION_VEHICLE_DATABASE_ID || q.length < 1) return [];
+
+  const database: any = await notion.databases.retrieve({ database_id: NOTION_VEHICLE_DATABASE_ID });
+  const numberPropId = database.properties?.['Vehicle No. :']?.id;
+  if (!numberPropId) return [];
+
+  const matches: any[] = [];
+  let cursor: string | undefined;
+  do {
+    const response: any = await queryWithRetry({
+      database_id: NOTION_VEHICLE_DATABASE_ID,
+      page_size: 50,
+      filter_properties: [numberPropId],
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    for (const page of response.results) {
+      const num = firstOf(page.properties, 'Vehicle No. :');
+      if (num && String(num).toLowerCase().includes(q)) {
+        matches.push(page);
+        if (matches.length >= NOTION_SEARCH_MATCH_CAP) break;
+      }
+    }
+    cursor = matches.length >= NOTION_SEARCH_MATCH_CAP ? undefined : (response.has_more ? response.next_cursor ?? undefined : undefined);
+  } while (cursor);
+
+  if (matches.length === 0) return [];
+
+  // Full property fetch for just the matched pages, then upsert each into vehicle_info so the
+  // rest of the app (linking, Vehicle Master) treats it exactly like a page synced normally.
+  const filterPropertyIds = await getFilterPropertyIds();
+  const results: VehicleInfo[] = [];
+  for (const match of matches) {
+    const fullPage = await notion.pages.retrieve({ page_id: match.id, filter_properties: filterPropertyIds } as any);
+    const fields = mapNotionPageToVehicleFields(fullPage);
+    if (!fields.vehicleNumber) continue;
+    const data = buildVehicleData(fields);
+    const { rows } = await pool.query(`SELECT id FROM vehicle_info WHERE notion_page_id = $1 LIMIT 1`, [fields.notionPageId]);
+    if (rows[0]) {
+      await storage.updateVehicleInfo(rows[0].id, data as any);
+      results.push((await storage.getVehicleInfo(rows[0].id))!);
+    } else {
+      results.push(await storage.createVehicleInfo(data as any));
+    }
+  }
+  return results;
+}
+
 function diffFields(notionData: Record<string, any>, vehicle: VehicleInfo, comparable: (v: unknown) => string) {
   const updates: Record<string, any> = {};
   const fieldChanges: VehicleFieldChange[] = [];

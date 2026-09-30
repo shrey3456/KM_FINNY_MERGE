@@ -146,6 +146,7 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
               <Header
                 userName={currentUser?.username || ''}
                 userRole={currentUser?.role || ''}
+                onLogout={onLogout}
               />
               {isScanPage && (
                 <button

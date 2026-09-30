@@ -318,13 +318,33 @@ function buildProductData(fields: ReturnType<typeof mapNotionPageToFields>): Rec
   return data;
 }
 
+// Same 'service_unavailable' ("Public API object rendering exceeded the response time budget")
+// that Vehicle Master sync hit and fixed (see notionVehicleSync.ts's queryWithRetry) — this
+// database has ~45+ properties per row and was querying page_size:100 with no retry, so a slow
+// render on Notion's side had nothing to fall back on. Retry-with-backoff is the safety net here;
+// page_size dropped 100→50 to lower the odds of tripping the budget in the first place.
+async function queryWithRetry(params: any, attempt = 1): Promise<any> {
+  try {
+    return await notion.databases.query(params);
+  } catch (err: any) {
+    const retryable = err?.code === 'service_unavailable' || err?.status === 503 || err?.code === 'rate_limited';
+    if (retryable && attempt < 5) {
+      const delayMs = 1000 * 2 ** attempt; // 2s, 4s, 8s, 16s
+      console.warn(`[Notion Inventory Sync] ${err.code ?? err.status} on query — retrying in ${delayMs}ms (attempt ${attempt}/4)`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return queryWithRetry(params, attempt + 1);
+    }
+    throw err;
+  }
+}
+
 async function fetchAllNotionPages(): Promise<any[]> {
   const pages: any[] = [];
   let cursor: string | undefined;
   do {
-    const response: any = await notion.databases.query({
+    const response: any = await queryWithRetry({
       database_id: NOTION_INVENTORY_DATABASE_ID!,
-      page_size: 100,
+      page_size: 50,
       ...(cursor ? { start_cursor: cursor } : {}),
     });
     pages.push(...response.results);
