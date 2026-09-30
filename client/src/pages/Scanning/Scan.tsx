@@ -1274,7 +1274,7 @@ export default function ScanOrderPage() {
     // has one, and the dialog no longer needs its own STV picker/validation.
     const stvs = osStvsQuery.data ?? [];
     if (stvs.length > 0 && !osSelectedStv) {
-      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      toast({ title: "Select a Dispatch Directory before scanning", description: "Pick one from the Dispatch Directory selector above, then continue scanning.", variant: "destructive" });
       return;
     }
     // Same-barcode cooldown — checked before the beep/lock below so a discarded duplicate
@@ -1358,7 +1358,7 @@ export default function ScanOrderPage() {
     // still open, re-check here rather than silently submitting with stv: null.
     const stvs = osStvsQuery.data ?? [];
     if (stvs.length > 0 && !osSelectedStv) {
-      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      toast({ title: "Select a Dispatch Directory before scanning", description: "Pick one from the Dispatch Directory selector above, then continue scanning.", variant: "destructive" });
       setOsPending(null);
       osPendingRef.current = null;
       resetOsConfirmation();
@@ -3358,7 +3358,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                   Bolder fill + explicit label so it reads as an active selector, not muted text. */}
               {stvs.length > 0 && (
                 <div className="flex items-center gap-2">
-                  <span className={`shrink-0 font-semibold uppercase tracking-wide text-gray-400 ${bigView ? "text-xs" : "text-[10px]"}`}>STV</span>
+                  <span className={`shrink-0 font-semibold uppercase tracking-wide text-gray-400 ${bigView ? "text-xs" : "text-[10px]"}`}>Dispatch Directory</span>
                   <Select
                     value={osSelectedStv || NO_STV}
                     onValueChange={(v) => {
@@ -3369,10 +3369,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     <SelectTrigger className={`rounded-xl justify-center text-center font-semibold border-2 ${
                       osSelectedStv ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-500"
                     } ${bigView ? "h-11 w-56 text-base" : "h-8 w-44 text-sm"}`}>
-                      <SelectValue placeholder="Select STV…" />
+                      <SelectValue placeholder="Select Dispatch Directory…" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                      <SelectItem value={NO_STV}>— Select Dispatch Directory —</SelectItem>
                       {stvs.map((s) => (
                         <SelectItem key={s} value={s}>{s}</SelectItem>
                       ))}
@@ -3386,7 +3386,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {!osStvsQuery.isLoading && stvs.length === 0 && (
                 <div className="flex items-center">
                   <span className="rounded-xl border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
-                    No STV — create one in Plant Settings
+                    No Dispatch Directory — create one in Plant Settings
                   </span>
                 </div>
               )}
@@ -4612,10 +4612,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
                     }`}
                   >
-                    <SelectValue placeholder="Select STV…" />
+                    <SelectValue placeholder="Select Dispatch Directory…" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                    <SelectItem value={NO_STV}>— Select Dispatch Directory —</SelectItem>
                     {stvs.map((s) => (
                       <SelectItem key={s} value={s}>{s}</SelectItem>
                     ))}
@@ -4623,7 +4623,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 </Select>
               ) : !osStvsQuery.isLoading && (
                 <span className="border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
-                  No STV — create one in Plant Settings
+                  No Dispatch Directory — create one in Plant Settings
                 </span>
               )}
             </div>
@@ -5468,7 +5468,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               )}
                {stvs.length > 0 && (
                 <div className="space-y-1">
-                  <Label className="text-sm">STV <span className="text-red-500">*</span></Label>
+                  <Label className="text-sm">Dispatch Directory <span className="text-red-500">*</span></Label>
                   <Select
                     value={osSelectedStv || NO_STV}
                     onValueChange={(v) => {
@@ -5477,10 +5477,10 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     }}
                   >
                     <SelectTrigger className={`w-full rounded-xl ${!osSelectedStv ? "border-dashed text-gray-400" : ""}`}>
-                      <SelectValue placeholder="Select STV…" />
+                      <SelectValue placeholder="Select Dispatch Directory…" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                      <SelectItem value={NO_STV}>— Select Dispatch Directory —</SelectItem>
                       {stvs.map((s) => (
                         <SelectItem key={s} value={s}>{s}</SelectItem>
                       ))}

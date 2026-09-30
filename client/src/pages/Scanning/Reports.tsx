@@ -287,7 +287,7 @@ function buildSlipSummaryRows(slip: LoadDateReportSlip): Array<Array<string | nu
   return rows;
 }
 function buildSlipActivityRows(slip: LoadDateActivitySlip): Array<Array<string | number>> {
-  const rows: Array<Array<string | number>> = [["#", "Scanned By", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time", "Void"]];
+  const rows: Array<Array<string | number>> = [["#", "Scanned By", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "Dispatch Directory", "Time", "Void"]];
   slip.events.forEach((e, idx) => rows.push([
     idx + 1, e.scannedByName ?? "", e.barcode ?? "", e.itemName ?? "",
     e.pallets ?? 0, e.looseQty ?? 0, e.totalQty ?? 0,
@@ -651,7 +651,7 @@ const Reports = () => {
     { id: "barcode", label: "Barcode", filterType: "text", options: filterValues.barcode ?? [], accessor: (r) => r.barcode },
     { id: "qty", label: "Qty", filterType: "number", options: [], disableValues: true, accessor: (r) => r.totalQty },
     { id: "pallets", label: "Pallets", filterType: "number", options: [], disableValues: true, accessor: (r) => r.pallets },
-    { id: "stv", label: "STV", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
+    { id: "stv", label: "Dispatch Directory", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
     { id: "orderDate", label: "Order Date", filterType: "date", options: filterValues.orderDate ?? [], accessor: (r) => r.orderDate },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
@@ -1061,7 +1061,7 @@ const Reports = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Order Date", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
     ...src.map((h) => [
       h.srNo ?? "",
       h.scannedByName ?? "",
@@ -1223,7 +1223,7 @@ const Reports = () => {
     },
     {
       id: "stv",
-      header: columnHeader("stv", "STV"),
+      header: columnHeader("stv", "Dispatch Directory"),
       width: 90,
       accessor: (row) => row.stv,
       totalable: false,
@@ -1928,7 +1928,7 @@ const Reports = () => {
                     )}
                     {row.stv && (
                       <span>
-                        <span className="text-gray-400">STV </span>
+                        <span className="text-gray-400">Dispatch Directory </span>
                         <span className="font-medium text-gray-700">{row.stv}</span>
                       </span>
                     )}
@@ -2189,7 +2189,7 @@ const Reports = () => {
         </div>
         {editStvSupported && (
           <div className="space-y-1.5">
-            <Label className="text-sm">STV</Label>
+            <Label className="text-sm">Dispatch Directory</Label>
             <Input value={editStv} onChange={(e) => setEditStv(e.target.value)} placeholder="e.g. PLT-08" />
           </div>
         )}

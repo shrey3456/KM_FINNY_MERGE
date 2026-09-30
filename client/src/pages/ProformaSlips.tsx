@@ -352,15 +352,15 @@ export default function ProformaSlips() {
   const saveStvMutation = useMutation({
     mutationFn: async ({ orderNumber, stv }: { orderNumber: string; stv: string }) => {
       const res = await apiRequest('PATCH', `/api/loading/proforma/${encodeURIComponent(orderNumber)}/stv`, { stv });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || 'Failed to update STV');
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || 'Failed to update Dispatch Directory');
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-      toast({ title: 'STV updated', description: 'StoreKeeper Info has been updated to match.' });
+      toast({ title: 'Dispatch Directory updated', description: 'StoreKeeper Info has been updated to match.' });
       setStvEditSlip(null);
     },
-    onError: (err: any) => toast({ title: 'Could not update STV', description: err?.message ?? 'Failed', variant: 'destructive' }),
+    onError: (err: any) => toast({ title: 'Could not update Dispatch Directory', description: err?.message ?? 'Failed', variant: 'destructive' }),
   });
   const userDept = String(currentUserInfo?.department || '').toLowerCase().trim();
   const userDesig = String(currentUserInfo?.designation || '').toLowerCase().trim();
@@ -1521,7 +1521,7 @@ export default function ProformaSlips() {
     },
     {
       id: 'loadingStv',
-      header: columnHeader('loadingStv', 'STV'),
+      header: columnHeader('loadingStv', 'Dispatch Directory'),
       width: 90,
       render: (slip) => slip.loadingStv || ' ',
     },
@@ -1548,7 +1548,7 @@ export default function ProformaSlips() {
                 correct (loadingStv is stamped by Create Operation). */}
             {isAdminOrSuper && slip.loadingStv && (
               <DropdownMenuItem onClick={() => { setStvEditSlip(slip); setStvEditValue(slip.loadingStv ?? ''); }}>
-                <Pencil className="mr-2 h-4 w-4" /> Edit STV ({slip.loadingStv})
+                <Pencil className="mr-2 h-4 w-4" /> Edit Dispatch Directory ({slip.loadingStv})
               </DropdownMenuItem>
             )}
 
@@ -2984,7 +2984,7 @@ export default function ProformaSlips() {
       <Dialog open={!!stvEditSlip} onOpenChange={(open) => { if (!open) setStvEditSlip(null); }}>
         <DialogContent className="sm:max-w-[420px]">
           <DialogHeader>
-            <DialogTitle>Edit STV</DialogTitle>
+            <DialogTitle>Edit Dispatch Directory</DialogTitle>
             <DialogDescription>
               Order #{stvEditSlip?.orderNumber} · {stvEditSlip?.plant}. Changing this also updates the slip's StoreKeeper Info.
             </DialogDescription>
@@ -2992,7 +2992,7 @@ export default function ProformaSlips() {
           <div className="space-y-3 py-2">
             <Select value={stvEditValue} onValueChange={setStvEditValue}>
               <SelectTrigger>
-                <SelectValue placeholder="Select STV…" />
+                <SelectValue placeholder="Select Dispatch Directory…" />
               </SelectTrigger>
               <SelectContent>
                 {(stvEditOptionsQuery.data ?? []).map((st) => (
@@ -3001,7 +3001,7 @@ export default function ProformaSlips() {
               </SelectContent>
             </Select>
             {!stvEditOptionsQuery.isLoading && (stvEditOptionsQuery.data ?? []).length === 0 && (
-              <p className="text-sm text-red-600">No STV configured for this plant — add one in Plant Settings.</p>
+              <p className="text-sm text-red-600">No Dispatch Directory configured for this plant — add one in Plant Settings.</p>
             )}
           </div>
           <DialogFooter>

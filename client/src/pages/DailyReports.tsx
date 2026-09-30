@@ -314,7 +314,7 @@ export default function DailyReports() {
     const rows: ExportRow[] = [
       ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime)],
       [],
-      ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra?", "Scanned By"],
+      ["Time", "Barcode", "Item Name", "Qty", "Pallets", "Dispatch Directory", "Extra?", "Scanned By"],
       ...data.activities.map((a) => [
         fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
         a.isExtra ? "Yes" : "No", a.scannedByName ?? "",
@@ -364,7 +364,7 @@ export default function DailyReports() {
     },
     { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, cellClassName: "tabular-nums font-medium text-emerald-600" },
     { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? null, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets?.toFixed(2) ?? "—" },
-    { id: "stv", header: "STV", width: 100, accessor: (r) => r.stv, totalable: false, cellClassName: "text-gray-500", render: (r) => r.stv || "—" },
+    { id: "stv", header: "Dispatch Directory", width: 100, accessor: (r) => r.stv, totalable: false, cellClassName: "text-gray-500", render: (r) => r.stv || "—" },
     { id: "scannedByName", header: "By", width: 140, accessor: (r) => r.scannedByName, totalable: false, cellClassName: "text-gray-500", render: (r) => r.scannedByName || "—" },
   ];
 
@@ -979,7 +979,7 @@ function CsvDetailDialog({ date, csv, initialTab, onClose }: { date: string; csv
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra?", "Scanned By"],
+          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "Dispatch Directory", "Extra?", "Scanned By"],
           ...detail.activities.map((a) => [
             fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
             a.isExtra ? "Yes" : "No", a.scannedByName ?? "",

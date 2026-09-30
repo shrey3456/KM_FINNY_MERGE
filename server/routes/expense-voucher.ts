@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { Client } from '@notionhq/client';
 import { requirePageAccess } from '../lib/pageAccess';
 
@@ -813,10 +813,22 @@ async function findMergeSiblings(
   return siblings;
 }
 
+// Only suggest drivers belonging to this company (the "Company :" select
+// property on the driver database) -- exact option name as stored in Notion.
+const DRIVER_SUGGESTION_COMPANY = 'KRUPA MARKETING';
+
 // Paginates the driver database once, start to finish, and returns every
-// display name. This is the slow part (up to 10 sequential Notion calls) --
-// getDriverNameList below exists specifically to make sure a real user's
-// request almost never has to wait on this directly.
+// display name whose "Company :" is DRIVER_SUGGESTION_COMPANY. This is the
+// slow part (up to 10 sequential Notion calls) -- getDriverNameList below
+// exists specifically to make sure a real user's request almost never has
+// to wait on this directly.
+//
+// The company check is done in-memory (not as a Notion `filter`) -- a
+// server-side `select` filter on this database turned out to make each page
+// dramatically slower (one page went from ~6s to ~27s, then to an outright
+// request timeout), compounding across up to 10 pages plus retries into a
+// multi-minute hang. Fetching everything unfiltered (as before) and checking
+// "Company :" locally keeps the same per-page latency as the unfiltered scan.
 async function fetchDriverNameList(notion: Client, driverDatabaseId: string): Promise<string[]> {
   const names = new Set<string>();
   let cursor: string | undefined = undefined;
@@ -834,6 +846,8 @@ async function fetchDriverNameList(notion: Client, driverDatabaseId: string): Pr
 
     for (const page of resp.results as any[]) {
       if (!('properties' in page)) continue;
+      const company = page.properties['Company :']?.select?.name;
+      if (company !== DRIVER_SUGGESTION_COMPANY) continue;
       const titleProp = Object.values(page.properties).find((p: any) => p.type === 'title') as any;
       const name = titleProp?.title?.map((t: any) => t.plain_text || '').join('').trim();
       if (name) names.add(name);
@@ -941,8 +955,10 @@ router.get('/expense-voucher/driver-suggestions', async (req, res) => {
   }
 });
 
-// Expense voucher API - Protected
-router.post('/expense-voucher', requirePageAccess('expense-voucher'), async (req, res) => {
+// Search handler shared by the Expense Voucher and Toll Voucher pages (the Toll Voucher page reads the
+// same Notion records through searchVoucherData below), so both apply identical date scoping,
+// voucher-number / driver-name search, same-driver merging and per-vehicle grouping.
+async function expenseVoucherHandler(req: Request, res: Response) {
   try {
     const { orderNumber, driverName } = req.body;
     // The date is optional: a valid YYYY-MM-DD scopes the search to that day,
@@ -1256,6 +1272,12 @@ router.post('/expense-voucher', requirePageAccess('expense-voucher'), async (req
       const baseInfo = expenseVoucherData.voucherInfo as Record<string, string>;
       const baseDriver = getVoucherDriverName(baseInfo);
 
+      // Sibling merging MUST be scoped to the voucher actually being viewed's own
+      // date, not whatever date (or lack of one) the search request carried --
+      // otherwise a dateless/all-dates search for the same driver + vehicle pulls
+      // in entirely different days' trips and merges their totals together.
+      const baseVoucherDate = properties['Voucher Date :']?.date?.start || voucherDate;
+
       const [dieselBillDetails, orderDetails, driverDetails, mergeSiblings] = await Promise.all([
         dieselBillNo
           ? findMatchingPage(notion, DIESEL_BILL_DATABASE_ID, dieselBillNo, 1, 50)
@@ -1279,7 +1301,7 @@ router.post('/expense-voucher', requirePageAccess('expense-voucher'), async (req
               })
           : Promise.resolve(null),
         baseDriver
-          ? findMergeSiblings(notion, expenseVoucherDatabaseId, baseDriver.toLowerCase(), voucherDate, firstMatch.id, 10)
+          ? findMergeSiblings(notion, expenseVoucherDatabaseId, baseDriver.toLowerCase(), baseVoucherDate, firstMatch.id, 10)
               .catch((err) => {
                 console.error('🔗 Error merging same driver/date vouchers:', err);
                 return [] as Record<string, string>[];
@@ -1304,7 +1326,13 @@ router.post('/expense-voucher', requirePageAccess('expense-voucher'), async (req
       //    summed across every voucher.
       //  - Diesel liters and Route KM's are summed only ONCE per UNIQUE diesel bill
       //    no. If two vouchers share the same bill no, the duplicate is NOT re-added.
-      if (mergeSiblings.length > 0) {
+      // Always route through mergeVoucherInfos, even with zero siblings found --
+      // it's the only place that recomputes "ECS Payment :" from the CA BKUP-corrected
+      // Conveyance Allowance. Notion's own "ECS Payment :" formula property is derived
+      // from the (broken, always-0) Conveyance Allowance formula, not CA BKUP, so a
+      // lone voucher left unprocessed here would print that wrong raw total (effectively
+      // just its Toll/OnRoad, silently dropping the real Conveyance Allowance).
+      {
         const candidateInfos: Record<string, string>[] = [baseInfo, ...mergeSiblings];
 
         console.log(
@@ -1339,7 +1367,7 @@ router.post('/expense-voucher', requirePageAccess('expense-voucher'), async (req
           expenseVoucherData.vehicleOptions = vehicleOptions;
         } else {
           console.log(
-            `🔗 Merging ${candidateInfos.length} vouchers for driver "${baseDriver}" on ${voucherDate}`
+            `🔗 Merging ${candidateInfos.length} voucher(s) for driver "${baseDriver}" on ${voucherDate}`
           );
           expenseVoucherData.voucherInfo = mergeVoucherInfos(candidateInfos);
           expenseVoucherData.mergedVoucherCount = candidateInfos.length;
@@ -1374,6 +1402,28 @@ router.post('/expense-voucher', requirePageAccess('expense-voucher'), async (req
     });
   }
 
-});
+}
+
+// Expense voucher API - Protected
+router.post('/expense-voucher', requirePageAccess('expense-voucher'), expenseVoucherHandler);
+
+// Runs the shared search for another route (Toll Voucher) and hands back the status code and JSON
+// body instead of writing them to a response. Page-access checks stay with the calling route.
+export async function searchVoucherData(body: {
+  orderNumber?: string;
+  driverName?: string;
+  voucherDate?: string;
+}): Promise<{ status: number; body: any }> {
+  let status = 200;
+  let payload: any = null;
+  const captureRes = {
+    status(code: number) { status = code; return captureRes; },
+    json(data: any) { payload = data; return captureRes; },
+  };
+  await expenseVoucherHandler({ body } as Request, captureRes as unknown as Response);
+  return { status, body: payload };
+}
+
+export { getVoucherDriverName, getVoucherVehicleNumber };
 
 export default router;

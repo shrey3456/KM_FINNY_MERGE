@@ -795,7 +795,7 @@ router.get('/order-scan/stvs', async (req: Request, res: Response) => {
 
     res.json(stvRows.map((r) => r.stv));
   } catch (err) {
-    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch STVs' });
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch Dispatch Directories' });
   }
 });
 

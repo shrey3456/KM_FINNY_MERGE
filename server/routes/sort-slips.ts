@@ -616,7 +616,7 @@ router.post('/sort-slips', requirePageWrite('sort-slip'), async (req: Request, r
     const requestedStv = String(req.body?.platformStv ?? '').trim();
     if (!orderNumber) return res.status(400).json({ message: 'An order number is required' });
     if (!loaderCode) return res.status(400).json({ message: 'Pick the loader who will sort this order' });
-    if (!requestedStv) return res.status(400).json({ message: 'Select an STV/platform before creating this sort slip' });
+    if (!requestedStv) return res.status(400).json({ message: 'Select a Dispatch Directory before creating this sort slip' });
 
     const { rows: orderRows } = await client.query(
       `SELECT ps.id, ps.order_number, ps.party_name, ps.plant, ps.order_date::text AS order_date,
@@ -640,11 +640,11 @@ router.post('/sort-slips', requirePageWrite('sort-slip'), async (req: Request, r
     );
     const allowedStvs: string[] = stvRows.map((r: any) => String(r.stv));
     if (allowedStvs.length === 0) {
-      return res.status(400).json({ message: `No STV is configured for plant ${order.plant ?? '—'} — add one in Plant Settings first` });
+      return res.status(400).json({ message: `No Dispatch Directory is configured for plant ${order.plant ?? '—'} — add one in Plant Settings first` });
     }
     const matchedStv = allowedStvs.find((s) => s.trim().toLowerCase() === requestedStv.toLowerCase());
     if (!matchedStv) {
-      return res.status(400).json({ message: `"${requestedStv}" is not an STV configured for plant ${order.plant ?? '—'}` });
+      return res.status(400).json({ message: `"${requestedStv}" is not a Dispatch Directory configured for plant ${order.plant ?? '—'}` });
     }
 
     // Everything about the loader is checked BEFORE anything is written, so a refusal leaves no

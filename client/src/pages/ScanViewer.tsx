@@ -682,7 +682,7 @@ export default function ScanViewer() {
     { id: "extraPlt", label: "Extra Plt", filterType: "number", options: mvNumberOptions((i) => mvPltQty(mvRowState(i).extra, i.itemsPerPallet), 2), accessor: (i) => mvPltQty(mvRowState(i).extra, i.itemsPerPallet) },
     { id: "status", label: "Status", filterType: "text", disableConditions: true, options: mvTextOptions(mvStatusLabel), accessor: mvStatusLabel },
     {
-      id: "stv", label: "STV", filterType: "enum", disableConditions: true,
+      id: "stv", label: "Dispatch Directory", filterType: "enum", disableConditions: true,
       options: stvOptions.map((st) => ({ value: st, label: st })),
       accessor: (i) => stvsByBarcode.get(normalize(i.barcode ?? "")) ?? [],
     },
@@ -941,7 +941,7 @@ export default function ScanViewer() {
       // branch in lib/columnFilters.ts). Options come from the whole order, so the checklist
       // still offers every STV even after other filters have narrowed the visible rows.
       {
-        id: "stv", label: "STV", filterType: "enum",
+        id: "stv", label: "Dispatch Directory", filterType: "enum",
         options: stvOptions.map((s) => ({ value: s, label: s })),
         // Checklist only — an STV is a label you either pick or don't, so contains/equals
         // operators would just be a slower way to do the same thing.
@@ -1114,18 +1114,18 @@ export default function ScanViewer() {
       ) : historyEventsInStvScope.length === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">
           {activeStvFilterValues.length > 0
-            ? `No scans for this item under ${activeStvFilterValues.length > 1 ? "the selected STVs" : `STV ${activeStvFilterValues[0]}`}.`
+            ? `No scans for this item under ${activeStvFilterValues.length > 1 ? "the selected Dispatch Directories" : `Dispatch Directory ${activeStvFilterValues[0]}`}.`
             : "No scans yet for this item in this order."}
         </p>
       ) : (
         <>
         {historyStvOptions.length > 1 && (
           <div className="mb-2 flex items-center gap-2">
-            <Label className="text-xs text-gray-500">STV</Label>
+            <Label className="text-xs text-gray-500">Dispatch Directory</Label>
             <Select value={historyStvFilter || "__all__"} onValueChange={(v) => setHistoryStvFilter(v === "__all__" ? "" : v)}>
               <SelectTrigger className="h-7 w-40 text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="__all__">All STVs</SelectItem>
+                <SelectItem value="__all__">All Dispatch Directories</SelectItem>
                 {historyStvOptions.map((s) => (
                   <SelectItem key={s} value={s}>{s}</SelectItem>
                 ))}
@@ -1142,7 +1142,7 @@ export default function ScanViewer() {
                 <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
                 <th className="w-[150px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
                 <th className="w-[130px] border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                <th className="w-[110px] border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
+                <th className="w-[110px] border-r border-gray-200 px-2 py-2 font-semibold">Dispatch Directory</th>
                 <th className="border-r border-gray-200 px-2 py-2 font-semibold">Order</th>
                 <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
                 <th className="w-16 border-r border-gray-200 px-2 py-2 font-semibold">Status</th>
@@ -1417,7 +1417,7 @@ export default function ScanViewer() {
     },
     {
       id: "stv",
-      header: columnHeader("stv", "STV"),
+      header: columnHeader("stv", "Dispatch Directory"),
       width: 110,
       sortable: true,
       accessor: (row) => stvsByBarcode.get(normalize(row.barcode ?? "")) ?? [],
@@ -1604,7 +1604,7 @@ export default function ScanViewer() {
     },
     {
       id: "stv",
-      header: mvColumnHeader("stv", "STV"),
+      header: mvColumnHeader("stv", "Dispatch Directory"),
       width: 110,
       sortable: true,
       accessor: (row) => stvsByBarcode.get(normalize(row.barcode ?? "")) ?? [],
@@ -1740,6 +1740,7 @@ export default function ScanViewer() {
                   </SelectContent>
                 </Select>
               )}
+              <StvReadout stvs={stvOptions} />
               {selectedSession?.importedByName && <span>· {selectedSession.importedByName}</span>}
               {/* Scan start/end — set once each, when the part is activated and when it's
                   marked complete (order_import_sessions.scanActivatedAt/scanCompletedAt).
@@ -2765,6 +2766,24 @@ export default function ScanViewer() {
 // to its own expected qty, so extras can't push it up) — the same figure as the table's progress ring
 // and the totals card. It used to be "items fully done ÷ items", so an order with most boxes in but
 // few items quite finished read 5%, and at that size the rounded bar collapsed to a dot.
+// Read-only counterpart of the STV selector on the Scan Order / Unloading pages (same "STV" label
+// and navy pill). This viewer never scans, so there is nothing to pick — it shows the STV(s) the
+// operation's scans were actually recorded under. Renders nothing until a scan carries an STV.
+function StvReadout({ stvs }: { stvs: string[] }) {
+  if (stvs.length === 0) return null;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Dispatch Directory</span>
+      <span
+        className="inline-flex h-7 min-w-[9rem] items-center justify-center rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-3 text-xs font-semibold text-[#001d6e] ring-1 ring-[#001d6e]/20"
+        title={stvs.length > 1 ? "Scans on this operation were recorded under more than one Dispatch Directory" : "Dispatch Directory this operation was scanned under"}
+      >
+        {stvs.join(", ")}
+      </span>
+    </div>
+  );
+}
+
 function ProgressReadout({ pct, doneItems, totalItems }: { pct: number; doneItems: number; totalItems: number }) {
   const complete = totalItems > 0 && pct >= 100;
   return (
@@ -2953,6 +2972,18 @@ function UnloadingViewerSection({
   });
   const uItems = uSessionDetailQuery.data?.items ?? [];
   const uSelectedSession = uSessionDetailQuery.data?.session ?? null;
+
+  // STV(s) the selected vehicle's scans were recorded under, for the read-only STV pill. Same
+  // per-session events endpoint the Unloading page uses; voided scans are skipped.
+  const uEventsQuery = useQuery<{ events: { stv: string | null; voided: boolean | null }[] }>({
+    queryKey: ["/api/unloading/sessions", uSessionId, "events", "scan-viewer-stv"],
+    queryFn: () => apiRequest("GET", `/api/unloading/sessions/${uSessionId}/events`).then((r) => r.json()),
+    enabled: uSessionId != null,
+  });
+  const uStvs = useMemo(
+    () => Array.from(new Set((uEventsQuery.data?.events ?? []).filter((e) => e.stv && !e.voided).map((e) => e.stv as string))).sort((a, b) => a.localeCompare(b)),
+    [uEventsQuery.data],
+  );
 
   // Batch totals — same card the real Unloading page builds for its own item totals (itemTotals/
   // itemPct in Unloading.tsx): Total/Received/Remaining/Extra tiles (each a click-to-filter
@@ -3193,7 +3224,7 @@ function UnloadingViewerSection({
                   <th className="w-7 border-r border-gray-200 px-2 py-2 font-semibold">#</th>
                   <th className="w-[150px] border-r border-gray-200 px-2 py-2 font-semibold">Date &amp; Time</th>
                   <th className="w-[130px] border-r border-gray-200 px-2 py-2 font-semibold">Scanned By</th>
-                  <th className="w-[110px] border-r border-gray-200 px-2 py-2 font-semibold">STV</th>
+                  <th className="w-[110px] border-r border-gray-200 px-2 py-2 font-semibold">Dispatch Directory</th>
                   <th className="border-r border-gray-200 px-2 py-2 font-semibold">Vehicle</th>
                   <th className="w-[120px] border-r border-gray-200 px-2 py-2 font-semibold">Order Date</th>
                   <th className="w-14 border-r border-gray-200 px-2 py-2 text-center font-semibold">Qty</th>
@@ -3327,6 +3358,7 @@ function UnloadingViewerSection({
               </Select>
             )}
             {uSelectedSession?.scanStatus && uSessionStatusBadge(uSelectedSession.scanStatus)}
+            {uSessionId != null && <StvReadout stvs={uStvs} />}
           </div>
           {uSessionId != null && uItems.length > 0 && (
             <ProgressReadout pct={uItemPct} doneItems={uFullyDone} totalItems={uTotalReal} />

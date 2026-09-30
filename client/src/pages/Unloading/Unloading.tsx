@@ -852,7 +852,7 @@ export default function Unloading() {
     if (!barcode || !detail || locked || scanLockRef.current || pending) return;
 
     if (stvs.length > 0 && !selectedStv) {
-      toast({ title: "Select an STV before scanning", description: "Pick one from the STV selector above, then continue scanning.", variant: "destructive" });
+      toast({ title: "Select a Dispatch Directory before scanning", description: "Pick one from the Dispatch Directory selector above, then continue scanning.", variant: "destructive" });
       return;
     }
 
@@ -1286,7 +1286,7 @@ export default function Unloading() {
   // own it just read as one stray dropdown floating in whitespace.
   const scanStvControl = canWrite && !locked ? (
     <div className="flex items-center gap-2">
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Dispatch Directory</span>
       {stvs.length > 0 ? (
           // Same dropdown rotated or not. It used to swap to a native <select> when rotated, because
           // rotating the popup in place mis-positioned it — but a native select's list is drawn by
@@ -1301,10 +1301,10 @@ export default function Unloading() {
                 ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
                 : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
             }`}>
-              <SelectValue placeholder="Select STV…" />
+              <SelectValue placeholder="Select Dispatch Directory…" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+              <SelectItem value={NO_STV}>— Select Dispatch Directory —</SelectItem>
               {stvs.map((st) => (
                 <SelectItem key={st} value={st}>{st}</SelectItem>
               ))}
@@ -1312,7 +1312,7 @@ export default function Unloading() {
           </Select>
       ) : !stvsQuery.isLoading && (
         <span className="rounded-full border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-700">
-          No STV — create one in Plant Settings
+          No Dispatch Directory — create one in Plant Settings
         </span>
       )}
     </div>
@@ -2265,13 +2265,13 @@ export default function Unloading() {
 
             {stvs.length > 0 && (
               <div className="space-y-1">
-                <Label className="text-sm">STV <span className="text-red-500">*</span></Label>
+                <Label className="text-sm">Dispatch Directory <span className="text-red-500">*</span></Label>
                 <Select value={selectedStv || NO_STV} onValueChange={(v) => setSelectedStv(v === NO_STV ? "" : v)}>
                   <SelectTrigger className={`w-full rounded-xl ${!selectedStv ? "border-dashed text-gray-400" : ""}`}>
-                    <SelectValue placeholder="Select STV…" />
+                    <SelectValue placeholder="Select Dispatch Directory…" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                    <SelectItem value={NO_STV}>— Select Dispatch Directory —</SelectItem>
                     {stvs.map((s) => (
                       <SelectItem key={s} value={s}>{s}</SelectItem>
                     ))}

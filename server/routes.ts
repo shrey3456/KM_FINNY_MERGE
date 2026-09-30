@@ -7873,7 +7873,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const stvs = await storage.listPlantStvs(plantId);
       res.json(stvs);
     } catch (error) {
-      res.status(500).json({ message: "Failed to fetch STVs" });
+      res.status(500).json({ message: "Failed to fetch Dispatch Directories" });
     }
   });
 
@@ -7885,7 +7885,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const payloadSchema = z.object({
-        stv: z.string().min(1, "STV is required"),
+        stv: z.string().min(1, "Dispatch Directory is required"),
       });
 
       const payload = payloadSchema.parse(req.body);
@@ -7896,7 +7896,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.status(201).json(newStv);
     } catch (error) {
-      res.status(400).json({ message: "Invalid STV data" });
+      res.status(400).json({ message: "Invalid Dispatch Directory data" });
     }
   });
 
@@ -7904,11 +7904,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
-        return res.status(400).json({ message: "Invalid STV id" });
+        return res.status(400).json({ message: "Invalid Dispatch Directory id" });
       }
 
       const payloadSchema = z.object({
-        stv: z.string().min(1, "STV is required"),
+        stv: z.string().min(1, "Dispatch Directory is required"),
       });
 
       const payload = payloadSchema.parse(req.body);
@@ -7916,7 +7916,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.json(updated);
     } catch (error) {
-      res.status(400).json({ message: "Failed to update STV" });
+      res.status(400).json({ message: "Failed to update Dispatch Directory" });
     }
   });
 
@@ -7924,13 +7924,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const id = parseInt(req.params.id);
       if (Number.isNaN(id)) {
-        return res.status(400).json({ message: "Invalid STV id" });
+        return res.status(400).json({ message: "Invalid Dispatch Directory id" });
       }
 
       await storage.deletePlantStv(id);
       res.json({ success: true });
     } catch (error) {
-      res.status(500).json({ message: "Failed to delete STV" });
+      res.status(500).json({ message: "Failed to delete Dispatch Directory" });
     }
   });
 

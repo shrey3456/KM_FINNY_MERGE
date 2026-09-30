@@ -425,15 +425,15 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
     // storeKeeperInfo is worse than a blocked Create Operation.
     const requestedStv = String(req.body?.stv ?? '').trim();
     if (!requestedStv) {
-      return res.status(400).json({ message: 'Select an STV before creating this load operation.' });
+      return res.status(400).json({ message: 'Select a Dispatch Directory before creating this load operation.' });
     }
     const allowedStvs = await plantStvList(slip.plant);
     if (allowedStvs.length === 0) {
-      return res.status(400).json({ message: `No STV is configured for plant ${slip.plant ?? '—'} — add one in Plant Settings first.` });
+      return res.status(400).json({ message: `No Dispatch Directory is configured for plant ${slip.plant ?? '—'} — add one in Plant Settings first.` });
     }
     const matchedStv = allowedStvs.find((s) => normalize(s) === normalize(requestedStv));
     if (!matchedStv) {
-      return res.status(400).json({ message: `"${requestedStv}" is not an STV configured for plant ${slip.plant ?? '—'}.` });
+      return res.status(400).json({ message: `"${requestedStv}" is not a Dispatch Directory configured for plant ${slip.plant ?? '—'}.` });
     }
 
     if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS) {
@@ -512,7 +512,7 @@ router.post('/loading/proforma/:orderNumber/start', requirePageWrite('loading'),
 router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), async (req: Request, res: Response) => {
   try {
     if (!isAdmin(req)) {
-      return res.status(403).json({ message: 'Only an admin can change a load\'s STV.' });
+      return res.status(403).json({ message: 'Only an admin can change a load\'s Dispatch Directory.' });
     }
     const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
@@ -522,7 +522,7 @@ router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), 
     const allowedStvs = await plantStvList(slip.plant);
     const matchedStv = allowedStvs.find((s) => normalize(s) === normalize(requestedStv));
     if (!matchedStv) {
-      return res.status(400).json({ message: `"${requestedStv}" is not an STV configured for plant ${slip.plant ?? '—'}.` });
+      return res.status(400).json({ message: `"${requestedStv}" is not a Dispatch Directory configured for plant ${slip.plant ?? '—'}.` });
     }
 
     // Keep every name already recorded (all owners so far, in order) so a correction only changes
@@ -535,12 +535,12 @@ router.patch('/loading/proforma/:orderNumber/stv', requirePageWrite('loading'), 
         matchedStv,
       ),
     } as any);
-    if (!updated) return res.status(500).json({ message: 'Failed to update STV' });
+    if (!updated) return res.status(500).json({ message: 'Failed to update Dispatch Directory' });
     res.json({ slip: updated });
     if ((slip as any).notionStoreKeeperPush) void pushStoreKeeperInfoToNotion(updated.orderNumber, (updated as any).storeKeeperInfo);
   } catch (error) {
     console.error('Error updating load STV:', error);
-    res.status(500).json({ message: 'Failed to update STV' });
+    res.status(500).json({ message: 'Failed to update Dispatch Directory' });
   }
 });
 

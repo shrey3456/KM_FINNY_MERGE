@@ -305,7 +305,7 @@ export default function PlantSettings() {
         });
       }
       setNewStv("");
-      toast({ title: "Success", description: "STV added" });
+      toast({ title: "Success", description: "Dispatch Directory added" });
     },
     onError: (err: any) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -349,7 +349,7 @@ export default function PlantSettings() {
       }
       setEditingStvId(null);
       setEditingStvValue("");
-      toast({ title: "Success", description: "STV updated" });
+      toast({ title: "Success", description: "Dispatch Directory updated" });
     },
     onError: (err: any, _variables, context) => {
       if (context?.previousStvs && expandedPlantId) {
@@ -397,7 +397,7 @@ export default function PlantSettings() {
           refetchType: "inactive",
         });
       }
-      toast({ title: "Deleted", description: "STV removed" });
+      toast({ title: "Deleted", description: "Dispatch Directory removed" });
     },
     onError: (err: any, _variables, context) => {
       if (context?.previousStvs && expandedPlantId) {
@@ -602,7 +602,7 @@ export default function PlantSettings() {
     },
     {
       id: "stvs",
-      header: "STVs",
+      header: "Dispatch Directories",
       width: 105,
       render: (p) => (
         <Button
@@ -613,7 +613,7 @@ export default function PlantSettings() {
         >
           <div className="flex items-center gap-1.5">
             {expandedPlantId === p.id ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            <span>View STVs</span>
+            <span>View Dispatch Directories</span>
           </div>
         </Button>
       ),
@@ -676,12 +676,12 @@ export default function PlantSettings() {
             <Tag className="h-4 w-4 text-muted-foreground" />
           </div>
           <div className="space-y-0.5">
-            <div className="text-sm font-semibold">STV Directory</div>
+            <div className="text-sm font-semibold">Dispatch Directory</div>
             <div className="text-xs text-muted-foreground">{plant.name}</div>
           </div>
         </div>
         <div className="rounded-full border bg-white px-3 py-1 text-xs font-medium text-muted-foreground">
-          {stvs?.length ?? 0} STVs
+          {stvs?.length ?? 0} Dispatch Directories
         </div>
       </div>
 
@@ -689,7 +689,7 @@ export default function PlantSettings() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex w-full max-w-md gap-2">
             <Input
-              placeholder="Add STV"
+              placeholder="Add Dispatch Directory"
               value={newStv}
               onChange={(event) => setNewStv(event.target.value)}
               onClick={(event) => event.stopPropagation()}
@@ -709,7 +709,7 @@ export default function PlantSettings() {
         </div>
 
         {isStvsLoading ? (
-          <div className="mt-4 text-sm text-muted-foreground">Loading STVs...</div>
+          <div className="mt-4 text-sm text-muted-foreground">Loading Dispatch Directories...</div>
         ) : stvs && stvs.length > 0 ? (
           <div className="mt-4 space-y-2">
             {stvs.map((stv: any, index: number) => (
@@ -789,7 +789,7 @@ export default function PlantSettings() {
             ))}
           </div>
         ) : (
-          <div className="mt-4 text-sm text-muted-foreground">No STVs added yet.</div>
+          <div className="mt-4 text-sm text-muted-foreground">No Dispatch Directories added yet.</div>
         )}
       </div>
     </div>
@@ -1113,7 +1113,7 @@ export default function PlantSettings() {
                   onClick={() => handleToggleStvPanel(plant)}
                 >
                   {expandedPlantId === plant.id ? <ChevronDown className="h-4 w-4 mr-1.5" /> : <ChevronRight className="h-4 w-4 mr-1.5" />}
-                  View STVs
+                  View Dispatch Directories
                 </Button>
 
                 {expandedPlantId === plant.id && (
