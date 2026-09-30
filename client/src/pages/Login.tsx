@@ -176,13 +176,22 @@ const Login = ({ onLogin }: LoginProps) => {
     return () => window.removeEventListener('keydown', handleWindowKeyDown);
   }, [isLoading, pin]);
 
+  // Every size below is clamp(min, Nvh, max) — fluid against the viewport's own HEIGHT, not a
+  // handful of fixed breakpoints. Added up, the vh portions total well under 100vh (headroom for
+  // line-height/border rounding), so the page fits ONE screen by construction on literally any
+  // device — a short desktop window, a tablet, a Samsung A55 — instead of "fits most of the time,
+  // falls back to scrolling when it doesn't" (that fallback is exactly what kept coming back
+  // wrong: centering content taller than its box clips the top on several browsers, which don't
+  // let you scroll into the negative region to get it back — so the old approach could still
+  // lose the logo, just on a different set of screens each time a size changed). overflow-hidden
+  // is safe here only because nothing is ever allowed to exceed the viewport in the first place.
   return (
-    <div className={`min-h-screen flex flex-col items-center justify-center bg-white p-4 ${
+    <div className={`h-screen w-full overflow-hidden flex flex-col items-center justify-center bg-white px-4 ${
       isIOSPWA ? 'ios-pwa-login-container' : ''
     }`}>
       {/* iOS specific styling */}
       {isIOSPWA && (
-        <style dangerouslySetInnerHTML={{ 
+        <style dangerouslySetInnerHTML={{
           __html: [
             '.ios-pwa-login-container {',
             '  position: absolute;',
@@ -194,7 +203,7 @@ const Login = ({ onLogin }: LoginProps) => {
             '  padding-bottom: env(safe-area-inset-bottom);',
             '  padding-left: env(safe-area-inset-left);',
             '  padding-right: env(safe-area-inset-right);',
-            '  overflow-y: auto;',
+            '  overflow: hidden;',
             '  transform: translateZ(0);',
             '  -webkit-transform: translateZ(0);',
             '}',
@@ -207,55 +216,63 @@ const Login = ({ onLogin }: LoginProps) => {
           ].join('\n')
         }} />
       )}
-      
-      <div className="w-full max-w-md py-8 flex flex-col items-center">
+
+      <div className="w-full max-w-md flex flex-col items-center">
         {/* Logo */}
-        <div className="w-28 h-28 mb-8">
-          <img 
-            src={finnyLogo} 
-            alt="KM Finny Logo" 
-            className="w-full h-full object-contain" 
+        <div className="w-[clamp(3.6rem,15vh,12rem)] h-[clamp(3.6rem,15vh,12rem)] mb-[clamp(0.45rem,2.5vh,2.5rem)]">
+          <img
+            src={finnyLogo}
+            alt="KM Finny Logo"
+            className="w-full h-full object-contain"
           />
         </div>
-        
+
         {/* Title */}
-        <h1 className="text-2xl font-bold text-center mb-3">Welcome</h1>
-        <p className="text-center text-muted-foreground mb-6">
+        <h1 className="text-[clamp(1.05rem,3.2vh,2.25rem)] leading-none font-bold text-center mb-[clamp(0.2rem,1vh,0.75rem)]">Welcome</h1>
+        <p className="text-[clamp(0.75rem,2.1vh,1.4rem)] leading-none text-center text-muted-foreground mb-[clamp(0.45rem,2.2vh,1.75rem)]">
           Enter your 4-digit PIN
         </p>
-        
+
         {/* PIN Input Form */}
-        <div className="w-full space-y-8">
+        <div className="w-full flex flex-col items-center" style={{ gap: "clamp(0.7rem, 2.5vh, 2.25rem)" }}>
           {/* PIN Display */}
-          <div className="flex justify-center mb-6">
-            <div className="flex gap-4">
-              {Array.from({ length: 4 }).map((_, index) => (
-                <div 
-                  key={index} 
-                  className={`w-14 h-14 rounded-full flex items-center justify-center border-2 transition-all duration-200 ${
-                    index < pin.length 
-                      ? 'border-primary bg-primary/10 shadow-inner scale-105' 
-                      : 'border-gray-300'
-                  }`}
-                >
-                  {index < pin.length && (
-                    <div 
-                      className="w-6 h-6 rounded-full bg-primary animate-in fade-in zoom-in duration-200"
-                    ></div>
-                  )}
-                </div>
-              ))}
-            </div>
+          <div className="flex justify-center" style={{ gap: "clamp(0.45rem, 1.8vh, 1.75rem)" }}>
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div
+                key={index}
+                className={`w-[clamp(2.4rem,7vh,4.5rem)] h-[clamp(2.4rem,7vh,4.5rem)] rounded-full flex items-center justify-center border-2 transition-all duration-200 ${
+                  index < pin.length
+                    ? 'border-primary bg-primary/10 shadow-inner scale-105'
+                    : 'border-gray-300'
+                }`}
+              >
+                {index < pin.length && (
+                  <div
+                    className="w-[clamp(0.85rem,2.6vh,1.75rem)] h-[clamp(0.85rem,2.6vh,1.75rem)] rounded-full bg-primary animate-in fade-in zoom-in duration-200"
+                  ></div>
+                )}
+              </div>
+            ))}
           </div>
 
           {/* Number Pad */}
-          <div className="grid grid-cols-3 gap-4 mx-auto w-[240px]">
+          {/* inline-grid (not grid) shrinks to the buttons' own size instead of the full row
+              width, so mx-auto actually has something narrower than the parent to center —
+              plain grid defaults to block-level full width, where centering has nothing to do.
+              Every button gets p-0 leading-none: buttonVariants' own default size ("h-10 px-4
+              py-2") is a DIFFERENT utility group than width/height, so it stays applied
+              alongside an explicit h-[...]/w-[...] unless cleared — that unaccounted padding
+              plus the browser's own default line-height on the digit text is exactly what ran
+              this over budget on a very short screen despite the numbers here adding up on
+              paper; p-0 + leading-none make the box's own declared size the only thing that
+              counts, with nothing left to silently pad it out further. */}
+          <div className="inline-grid grid-cols-3 mx-auto" style={{ gap: "clamp(0.45rem, 1.8vh, 1.75rem)" }}>
             {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
               <Button
                 key={num}
                 type="button"
                 variant="outline"
-                className="h-[65px] w-[65px] text-2xl font-medium rounded-full shadow-sm
+                className="w-[clamp(2.6rem,9vh,5.5rem)] h-[clamp(2.6rem,9vh,5.5rem)] p-0 text-[clamp(1rem,3vh,2.25rem)] leading-none font-medium rounded-full shadow-sm
                 border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95
                 transition-all duration-150 touch-manipulation select-none"
                 onClick={() => handleDigitClick(num.toString())}
@@ -268,7 +285,7 @@ const Login = ({ onLogin }: LoginProps) => {
             <Button
               type="button"
               variant="outline"
-              className="h-[65px] w-[65px] text-2xl font-medium rounded-full shadow-sm
+              className="w-[clamp(2.6rem,9vh,5.5rem)] h-[clamp(2.6rem,9vh,5.5rem)] p-0 text-[clamp(1rem,3vh,2.25rem)] leading-none font-medium rounded-full shadow-sm
               border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95
               transition-all duration-150 touch-manipulation select-none"
               onClick={() => handleDigitClick("0")}
@@ -279,28 +296,28 @@ const Login = ({ onLogin }: LoginProps) => {
             <Button
               type="button"
               variant="outline"
-              className="h-[65px] w-[65px] flex items-center justify-center rounded-full
+              className="w-[clamp(2.6rem,9vh,5.5rem)] h-[clamp(2.6rem,9vh,5.5rem)] p-0 flex items-center justify-center rounded-full
               border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95 transition-all duration-150 touch-manipulation select-none"
               onClick={handleBackspace}
               disabled={isLoading || pin.length === 0}
             >
-              <Delete className="h-6 w-6" />
+              <Delete className="w-[clamp(0.95rem,3vh,2rem)] h-[clamp(0.95rem,3vh,2rem)]" />
             </Button>
           </div>
 
           {isLoading && (
             <div className="text-center">
-              <p className="text-sm text-muted-foreground animate-pulse">Authenticating...</p>
+              <p className="text-xs leading-none text-muted-foreground animate-pulse">Authenticating...</p>
             </div>
           )}
         </div>
-        
+
         {/* Footer */}
-        <div className="mt-8 text-center">
-          <p className="text-sm text-gray-500 mt-2">
+        <div className="text-center" style={{ marginTop: "clamp(0.45rem, 2.2vh, 2rem)" }}>
+          <p className="text-xs leading-tight text-gray-500">
             Created by
           </p>
-          <p className="text-sm text-gray-500 font-semibold">
+          <p className="text-xs leading-tight text-gray-500 font-semibold">
             व्रज पटेल
           </p>
         </div>
