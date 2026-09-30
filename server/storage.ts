@@ -137,6 +137,11 @@ export interface IStorage {
   getProformaSlipItem(id: number): Promise<ProformaSlipItem | undefined>;
   updateProformaSlipItem(id: number, item: Partial<InsertProformaSlipItem>): Promise<ProformaSlipItem | undefined>;
   deleteProformaSlipItem(id: number): Promise<boolean>;
+  // Clears every item on a slip (by the SLIP's id, not one item's id) without touching the slip
+  // itself — used when re-importing an existing order to wipe and recreate its items. Previously
+  // only existed inlined inside deleteProformaSlip (which also deletes the slip); factored out
+  // since proforma-api.ts's Notion re-import needed this half on its own.
+  deleteProformaSlipItemsBySlipId(proformaSlipId: number): Promise<void>;
 
   // Backup operations
   getBackupSettings(): Promise<BackupSettings | undefined>;
@@ -1609,6 +1614,15 @@ export class MemStorage implements IStorage {
     }
 
     return result;
+  }
+
+  async deleteProformaSlipItemsBySlipId(proformaSlipId: number): Promise<void> {
+    const idsToDelete = Array.from(this.proformaSlipItems.values())
+      .filter((item) => item.proformaSlipId === proformaSlipId)
+      .map((item) => item.id);
+    if (idsToDelete.length === 0) return;
+    for (const id of idsToDelete) this.proformaSlipItems.delete(id);
+    await this.persistProformaSlipItems();
   }
 
   // List historical data with date filtering
@@ -3854,6 +3868,10 @@ eq(loadingOperations.status, status),
   async deleteProformaSlipItem(id: number): Promise<boolean> {
     const result = await db.delete(proformaSlipItems).where(eq(proformaSlipItems.id, id)).returning({ id: proformaSlipItems.id });
     return result.length > 0;
+  }
+
+  async deleteProformaSlipItemsBySlipId(proformaSlipId: number): Promise<void> {
+    await db.delete(proformaSlipItems).where(eq(proformaSlipItems.proformaSlipId, proformaSlipId));
   }
 
   // Backup operations - still using MemStorage for compatibility

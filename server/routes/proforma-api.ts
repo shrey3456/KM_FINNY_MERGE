@@ -83,14 +83,14 @@ router.post('/proforma-slips/import-api', async (req, res) => {
       // Query Notion database with pagination to get ALL records
       const allResults = [];
       let hasMore = true;
-      let nextCursor = undefined;
+      let nextCursor: string | null | undefined = undefined;
       
       // Add date filter to Notion query
       while (hasMore) {
         const response = await notion.databases.query({
           database_id: databaseId,
           page_size: 100,
-          start_cursor: nextCursor,
+          start_cursor: nextCursor ?? undefined,
           // "Ord Date :" is a rollup (not a plain date property), so the filter must be wrapped
           // in `rollup: { date: ... }` — a bare `date: {...}` filter is rejected by the Notion
           // API with a type-mismatch error.
@@ -133,13 +133,13 @@ router.post('/proforma-slips/import-api', async (req, res) => {
       
       const allOrderResults = [];
       let orderHasMore = true;
-      let orderNextCursor = undefined;
-      
+      let orderNextCursor: string | null | undefined = undefined;
+
       while (orderHasMore) {
         const orderResponse = await notion.databases.query({
           database_id: ORDER_DATABASE_ID,
           page_size: 100,
-          start_cursor: orderNextCursor
+          start_cursor: orderNextCursor ?? undefined
         });
         
         allOrderResults.push(...orderResponse.results);
@@ -456,7 +456,7 @@ router.post('/proforma-slips/import-api', async (req, res) => {
         }
         
         // Clear existing items for this slip and recreate them
-        await storage.deleteProformaSlipItems(slipId);
+        await storage.deleteProformaSlipItemsBySlipId(slipId);
         
         // Add items to the slip
         for (const [srNo, itemData] of orderData.items) {

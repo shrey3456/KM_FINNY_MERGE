@@ -397,7 +397,7 @@ const ALL_NOTION_COLUMNS = ["#", "Scanned By", "Code", "Item", "Barcode", "Order
 const LOADING_EVENT_ID_OFFSET = 3000000000;
 const UNLOAD_EVENT_ID_OFFSET = 4000000000;
 
-const Reports = () => {
+const ScanHistory = () => {
   const { user } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1818,12 +1818,16 @@ const Reports = () => {
               // Stripe by the row's stable id (not its position), so a new scan landing at the
               // top doesn't flip every row's color/number on each poll.
               const stripeEven = row.id % 2 === 0;
-              if (row.isAdjust) return stripeEven ? "bg-slate-50" : "bg-slate-100/70";
+              // Color is by TYPE (Regular/Extra/Adjust) only, never by source (Scan/Load/
+              // Unload) — isDispatch/isUnload used to be checked before isExtra/isAdjust, so
+              // e.g. a "Load Extra" row and a "Load Regular" row both came out blue (source
+              // won), while only rows with no source flag at all (Scan) ever actually showed
+              // amber/slate. Source is still visible as text (scanTypeLabel below), just no
+              // longer double-coded onto the same color channel as type.
               if (row.isExchange) return stripeEven ? "bg-purple-50/50" : "bg-purple-50/80";
               if (row.isEmptyBox) return stripeEven ? "bg-orange-50/50" : "bg-orange-50/80";
               if (row.voided) return "bg-gray-50 opacity-60";
-              if (row.isDispatch) return stripeEven ? "bg-blue-50/50" : "bg-blue-50/80";
-              if (row.isUnload) return stripeEven ? "bg-teal-50/50" : "bg-teal-50/80";
+              if (row.isAdjust) return stripeEven ? "bg-slate-50" : "bg-slate-100/70";
               if (row.isExtra) return stripeEven ? "bg-amber-50/50" : "bg-amber-50/80";
               return undefined;
             }}
@@ -1912,10 +1916,10 @@ const Reports = () => {
                 <div
                   key={row.id}
                   className={`border-b border-gray-100 px-4 py-3 ${
-                    row.isAdjust ? "bg-slate-100/60"
-                    : row.isExchange ? "bg-purple-50/60"
+                    row.isExchange ? "bg-purple-50/60"
                     : row.isEmptyBox ? "bg-orange-50/60"
                     : row.voided ? "bg-gray-50 opacity-60"
+                    : row.isAdjust ? "bg-slate-100/60"
                     : row.isExtra ? "bg-amber-50/60" : ""}`}
                 >
                   <div className="flex items-start justify-between gap-2">
@@ -2327,4 +2331,4 @@ const Reports = () => {
   );
 };
 
-export default Reports;
+export default ScanHistory;

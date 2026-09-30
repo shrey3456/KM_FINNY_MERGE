@@ -395,18 +395,46 @@ async function withProgress(slip: any, items: any[]) {
     };
   }));
 
-  const allComplete = progressItems.length > 0 && progressItems.every((i) => i.isComplete);
+  // Extra scanned for a product that isn't on this order AT ALL (Add Extra's "different item"
+  // path, server/routes/loading.ts's own /scan handler) has no proforma_slip_items row to
+  // attach its progress to — without this, the scan succeeds and debits stock (loading_scan_events
+  // gets a real row) but the item never appears anywhere on the page, looking exactly like
+  // "added but not added". Synthesized here as a zero-expected row built straight from Product
+  // Master, same shape as a normal row, so the table and every total (including the "Extra"
+  // tile's Math.max(0, loaded - expected) sum) treat it identically to a real line — expected 0
+  // means its whole loaded qty already counts as extra under that same formula.
+  const knownBarcodes = new Set(items.map((it) => normalize(it.barcode)));
+  const offOrderBarcodes = Array.from(loadedByBarcode.keys()).filter((bc) => bc && !knownBarcodes.has(bc));
+  const offOrderItems = (await Promise.all(offOrderBarcodes.map(async (bc) => {
+    const product = await storage.getProductByBarcode(bc, slip.plant);
+    if (!product) return null; // shouldn't happen — /scan already requires Product Master to have it — but never render junk if it somehow does
+    const loaded = loadedByBarcode.get(bc) ?? 0;
+    const itemsPerPallet = resolvePalletSizeOrQty(product, state, 0);
+    const { total: stockAvailable } = await getPooledStock(pool, bc, slip.plant ?? '');
+    return {
+      id: -product.id, // negative so it can never collide with a real proforma_slip_items.id
+      barcode: product.barcode ?? bc, itemName: product.name ?? bc, sapCode: product.sapCode ?? null,
+      srNo: product.newSr ?? null, volumeInCuFt: product.volumeInCuFt ?? null,
+      quantity: null,
+      expected: 0, loaded, remaining: 0, itemsPerPallet,
+      realPackSize: getPalletSize(product, state),
+      isComplete: true, stockAvailable,
+    };
+  }))).filter((it): it is NonNullable<typeof it> => it !== null);
+
+  const allItems = [...progressItems, ...offOrderItems];
+  const allComplete = allItems.length > 0 && allItems.every((i) => i.isComplete);
 
   // Volume actually scanned onto the vehicle so far — each item's own snapshotted
   // volumeInCuFt (Product Master at import time, immutable per file header) times how much of
   // it has actually been loaded, summed. Distinct from slip.totalVolume (the order's full planned
   // volume) and vehicleVolume (the vehicle's capacity) — this is "how much is on the truck right now".
-  const loadedVolume = progressItems.reduce((sum, item) => {
+  const loadedVolume = allItems.reduce((sum, item) => {
     const perUnit = parseFloat(item.volumeInCuFt ?? '');
     return sum + (Number.isFinite(perUnit) ? perUnit * item.loaded : 0);
   }, 0);
 
-  return { items: progressItems, allComplete, loadedVolume: Number(loadedVolume.toFixed(2)) };
+  return { items: allItems, allComplete, loadedVolume: Number(loadedVolume.toFixed(2)) };
 }
 
 // GET /api/loading/proforma/search?q=  — suggestions dropdown while typing/scanning.
@@ -748,6 +776,15 @@ router.get('/loading/proforma/:orderNumber/handoffs', requirePageAccess('loading
   }
 });
 
+// Loading only ever suggests Krupa's own fleet (or the "DUMMY" test vehicle) — Vehicle Master
+// also carries plenty of other companies' vehicles (TRANSPORT, SCRAP, ...) that are real data
+// but never relevant to assign onto a Krupa load. Applied to BOTH the local search and the
+// Notion fallback below, so neither path can surface one.
+function qualifiesForLoadingVehiclePicker(company: string | null | undefined): boolean {
+  const c = (company ?? '').toLowerCase();
+  return c.includes('krupa') || c.includes('dummy');
+}
+
 // GET /api/loading/vehicles/search?q=  — suggestions dropdown for the vehicle picker. Matches
 // against vehicle number, driver, company, or manufacturer — "anything user can enter", per
 // spec. Vehicle Master is small enough (tens–low hundreds of rows) that filtering the already-
@@ -767,7 +804,8 @@ router.get('/loading/vehicles/search', requirePageAccess('loading'), async (req:
     if (q.length < 1) return res.json({ results: [] });
     const all = await storage.getAllVehicleInfo();
     const localMatches = all.filter((v) =>
-      [v.vehicleNumber, v.driver, v.company, v.manufacturer, v.series, v.rtoNumber]
+      qualifiesForLoadingVehiclePicker(v.company)
+      && [v.vehicleNumber, v.driver, v.company, v.manufacturer, v.series, v.rtoNumber]
         .some((f) => (f ?? '').toLowerCase().includes(q)));
 
     if (localMatches.length > 0) {
@@ -779,7 +817,7 @@ router.get('/loading/vehicles/search', requirePageAccess('loading'), async (req:
     }
 
     try {
-      const fromNotion = await searchNotionVehicleByNumber(q);
+      const fromNotion = (await searchNotionVehicleByNumber(q)).filter((v) => qualifiesForLoadingVehiclePicker(v.company));
       const results = fromNotion.map((v) => ({
         id: v.id, vehicleNumber: v.vehicleNumber, rtoNumber: v.rtoNumber, driver: v.driver,
         company: v.company, manufacturer: v.manufacturer, volume: v.volume, fromNotion: true,
