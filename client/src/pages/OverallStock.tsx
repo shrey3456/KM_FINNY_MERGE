@@ -1848,8 +1848,14 @@ export default function OverallStock() {
     breakdown: sourceBreakdownData?.breakdown.find((b) => normalizedText(b.plant) === normalizedText(plant)) ?? null,
   }));
 
+  // overflow-x-visible below sm: a horizontal scroller nested inside the main table's own
+  // horizontally-scrolling wrapper (data-table.tsx) is exactly what made this feel broken on a
+  // small/touch screen — two scroll surfaces fighting over the same swipe. Letting this table's
+  // own width just overflow lets the ONE outer scrollbar handle it there instead; at sm and up
+  // there's enough room (and a mouse, not a finger) for the self-contained scroll to stay
+  // pleasant rather than confusing.
   const detailsTabContent = (
-    <div className="max-h-[360px] overflow-y-auto overflow-x-auto border border-gray-300">
+    <div className="max-h-[360px] overflow-y-auto overflow-x-visible sm:overflow-x-auto border border-gray-300">
       <table className="w-max border-collapse text-xs">
         <thead>
           <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
@@ -2009,7 +2015,7 @@ export default function OverallStock() {
               <tr key={m.id} className="border-b border-gray-200 bg-white">
                 <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
                   <div className="flex flex-col gap-1">
-                    <span>{m.arrivedAt ? format(new Date(m.arrivedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                    <span>{m.arrivedAt ? format(new Date(m.arrivedAt), "MMM d, yyyy · h:mm:ss a") : "—"}</span>
                     {movementBadge}
                   </div>
                 </td>
@@ -2065,7 +2071,7 @@ export default function OverallStock() {
               <tr key={m.id} className="border-b border-gray-200 bg-white">
                 <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
                   <div className="flex flex-col gap-1">
-                    <span>{m.scannedAt ? format(new Date(m.scannedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                    <span>{m.scannedAt ? format(new Date(m.scannedAt), "MMM d, yyyy · h:mm:ss a") : "—"}</span>
                     {movementBadge}
                   </div>
                 </td>
@@ -2119,7 +2125,7 @@ export default function OverallStock() {
               <tr key={m.id} className="border-b border-gray-200 bg-white">
                 <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
                   <div className="flex flex-col gap-1">
-                    <span>{m.scannedAt ? format(new Date(m.scannedAt), "MMM d, yyyy · h:mm a") : "—"}</span>
+                    <span>{m.scannedAt ? format(new Date(m.scannedAt), "MMM d, yyyy · h:mm:ss a") : "—"}</span>
                     {movementBadge}
                   </div>
                 </td>
@@ -2175,7 +2181,7 @@ export default function OverallStock() {
               <tr key={`${m.kind}-${m.id}`} className="border-b border-gray-200 bg-white">
                 <td className="border-r border-gray-200 px-3 py-2 whitespace-nowrap">
                   <div className="flex flex-col gap-1">
-                    <span>{m.at ? format(new Date(m.at), "MMM d, yyyy · h:mm a") : "—"}</span>
+                    <span>{m.at ? format(new Date(m.at), "MMM d, yyyy · h:mm:ss a") : "—"}</span>
                     {typeBadge}
                   </div>
                 </td>

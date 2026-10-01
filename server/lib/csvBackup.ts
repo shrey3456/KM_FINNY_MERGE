@@ -117,23 +117,40 @@ async function writeTableCsv(table: string, filePath: string): Promise<{ rows: n
   return { rows: rowCount, bytes: fs.statSync(filePath).size };
 }
 
-// Exports every base table in the public schema — nothing is left out, so the folder is a complete
-// copy that scripts/restore-database-csv.ps1 can load into an empty database.
-export async function runCsvBackup(): Promise<CsvBackupResult> {
+// Exports every base table in the public schema (onlyTables omitted) — nothing is left out, so
+// the folder is a complete copy that scripts/restore-database-csv.ps1 can load into an empty
+// database. Pass onlyTables to back up just that list instead (e.g. the operational tables
+// without stock_movements/product_plant_stock) — the restore script doesn't care how many CSVs
+// are in the folder, it just loads whatever's there, so a scoped backup restores the exact same
+// way as a full one.
+export async function runCsvBackup(onlyTables?: string[]): Promise<CsvBackupResult> {
   const startedAt = new Date();
   const dbName = databaseNameFromUrl(process.env.DATABASE_URL);
   const folder = path.join(process.cwd(), 'backups', `${dbName}-csv-${timestampFolderName(startedAt)}`);
   fs.mkdirSync(folder, { recursive: true });
 
-  const { rows: tableRows } = await pool.query(
-    `SELECT table_name FROM information_schema.tables
-     WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-     ORDER BY table_name`,
-  );
+  let tableNames: string[];
+  if (onlyTables && onlyTables.length > 0) {
+    // Only ever back up tables that actually exist — a stale/mistyped name in the hardcoded list
+    // silently skips instead of failing the whole backup over one bad entry.
+    const { rows: existingRows } = await pool.query(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name = ANY($1::text[])
+       ORDER BY table_name`,
+      [onlyTables],
+    );
+    tableNames = existingRows.map((r: any) => String(r.table_name));
+  } else {
+    const { rows: tableRows } = await pool.query(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+       ORDER BY table_name`,
+    );
+    tableNames = tableRows.map((r: any) => String(r.table_name));
+  }
 
   const tables: CsvBackupTable[] = [];
-  for (const row of tableRows as any[]) {
-    const table = String(row.table_name);
+  for (const table of tableNames) {
     const { rows, bytes } = await writeTableCsv(table, path.join(folder, `${table}.csv`));
     tables.push({ table, rows, bytes });
   }

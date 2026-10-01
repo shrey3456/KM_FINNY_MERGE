@@ -29,7 +29,7 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
 import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
-import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, Download, CalendarDays, RefreshCw, Webhook, ExternalLink } from 'lucide-react';
+import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, Download, CalendarDays, RefreshCw, Webhook, ExternalLink, Trash2 } from 'lucide-react';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { apiRequest } from '@/lib/queryClient';
@@ -336,6 +336,33 @@ const Settings = () => {
     }
   };
 
+  // Operational-data-only backup — Scan History, Unloading, Loading, Product/Plant/Vehicle
+  // Master, User Management and Proforma Slip, WITHOUT stock_movements/product_plant_stock.
+  // Same folder/file convention and restore script as the full backup above.
+  const [isBackingUpScoped, setIsBackingUpScoped] = useState(false);
+  const [scopedBackupResult, setScopedBackupResult] = useState<{ folder: string; tables: number; rows: number; megabytes: number } | null>(null);
+  const runScopedCsvBackup = async () => {
+    setIsBackingUpScoped(true);
+    try {
+      const data = await apiRequest('POST', '/api/settings/backup-csv-scoped', {}, false, true);
+      setScopedBackupResult({
+        folder: data.folder,
+        tables: data.tables?.length ?? 0,
+        rows: data.totalRows ?? 0,
+        megabytes: data.megabytes ?? 0,
+      });
+      toast({
+        title: 'Backup saved',
+        description: `${data.tables?.length ?? 0} table(s), ${data.totalRows ?? 0} row(s) written to ${data.folder}`,
+      });
+    } catch (error: any) {
+      console.error('Error running scoped CSV backup:', error);
+      toast({ title: 'Backup failed', description: error?.message || 'Could not write the CSV backup', variant: 'destructive' });
+    } finally {
+      setIsBackingUpScoped(false);
+    }
+  };
+
   // Remove Scan & Order Import Data — the receiving side only: Order Import CSVs, the Scan
   // Operations work against them, their scan history and the stock they brought in. Loading and
   // Unloading are left alone. Entries are DELETED, not reversed — no adjust row is written.
@@ -466,6 +493,128 @@ const Settings = () => {
       toast({ title: 'Recalculate failed', description: error?.message || 'Could not recalculate stock', variant: 'destructive' });
     } finally {
       setRecalcApplying(false);
+    }
+  };
+
+  // Recalculate from events only — a stricter sibling: purely Order Scan + Unloading − Loading,
+  // straight from their own raw event tables, bypassing stock_movements entirely (no Adjust,
+  // Exchange, Clear Stock or Opening Stock counted). Same Check/Apply shape as above.
+  const [recalcEventsOpen, setRecalcEventsOpen] = useState(false);
+  const [recalcEventsPreview, setRecalcEventsPreview] = useState<RecalcPreview | null>(null);
+  const [recalcEventsChecking, setRecalcEventsChecking] = useState(false);
+  const [recalcEventsApplying, setRecalcEventsApplying] = useState(false);
+  const [recalcEventsConfirm, setRecalcEventsConfirm] = useState('');
+  const runStockCheckFromEvents = async () => {
+    setRecalcEventsChecking(true);
+    try {
+      const data = await apiRequest('GET', '/api/settings/recalculate-stock-events/preview', undefined, false, true);
+      setRecalcEventsPreview(data as RecalcPreview);
+      setRecalcEventsConfirm('');
+      setRecalcEventsOpen(true);
+    } catch (error: any) {
+      toast({ title: 'Check failed', description: error?.message || 'Could not check stock', variant: 'destructive' });
+    } finally {
+      setRecalcEventsChecking(false);
+    }
+  };
+  const applyStockRecalcFromEvents = async () => {
+    setRecalcEventsApplying(true);
+    try {
+      const result: any = await apiRequest('POST', '/api/settings/recalculate-stock-events', {}, false, true);
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
+      toast({
+        title: 'Stock recalculated from events',
+        description: `${result.plantRowsFixed} item total(s) and ${result.productTotalsFixed} product total(s) corrected`
+          + `${result.ledgerRowsBackfilled ? `, ${result.ledgerRowsBackfilled} missing ledger entr${result.ledgerRowsBackfilled === 1 ? 'y' : 'ies'} backfilled` : ''}.`,
+      });
+      setRecalcEventsOpen(false);
+      setRecalcEventsPreview(null);
+    } catch (error: any) {
+      toast({ title: 'Recalculate failed', description: error?.message || 'Could not recalculate stock', variant: 'destructive' });
+    } finally {
+      setRecalcEventsApplying(false);
+    }
+  };
+
+  // Fill Stock Ledger (from Scan + Unload + Load events) — narrower standalone sibling of
+  // Recalculate from events above: only reconciles stock_movements against Order Scan,
+  // Unloading and Loading's raw records, never touches live stock (product_plant_stock/products)
+  // at all. For fixing Overall Stock's Opening/Purchase columns when the live stock number is
+  // already right.
+  type LedgerGapRow = { barcode: string; plant: string; earliestAt: string; gap: number; productId: number | null };
+  type LedgerBackfillPreview = { scanGapCount: number; unloadGapCount: number; loadGapCount: number; totalGaps: number; totalGapQty: number; scanGaps: LedgerGapRow[]; unloadGaps: LedgerGapRow[]; loadGaps: LedgerGapRow[] };
+  const [ledgerBackfillOpen, setLedgerBackfillOpen] = useState(false);
+  const [ledgerBackfillPreview, setLedgerBackfillPreview] = useState<LedgerBackfillPreview | null>(null);
+  const [ledgerBackfillChecking, setLedgerBackfillChecking] = useState(false);
+  const [ledgerBackfillApplying, setLedgerBackfillApplying] = useState(false);
+  const [ledgerBackfillConfirm, setLedgerBackfillConfirm] = useState('');
+  const runLedgerBackfillCheck = async () => {
+    setLedgerBackfillChecking(true);
+    try {
+      const data = await apiRequest('GET', '/api/settings/backfill-stock-ledger/preview', undefined, false, true);
+      setLedgerBackfillPreview(data as LedgerBackfillPreview);
+      setLedgerBackfillConfirm('');
+      setLedgerBackfillOpen(true);
+    } catch (error: any) {
+      toast({ title: 'Check failed', description: error?.message || 'Could not check stock ledger', variant: 'destructive' });
+    } finally {
+      setLedgerBackfillChecking(false);
+    }
+  };
+  const applyLedgerBackfill = async () => {
+    setLedgerBackfillApplying(true);
+    try {
+      const result: any = await apiRequest('POST', '/api/settings/backfill-stock-ledger', {}, false, true);
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
+      toast({
+        title: 'Stock ledger filled',
+        description: `${result.written} ledger entr${result.written === 1 ? 'y' : 'ies'} added from Scan/Unload/Load events.`,
+      });
+      setLedgerBackfillOpen(false);
+      setLedgerBackfillPreview(null);
+    } catch (error: any) {
+      toast({ title: 'Fill failed', description: error?.message || 'Could not fill stock ledger', variant: 'destructive' });
+    } finally {
+      setLedgerBackfillApplying(false);
+    }
+  };
+
+  // Clear Stock entry history — view + bulk-delete the ledger rows a past Clear Stock run left
+  // behind. Deleting them is ledger-only (never touches live stock) — the point is to clean up
+  // the history BEFORE running Recalculate Stock above, since Recalculate Stock otherwise tries
+  // to "undo" Clear Stock using only whatever slice of real history the ledger happens to have,
+  // which can overshoot deeply negative for any item with stock older than full ledger tracking.
+  type ClearStockEntry = { id: number; barcode: string; plant: string; qty: number; reason: string; at: string; itemName: string | null };
+  const [showClearStockEntries, setShowClearStockEntries] = useState(false);
+  const [clearStockEntries, setClearStockEntries] = useState<ClearStockEntry[] | null>(null);
+  const [clearStockEntriesLoading, setClearStockEntriesLoading] = useState(false);
+  const [deletingClearStockEntries, setDeletingClearStockEntries] = useState(false);
+  const loadClearStockEntries = async () => {
+    setClearStockEntriesLoading(true);
+    try {
+      const data = await apiRequest('GET', '/api/settings/clear-stock-entries', undefined, false, true);
+      setClearStockEntries(data.items);
+      setShowClearStockEntries(true);
+    } catch (error: any) {
+      toast({ title: 'Could not load Clear Stock entries', description: error?.message, variant: 'destructive' });
+    } finally {
+      setClearStockEntriesLoading(false);
+    }
+  };
+  const deleteAllClearStockEntries = async () => {
+    setDeletingClearStockEntries(true);
+    try {
+      const result: any = await apiRequest('DELETE', '/api/settings/clear-stock-entries', {}, false, true);
+      toast({
+        title: 'Clear Stock entries removed',
+        description: `${result.deleted} entr${result.deleted === 1 ? 'y' : 'ies'} deleted. Live stock wasn't changed — run Recalculate Stock next to rebuild it from the cleaned-up history.`,
+      });
+      setShowClearStockEntries(false);
+      setClearStockEntries(null);
+    } catch (error: any) {
+      toast({ title: 'Delete failed', description: error?.message, variant: 'destructive' });
+    } finally {
+      setDeletingClearStockEntries(false);
     }
   };
 
@@ -1146,6 +1295,59 @@ const Settings = () => {
                       </Button>
                     </div>
 
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Recalculate Stock (from events only)</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Stricter version of Recalculate Stock above: computes each item's live stock purely from Order Scan,
+                        Unloading and Loading's own raw scan records — a manual Adjust, Exchange, Opening Stock import or
+                        Clear Stock entry has no effect on this number at all. Apply also backfills any barcode+plant
+                        whose real scan activity never made it into the stock_movements ledger at all (so Overall Stock's
+                        Opening/Purchase/Sale show the real numbers too, not just the live stock figure).
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runStockCheckFromEvents}
+                        disabled={!isAdminUser || recalcEventsChecking}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {recalcEventsChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check stock (events only)'}
+                      </Button>
+                    </div>
+
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Fill Stock Ledger (from Scan + Unload + Load events)</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Only fills in missing stock_movements entries from Order Scan, Unloading and Loading's own raw
+                        records — it never touches the live stock number. Use this when the Stock page already shows the
+                        right quantity but Overall Stock's Opening/Purchase columns still show 0 for it.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runLedgerBackfillCheck}
+                        disabled={!isAdminUser || ledgerBackfillChecking}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {ledgerBackfillChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check ledger'}
+                      </Button>
+                    </div>
+
+                    <div className="p-4 border rounded-lg bg-gray-50">
+                      <h4 className="font-medium flex items-center"><Trash2 className="h-4 w-4 mr-2" /> Clear Stock History</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        View every ledger entry a past Clear Stock run left behind, and remove them. This only cleans up the
+                        history — it never changes live stock by itself. Do this BEFORE Recalculate Stock above if Clear Stock
+                        has run recently, otherwise Recalculate Stock may push items with older stock history negative.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={loadClearStockEntries}
+                        disabled={!isAdminUser || clearStockEntriesLoading}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {clearStockEntriesLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Loading…</> : 'View Clear Stock entries'}
+                      </Button>
+                    </div>
+
                     {/* Notion webhook check — opens the admin-only status page in a new tab: is the token set,
                         and what did the last changes from Notion do (updated / unchanged / error). */}
                     <div className="p-4 border rounded-lg bg-gray-50">
@@ -1191,6 +1393,31 @@ const Settings = () => {
                         <p className="mt-2 break-all text-xs text-gray-500">
                           Last backup: {csvBackupResult.tables} table(s), {csvBackupResult.rows.toLocaleString()} row(s),
                           {' '}{csvBackupResult.megabytes.toFixed(1)} MB → <span className="font-mono">{csvBackupResult.folder}</span>
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="p-4 border rounded-lg">
+                      <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Backup Operational Data</h4>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">
+                        Same as Backup CSV above, but only Scan History, Unloading, Loading, Product/Plant/Vehicle Master, User
+                        Management, Proforma Slip and the Activity log — no stock_movements or product_plant_stock. Same folder,
+                        same restore script.
+                      </p>
+                      <Button
+                        variant="outline" size="sm"
+                        onClick={runScopedCsvBackup}
+                        disabled={isBackingUpScoped || !isAdminUser}
+                        title={!isAdminUser ? "Admin access required" : undefined}
+                      >
+                        {isBackingUpScoped
+                          ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Backing up…</>
+                          : <><Download className="mr-1.5 h-3.5 w-3.5" /> Backup Operational Data</>}
+                      </Button>
+                      {scopedBackupResult && (
+                        <p className="mt-2 break-all text-xs text-gray-500">
+                          Last backup: {scopedBackupResult.tables} table(s), {scopedBackupResult.rows.toLocaleString()} row(s),
+                          {' '}{scopedBackupResult.megabytes.toFixed(1)} MB → <span className="font-mono">{scopedBackupResult.folder}</span>
                         </p>
                       )}
                     </div>
@@ -1361,6 +1588,289 @@ const Settings = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={recalcEventsOpen} onOpenChange={(open) => { if (!recalcEventsApplying) setRecalcEventsOpen(open); }}>
+        <AlertDialogContent className="max-w-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Recalculate Stock (from events only)</AlertDialogTitle>
+            <AlertDialogDescription>
+              {recalcEventsPreview && recalcEventsPreview.plantCount + recalcEventsPreview.productCount === 0
+                ? 'Every stock total already matches Order Scan + Unloading − Loading. Nothing to fix.'
+                : `${recalcEventsPreview?.plantCount ?? 0} item total(s) and ${recalcEventsPreview?.productCount ?? 0} product total(s) don't match the raw scan events. Apply sets them to the numbers below — computed purely from Order Scan, Unloading and Loading's own records, ignoring any Adjust/Exchange/Opening Stock/Clear Stock entries.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {recalcEventsPreview && recalcEventsPreview.plantCount + recalcEventsPreview.productCount > 0 && (
+            <div className="max-h-[55vh] space-y-4 overflow-y-auto">
+              {recalcEventsPreview.plantRows.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Stock at a plant</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Item</th>
+                          <th className="px-2 py-1.5">Plant</th>
+                          <th className="px-2 py-1.5 text-right">Now</th>
+                          <th className="px-2 py-1.5 text-right">From events</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recalcEventsPreview.plantRows.map((r) => (
+                          <tr key={`${r.barcode}::${r.plant}`} className="border-t">
+                            <td className="px-2 py-1.5">
+                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
+                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}{r.storedRows > 1 ? ` · saved ${r.storedRows} times` : ''}</div>
+                            </td>
+                            <td className="px-2 py-1.5">{r.plant}</td>
+                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedStock}{r.storedExtra > 0 ? ` (extra ${r.storedExtra})` : ''}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctStock}{r.correctExtra > 0 ? ` (extra ${r.correctExtra})` : ''}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {recalcEventsPreview.plantCount > recalcEventsPreview.plantRows.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {recalcEventsPreview.plantRows.length} of {recalcEventsPreview.plantCount} — Apply fixes all of them.</p>
+                  )}
+                </div>
+              )}
+
+              {recalcEventsPreview.productRows.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Total of all plants</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Item</th>
+                          <th className="px-2 py-1.5 text-right">Now</th>
+                          <th className="px-2 py-1.5 text-right">From events</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recalcEventsPreview.productRows.map((r) => (
+                          <tr key={r.productId} className="border-t">
+                            <td className="px-2 py-1.5">
+                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
+                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}</div>
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedTotal}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctTotal}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {recalcEventsPreview.productCount > recalcEventsPreview.productRows.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {recalcEventsPreview.productRows.length} of {recalcEventsPreview.productCount} — Apply fixes all of them.</p>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <Label htmlFor="recalcEventsConfirm">Type FIX to apply</Label>
+                <Input id="recalcEventsConfirm" value={recalcEventsConfirm} onChange={(e) => setRecalcEventsConfirm(e.target.value)} placeholder="FIX" />
+              </div>
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={recalcEventsApplying}>Close</AlertDialogCancel>
+            {recalcEventsPreview && recalcEventsPreview.plantCount + recalcEventsPreview.productCount > 0 && (
+              <Button
+                onClick={applyStockRecalcFromEvents}
+                disabled={recalcEventsApplying || recalcEventsConfirm.trim().toUpperCase() !== 'FIX'}
+                className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90"
+              >
+                {recalcEventsApplying ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Applying…</> : 'Apply'}
+              </Button>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={ledgerBackfillOpen} onOpenChange={(open) => { if (!ledgerBackfillApplying) setLedgerBackfillOpen(open); }}>
+        <AlertDialogContent className="max-w-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Fill Stock Ledger (from Scan + Unload + Load events)</AlertDialogTitle>
+            <AlertDialogDescription>
+              {ledgerBackfillPreview && ledgerBackfillPreview.totalGaps === 0
+                ? 'Every Order Scan, Unloading and Loading record already has a matching stock_movements entry. Nothing to fill.'
+                : `${ledgerBackfillPreview?.totalGaps ?? 0} gap(s) (${ledgerBackfillPreview?.totalGapQty ?? 0} unit(s) total) have Scan/Unload/Load activity with no matching ledger entry. Apply adds one reconciliation row per gap, dated at that activity's own session/day — live stock is never touched.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {ledgerBackfillPreview && ledgerBackfillPreview.totalGaps > 0 && (
+            <div className="max-h-[55vh] space-y-4 overflow-y-auto">
+              {ledgerBackfillPreview.scanGaps.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Order Scan ({ledgerBackfillPreview.scanGapCount})</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Barcode</th>
+                          <th className="px-2 py-1.5">Plant</th>
+                          <th className="px-2 py-1.5 text-right">Missing qty</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ledgerBackfillPreview.scanGaps.map((r) => (
+                          <tr key={`scan::${r.barcode}::${r.plant}`} className="border-t">
+                            <td className="px-2 py-1.5 font-mono text-[11px]">{r.barcode}</td>
+                            <td className="px-2 py-1.5">{r.plant}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.gap}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {ledgerBackfillPreview.scanGapCount > ledgerBackfillPreview.scanGaps.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {ledgerBackfillPreview.scanGaps.length} of {ledgerBackfillPreview.scanGapCount} — Apply fills all of them.</p>
+                  )}
+                </div>
+              )}
+
+              {ledgerBackfillPreview.unloadGaps.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Unloading ({ledgerBackfillPreview.unloadGapCount})</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Barcode</th>
+                          <th className="px-2 py-1.5">Plant</th>
+                          <th className="px-2 py-1.5 text-right">Missing qty</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ledgerBackfillPreview.unloadGaps.map((r) => (
+                          <tr key={`unload::${r.barcode}::${r.plant}`} className="border-t">
+                            <td className="px-2 py-1.5 font-mono text-[11px]">{r.barcode}</td>
+                            <td className="px-2 py-1.5">{r.plant}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.gap}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {ledgerBackfillPreview.unloadGapCount > ledgerBackfillPreview.unloadGaps.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {ledgerBackfillPreview.unloadGaps.length} of {ledgerBackfillPreview.unloadGapCount} — Apply fills all of them.</p>
+                  )}
+                </div>
+              )}
+
+              {ledgerBackfillPreview.loadGaps.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-sm font-semibold">Loading ({ledgerBackfillPreview.loadGapCount})</p>
+                  <div className="overflow-x-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-100 text-left">
+                        <tr>
+                          <th className="px-2 py-1.5">Barcode</th>
+                          <th className="px-2 py-1.5">Plant</th>
+                          <th className="px-2 py-1.5 text-right">Missing qty</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ledgerBackfillPreview.loadGaps.map((r) => (
+                          <tr key={`load::${r.barcode}::${r.plant}`} className="border-t">
+                            <td className="px-2 py-1.5 font-mono text-[11px]">{r.barcode}</td>
+                            <td className="px-2 py-1.5">{r.plant}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.gap}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {ledgerBackfillPreview.loadGapCount > ledgerBackfillPreview.loadGaps.length && (
+                    <p className="mt-1 text-xs text-gray-500">Showing {ledgerBackfillPreview.loadGaps.length} of {ledgerBackfillPreview.loadGapCount} — Apply fills all of them.</p>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <Label htmlFor="ledgerBackfillConfirm">Type FIX to apply</Label>
+                <Input id="ledgerBackfillConfirm" value={ledgerBackfillConfirm} onChange={(e) => setLedgerBackfillConfirm(e.target.value)} placeholder="FIX" />
+              </div>
+            </div>
+          )}
+
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={ledgerBackfillApplying}>Close</AlertDialogCancel>
+            {ledgerBackfillPreview && ledgerBackfillPreview.totalGaps > 0 && (
+              <Button
+                onClick={applyLedgerBackfill}
+                disabled={ledgerBackfillApplying || ledgerBackfillConfirm.trim().toUpperCase() !== 'FIX'}
+                className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90"
+              >
+                {ledgerBackfillApplying ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Applying…</> : 'Apply'}
+              </Button>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Clear Stock History — view + bulk-delete the ledger rows a past Clear Stock run left
+          behind, so Recalculate Stock above can rebuild live stock from clean history afterward. */}
+      <Dialog open={showClearStockEntries} onOpenChange={(open) => { if (!open) { setShowClearStockEntries(false); setClearStockEntries(null); } }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Clear Stock History</DialogTitle>
+            <DialogDescription>
+              {clearStockEntries?.length
+                ? `${clearStockEntries.length} Clear Stock ledger entr${clearStockEntries.length === 1 ? 'y' : 'ies'}. Deleting removes them from the history only — live stock is not changed. Run Recalculate Stock afterward to rebuild it.`
+                : 'No Clear Stock entries found in the ledger.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {clearStockEntries && clearStockEntries.length > 0 && (
+            <div className="max-h-[55vh] overflow-y-auto rounded border">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-gray-100 text-left">
+                  <tr>
+                    <th className="px-2 py-1.5">Item</th>
+                    <th className="px-2 py-1.5">Plant</th>
+                    <th className="px-2 py-1.5 text-right">Qty</th>
+                    <th className="px-2 py-1.5">Reason</th>
+                    <th className="px-2 py-1.5">When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {clearStockEntries.map((e) => (
+                    <tr key={e.id} className="border-t">
+                      <td className="px-2 py-1.5">
+                        <div className="font-medium">{e.itemName ?? e.barcode}</div>
+                        <div className="font-mono text-[10px] text-gray-400">{e.barcode}</div>
+                      </td>
+                      <td className="px-2 py-1.5">{e.plant}</td>
+                      <td className="px-2 py-1.5 text-right font-semibold text-red-600">{e.qty}</td>
+                      <td className="px-2 py-1.5 text-gray-600">{e.reason}</td>
+                      <td className="px-2 py-1.5 whitespace-nowrap text-gray-500">{new Date(e.at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true })}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setShowClearStockEntries(false); setClearStockEntries(null); }} disabled={deletingClearStockEntries}>
+              Close
+            </Button>
+            {clearStockEntries && clearStockEntries.length > 0 && (
+              <Button
+                variant="destructive"
+                onClick={deleteAllClearStockEntries}
+                disabled={deletingClearStockEntries}
+              >
+                {deletingClearStockEntries ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Deleting…</> : `Delete all ${clearStockEntries.length}`}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={showClearDialog} onOpenChange={handleClearDialogOpenChange}>
         <AlertDialogContent>

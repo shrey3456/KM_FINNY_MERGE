@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
-import { checkStock, recalculateStock, StockBusyError } from '../lib/stockRecalc';
+import { checkStock, recalculateStock, checkStockFromEvents, recalculateStockFromEvents, checkStockLedgerBackfill, applyStockLedgerBackfill, StockBusyError } from '../lib/stockRecalc';
 import { runCsvBackup } from '../lib/csvBackup';
 
 // Settings > Data Management > "Clear Stock" — an admin-only action that resets stock numbers
@@ -375,6 +375,147 @@ router.post('/settings/recalculate-stock', requireAdminRole, async (req: Request
     if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
     console.error('Error recalculating stock:', error);
     res.status(500).json({ message: 'Failed to recalculate stock' });
+  }
+});
+
+// "Recalculate from events only" — purely from Order Scan/Unloading/Loading's own raw event
+// tables, never touching stock_movements (no Adjust, Exchange, Clear Stock or Opening Stock
+// entries count here at all). See stockRecalc.ts's own comment on why that's narrower on
+// purpose, not a bug.
+router.get('/settings/recalculate-stock-events/preview', requireAdminRole, async (_req: Request, res: Response) => {
+  try {
+    const { plantRows, productRows } = await checkStockFromEvents(pool);
+    res.json({
+      plantCount: plantRows.length,
+      productCount: productRows.length,
+      plantRows: plantRows.slice(0, RECALC_PREVIEW_LIMIT),
+      productRows: productRows.slice(0, RECALC_PREVIEW_LIMIT),
+    });
+  } catch (error) {
+    console.error('Error checking stock from events:', error);
+    res.status(500).json({ message: 'Failed to check stock' });
+  }
+});
+
+router.post('/settings/recalculate-stock-events', requireAdminRole, async (req: Request, res: Response) => {
+  const { userCode, userName } = actor(req);
+  try {
+    const result = await recalculateStockFromEvents(pool);
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Settings',
+        action: 'update',
+        entityType: 'plant_stock',
+        entityId: 'recalculate-stock-events',
+        details: `Recalculated stock from Scan/Unload/Load events only by ${userName ?? userCode}: ${result.plantRowsFixed} plant row(s) corrected`
+          + `${result.duplicateRowsCleared ? `, ${result.duplicateRowsCleared} duplicate row(s) set to 0` : ''}`
+          + `, ${result.productTotalsFixed} product total(s) corrected.`,
+        userCode,
+        userName,
+      });
+    }
+    res.json({ success: true, ...result });
+  } catch (error) {
+    if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
+    console.error('Error recalculating stock from events:', error);
+    res.status(500).json({ message: 'Failed to recalculate stock' });
+  }
+});
+
+// "Fill Stock Ledger (from Scan + Unload + Load events)" — a narrower, standalone sibling of
+// Recalculate from events: only reconciles stock_movements against Order Scan, Unloading and
+// Loading's raw event tables, with no live-stock correction at all. For when the live number on
+// the Stock page is already right but Overall Stock's Purchase column is still 0 for a
+// barcode+plant whose receiving has no matching ledger row — see stockRecalc.ts's own comment.
+router.get('/settings/backfill-stock-ledger/preview', requireAdminRole, async (_req: Request, res: Response) => {
+  try {
+    const { scanGaps, unloadGaps, loadGaps, totalGapQty } = await checkStockLedgerBackfill(pool);
+    res.json({
+      scanGapCount: scanGaps.length,
+      unloadGapCount: unloadGaps.length,
+      loadGapCount: loadGaps.length,
+      totalGaps: scanGaps.length + unloadGaps.length + loadGaps.length,
+      totalGapQty,
+      scanGaps: scanGaps.slice(0, RECALC_PREVIEW_LIMIT),
+      unloadGaps: unloadGaps.slice(0, RECALC_PREVIEW_LIMIT),
+      loadGaps: loadGaps.slice(0, RECALC_PREVIEW_LIMIT),
+    });
+  } catch (error) {
+    console.error('Error checking stock ledger backfill:', error);
+    res.status(500).json({ message: 'Failed to check stock ledger' });
+  }
+});
+
+router.post('/settings/backfill-stock-ledger', requireAdminRole, async (req: Request, res: Response) => {
+  const { userCode, userName } = actor(req);
+  try {
+    const result = await applyStockLedgerBackfill(pool);
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Settings',
+        action: 'update',
+        entityType: 'plant_stock',
+        entityId: 'backfill-stock-ledger',
+        details: `Filled stock ledger from Scan/Unload/Load events by ${userName ?? userCode}: ${result.written} row(s) added.`,
+        userCode,
+        userName,
+      });
+    }
+    res.json({ success: true, ...result });
+  } catch (error) {
+    if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
+    console.error('Error filling stock ledger:', error);
+    res.status(500).json({ message: 'Failed to fill stock ledger' });
+  }
+});
+
+// GET /api/settings/clear-stock-entries — every Clear Stock (Settings) ledger row still sitting
+// in stock_movements, so an admin can see exactly what a past bulk reset touched before deciding
+// to remove it (DELETE below). Clear Stock's own effect on live stock already happened at the
+// time it ran — this list is purely the audit trail of it, which is what skews Overall Stock's
+// Opening/System/Total Stock figures and Recalculate Stock's math for any item that had real
+// stock history predating full ledger tracking (see that endpoint's own comment).
+router.get('/settings/clear-stock-entries', requireAdminRole, async (_req: Request, res: Response) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT sm.id, sm.barcode, sm.plant, sm.qty, sm.reason, sm.created_at AS "at",
+             (SELECT pr.name FROM products pr WHERE LOWER(TRIM(pr.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1) AS "itemName"
+      FROM stock_movements sm
+      WHERE sm.reason LIKE 'Clear Stock (Settings)%'
+      ORDER BY sm.created_at DESC, sm.id DESC
+    `);
+    res.json({ items: rows, total: rows.length });
+  } catch (error) {
+    console.error('Error listing Clear Stock entries:', error);
+    res.status(500).json({ message: 'Failed to load Clear Stock entries' });
+  }
+});
+
+// DELETE /api/settings/clear-stock-entries — body: { ids?: number[] }. Removes the given Clear
+// Stock ledger rows (every one, if ids is omitted) — a LEDGER-ONLY correction, same as deleting
+// one Adjust entry from Overall Stock's own Adjustments dialog, just all of them at once. This
+// does NOT touch product_plant_stock — live stock stays exactly as Clear Stock already left it.
+// Run Recalculate Stock afterward to actually rebuild live stock from the now-cleaner history.
+router.delete('/settings/clear-stock-entries', requireAdminRole, async (req: Request, res: Response) => {
+  const ids: number[] | undefined = Array.isArray(req.body?.ids)
+    ? req.body.ids.map((id: unknown) => Number(id)).filter((id: number) => Number.isFinite(id))
+    : undefined;
+  const { userCode, userName } = actor(req);
+  try {
+    const { rows } = ids && ids.length > 0
+      ? await pool.query(`DELETE FROM stock_movements WHERE id = ANY($1::int[]) AND reason LIKE 'Clear Stock (Settings)%' RETURNING id`, [ids])
+      : await pool.query(`DELETE FROM stock_movements WHERE reason LIKE 'Clear Stock (Settings)%' RETURNING id`);
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Settings', action: 'delete', entityType: 'stock_movement', entityId: 'clear-stock-entries',
+        details: `Deleted ${rows.length} Clear Stock ledger entry/entries by ${userName ?? userCode}. Live stock untouched — run Recalculate Stock to rebuild it from history.`,
+        userCode, userName,
+      });
+    }
+    res.json({ success: true, deleted: rows.length });
+  } catch (error) {
+    console.error('Error deleting Clear Stock entries:', error);
+    res.status(500).json({ message: 'Failed to delete Clear Stock entries' });
   }
 });
 
@@ -766,6 +907,55 @@ router.post('/settings/backup-csv', requireAdminRole, async (req: Request, res: 
     csvBackupRunning = false;
   }
 });
+
+// Operational-data-only backup — every table behind Scan History, Unloading, Loading, Product/
+// Plant/Vehicle Master, User Management and Proforma Slip, explicitly WITHOUT stock_movements or
+// product_plant_stock. The list is fixed here, not taken from the request, so this can never be
+// pointed at an arbitrary table. Shares csvBackupRunning with the full backup above — only one
+// backup (of either kind) runs at a time.
+const OPERATIONAL_BACKUP_TABLES = [
+  // Scan History / Order Scan (receiving)
+  'scan_history', 'order_import_sessions', 'order_import_items', 'order_scan_items', 'order_scan_events',
+  // Unloading
+  'unload_import_sessions', 'unload_import_items', 'unload_scan_events',
+  // Loading
+  'loading_records', 'loading_scan_events', 'loading_handoffs', 'load_operations', 'load_operations_items',
+  // Masters
+  'products', 'plants', 'plant_stvs', 'vehicle_info', 'users',
+  // Proforma Slip
+  'proforma_slips', 'proforma_slip_items',
+  // Activity log
+  'activities',
+];
+
+router.post('/settings/backup-csv-scoped', requireAdminRole, async (req: Request, res: Response) => {
+  if (csvBackupRunning) {
+    return res.status(409).json({ message: 'A backup is already running — wait for it to finish.' });
+  }
+  csvBackupRunning = true;
+  const { userCode, userName } = actor(req);
+  try {
+    const result = await runCsvBackup(OPERATIONAL_BACKUP_TABLES);
+    const megabytes = result.totalBytes / (1024 * 1024);
+    await storage.createActivity({
+      pageName: 'Settings',
+      action: 'create',
+      entityType: 'backup_csv_scoped',
+      entityId: result.folder,
+      details: `Operational-data CSV backup (no stock tables) by ${userName ?? userCode}: ${result.tables.length} table(s), `
+        + `${result.totalRows} row(s), ${megabytes.toFixed(1)} MB → ${result.folder}`,
+      userCode,
+      userName,
+    });
+    res.json({ success: true, ...result, megabytes });
+  } catch (error) {
+    console.error('Error running scoped CSV backup:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to write the CSV backup' });
+  } finally {
+    csvBackupRunning = false;
+  }
+});
+
 // ── Settings > Data Management > "Remove Scan & Order Import Data" ──────────────────────────────
 // The narrow counterpart to Remove All Operations Data: it touches ONLY the receiving side —
 // Order Import CSVs and the Scan Operations work done against them.

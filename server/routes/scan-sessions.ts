@@ -1008,6 +1008,55 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
 
     UNION ALL
 
+    -- "Fill Stock Ledger" reconciliation rows (Settings > Data Management; see
+    -- backfillLedgerFromEvents/applyStockLedgerBackfill in stockRecalc.ts) — a real Scan/Unload/
+    -- Load event whose stock_movements row never got written (most often: the data was restored
+    -- into a different/newer database than it was scanned into) gets filled in here after the
+    -- fact. sourceKind/isDispatch/isUnload are read off which of the three reasons this is, so it
+    -- colours and sorts like its real source; orderName carries the reason text itself ("Backfilled
+    -- from ... events") so the Type column (and isRemovableEntry's same sniff elsewhere on this
+    -- page) can tell it apart from an ordinary scan/adjust. id offset 7000000000+ keeps it out of
+    -- every other branch's id space.
+    SELECT
+      (7000000000 + sm.id) AS id,
+      sm.barcode,
+      COALESCE(pid.name, pb.name) AS "itemName",
+      NULL::integer AS pallets,
+      ABS(sm.qty) AS "totalQty",
+      NULL::integer AS "itemsPerPallet",
+      NULL::integer AS "looseQty",
+      false AS "isExtra",
+      false AS "isEmptyBox",
+      false AS "isExchange",
+      (sm.type = 'dispatch') AS "isDispatch",
+      (sm.reason = 'Backfilled from Unloading events (ledger reconciliation)') AS "isUnload",
+      false AS "isAdjust",
+      CASE
+        WHEN sm.reason = 'Backfilled from Unloading events (ledger reconciliation)' THEN 'unloading'
+        WHEN sm.reason = 'Backfilled from Loading events (ledger reconciliation)' THEN 'loading'
+        ELSE 'scan'
+      END AS "sourceKind",
+      NULL::text AS "emptyBoxNote",
+      NULL::text AS stv,
+      sm.created_by_code AS "scannedByCode",
+      un.name AS "scannedByName",
+      sm.created_at AS "scannedAt",
+      NULL::timestamp AS "adjustedAt",
+      false AS voided,
+      NULL::timestamp AS "voidedAt",
+      NULL::text AS "voidReason",
+      COALESCE(pid.new_sr, pb.new_sr) AS "srNo",
+      sm.reason AS "orderName",
+      NULL::text AS "orderDate",
+      sm.plant AS "plant"
+    FROM stock_movements sm
+    LEFT JOIN products pid ON pid.id = sm.product_id
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(sm.barcode))
+    LEFT JOIN user_name un ON un.user_code = sm.created_by_code
+    WHERE sm.origin = 'events-backfill'
+
+    UNION ALL
+
     -- Sort Slip picks (server/routes/sort-slips.ts) — "this much has been brought to the
     -- platform", typed in by a loader rather than scanned. They move no stock and are NOT a load:
     -- they carry their own sourceKind so they read as "Sort Pick" here and stay out of the
