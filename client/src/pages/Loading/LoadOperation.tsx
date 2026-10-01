@@ -422,14 +422,29 @@ export default function LoadOperation() {
   // as Unloading's own "Show:" selector) — changing it resets back to page 1 since the old page
   // number wouldn't line up against a different page size.
   const RECORDS_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
-  const [recordsPage, setRecordsPage] = useState(1);
+  // Persisted (sessionStorage) like the filters below it — opening a slip and coming back to the
+  // list later (a different page in the app, then back here) re-mounts this component, and a
+  // plain useState(1) would silently throw away whatever page you were on. See the matching
+  // "skip the very first run" guard below: without it, restoring this value is pointless, since
+  // the reset effect would immediately stomp it back to 1 on that very same mount.
+  const [recordsPage, setRecordsPage] = usePersistentFilter("loading:listPage", 1);
   const [recordsPageSize, setRecordsPageSize] = usePersistentFilter("loading:listPageSize", 20);
   const recordsOffset = (recordsPage - 1) * recordsPageSize;
   // Changing any filter can leave recordsPage pointing past the end of the now-smaller matching
   // set (or just land on a confusingly stale page) — same reasoning as the page-size reset above.
+  // Guarded the same way Scan History's own page-reset effect is (see historyFilterSignature
+  // there): a plain useEffect([...deps]) fires on MOUNT too, which would reset the page we just
+  // restored from sessionStorage back to 1 every time this component remounts, even though
+  // nothing actually changed. Comparing against a ref instead means only a REAL filter change
+  // (not a remount) resets the page.
+  const recordsFilterSignature = JSON.stringify([selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab]);
+  const lastRecordsFilterSignatureRef = useRef(recordsFilterSignature);
   useEffect(() => {
-    setRecordsPage(1);
-  }, [selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab]);
+    if (recordsFilterSignature !== lastRecordsFilterSignatureRef.current) {
+      lastRecordsFilterSignatureRef.current = recordsFilterSignature;
+      setRecordsPage(1);
+    }
+  }, [recordsFilterSignature]);
   const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; slipsCount: number; loadingCount: number; readyDespCount: number }>({
     queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab],
     queryFn: async () => {

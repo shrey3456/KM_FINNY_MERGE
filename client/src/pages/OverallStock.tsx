@@ -1435,6 +1435,8 @@ export default function OverallStock() {
       header: columnHeader("srNo", "Sr No"),
       hideable: false,
       width: 44,
+      // Pinned left, first — see Item Name's own comment below.
+      fixedWidth: true,
       sortable: true,
       // Numeric, not a plain string compare — Sr No is mostly digits ("1", "2", "10"), and a
       // string sort would read "10" as less than "2". Falls back to the raw string so a
@@ -1454,6 +1456,10 @@ export default function OverallStock() {
       header: columnHeader("itemName", "Item"),
       hideable: false,
       width: 220,
+      // Pinned left (see stickyColumnIds on the DataTable below) — fixedWidth makes its on-screen
+      // width exact and stable instead of stretching/shrinking with the other columns, which a
+      // sticky-left offset needs to line up against.
+      fixedWidth: true,
       sortable: true,
       accessor: (row) => row.itemName,
       totalable: false,
@@ -1493,6 +1499,8 @@ export default function OverallStock() {
       id: "barcode",
       header: columnHeader("barcode", "Barcode / SKU"),
       width: 140,
+      // Pinned left right after Item Name — see that column's own comment.
+      fixedWidth: true,
       sortable: true,
       accessor: (row) => row.barcode,
       totalable: false,
@@ -2760,6 +2768,9 @@ export default function OverallStock() {
             // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box of
             // its own — matching develop.
             paginationMode="client"
+            // Sr No + Item Name + Barcode stay put while the figure columns scroll underneath —
+            // all three are marked fixedWidth above so their pinned offsets line up exactly.
+            stickyColumnIds={["srNo", "itemName", "barcode"]}
             pageIndex={pageIndex}
             onPageIndexChange={setPageIndex}
             defaultPageSize={PAGE_SIZE}

@@ -1255,9 +1255,11 @@ export default function Unloading() {
   // the rotated layout folds these same three pieces into its own batch bar instead.
   const scanSession = detail?.session;
 
-  const scanBackButton = canWrite ? (
+  // Navigation only, never a write action — a read-only user needs this exactly as much as
+  // anyone else to get off the scan view.
+  const scanBackButton = (
     <Button variant="outline" size="sm" onClick={backToList}>&larr; Back</Button>
-  ) : null;
+  );
 
   // While a vehicle is on the bay it IS the page — so the truck and its number take the title
   // slot where "Unloading" sits on the list, and this carries the rest of the identity beside it.
@@ -1315,6 +1317,15 @@ export default function Unloading() {
           No STV — create one in Plant Settings
         </span>
       )}
+    </div>
+  // Read-only (or locked) — no picker, but the platform this vehicle is already on should still
+  // be visible, not just hidden, to anyone who can only view this scan.
+  ) : selectedStv ? (
+    <div className="flex items-center gap-2">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
+      <span className="rounded-full border border-[#001d6e]/20 bg-[#001d6e]/5 px-2 py-1 text-xs font-semibold text-[#001d6e]">
+        {selectedStv}
+      </span>
     </div>
   ) : null;
 

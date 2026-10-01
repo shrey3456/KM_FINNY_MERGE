@@ -199,7 +199,13 @@ interface DataTableProps<TData> {
    */
   columnWidthStorageKey?: string;
   isStickyHeader?: boolean;
-  stickyColumnId?: string;
+  // One or more leading columns (in column order) pinned to the left edge while scrolling the
+  // table sideways — e.g. Barcode + Item Name staying put while the figures scroll underneath.
+  // Independent of isStickyHeader (that's the vertical/top pin; this is horizontal/left), so it
+  // works on a plain client-paginated table with no scroll box of its own too. Each one's left
+  // offset is computed from the actual rendered width of whichever pinned columns come before it,
+  // so resizing a pinned column keeps the next one lined up correctly.
+  stickyColumnIds?: string[];
   maxHeight?: string;
   headerClassName?: string;
   showMobileSwipeHint?: boolean;
@@ -273,7 +279,7 @@ export function DataTable<TData>({
   enableColumnResizing = false,
   columnWidthStorageKey,
   isStickyHeader = false,
-  stickyColumnId,
+  stickyColumnIds,
   maxHeight,
   headerClassName,
   showMobileSwipeHint,
@@ -582,20 +588,25 @@ export function DataTable<TData>({
       <tr>
         {enableRowSelection && <td className={cn(base, sticky && TOTALS_STICKY)} />}
         {visibleColumns.map((col) => {
-          const isPinned = sticky && stickyColumnId === col.id;
+          const isPinned = !!stickyColumnIds?.includes(col.id);
           return (
             <td
               key={col.id}
               className={cn(
                 base,
                 sticky && TOTALS_STICKY,
-                // Keeps the top divider alongside the pinned column's right-edge shadow — a
-                // second `shadow-*` class would otherwise replace it outright.
+                isPinned && "sticky z-[19] bg-background",
+                // Keeps the top divider alongside the pinned column's right-edge shadow when the
+                // row is ALSO bottom-pinned — a second `shadow-*` class would otherwise replace
+                // it outright — and just the right-edge shadow on its own otherwise.
                 isPinned &&
-                  "left-0 z-[19] shadow-[inset_0_2px_0_0_rgba(0,29,110,0.2),2px_0_4px_-1px_rgba(0,0,0,0.08)]",
+                  (sticky
+                    ? "shadow-[inset_0_2px_0_0_rgba(0,29,110,0.2),2px_0_4px_-1px_rgba(0,0,0,0.08)]"
+                    : "shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]"),
                 col.align === "right" && "text-right",
                 col.align === "center" && "text-center",
               )}
+              style={isPinned ? { left: `${stickyLeftOffsets[col.id] ?? 0}px` } : undefined}
             >
               {col.id === totalsLabelId ? totalsLabel : columnTotal(col, totalsRows)}
             </td>
@@ -626,6 +637,21 @@ export function DataTable<TData>({
     isPinnedColumn(col) || flexibleBaseWidth <= 0
       ? getColWidth(col) + (col.id === lastVisibleColumnId ? allPinnedSpare : 0)
       : (getColWidth(col) / flexibleBaseWidth) * flexibleSpace;
+
+  // Left offset for each sticky column — the running sum of the sticky columns BEFORE it (an
+  // unpinned column in between, e.g. Sr No ahead of a pinned Item Name, just scrolls out of view
+  // underneath; it isn't part of the sum). Reliable only in pixel layout (the column also needs
+  // `fixedWidth: true`) — in plain percentage layout a column's on-screen width isn't knowable
+  // without a live measurement, so an offset computed here could drift from its real edge.
+  const stickyLeftOffsets: Record<string, number> = {};
+  if (stickyColumnIds && stickyColumnIds.length > 0) {
+    let acc = enableRowSelection ? 40 : 0;
+    for (const col of visibleColumns) {
+      if (!stickyColumnIds.includes(col.id)) continue;
+      stickyLeftOffsets[col.id] = acc;
+      acc += pixelWidthOf(col);
+    }
+  }
 
   const footerCtx: DataTableFooterContext = {
     pageIndex: safePageIndex,
@@ -740,7 +766,7 @@ export function DataTable<TData>({
                     </th>
                   )}
                   {visibleColumns.map((col) => {
-                    const isPinned = isStickyHeader && stickyColumnId === col.id;
+                    const isPinned = !!stickyColumnIds?.includes(col.id);
                     const isSorted = activeSort?.columnId === col.id;
                     return (
                       <th
@@ -774,7 +800,10 @@ export function DataTable<TData>({
                         className={cn(
                           "relative whitespace-nowrap border-b border-r bg-background px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:px-2.5 sm:py-2.5 sm:text-[11px]",
                           isStickyHeader && "sticky top-0 z-10 bg-background",
-                          isPinned && "left-0 z-20 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
+                          // Independent of isStickyHeader — a left-pin works with no vertical
+                          // sticky header at all, so it needs its own "sticky" + background here
+                          // rather than only riding on the class above.
+                          isPinned && "sticky z-20 bg-background shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
                           col.sortable && "cursor-pointer select-none",
                           canReorderColumns && "cursor-grab active:cursor-grabbing",
                           // The column being carried fades; the one under the cursor shows a bar
@@ -790,6 +819,7 @@ export function DataTable<TData>({
                           col.headerClassName,
                           headerClassName,
                         )}
+                        style={isPinned ? { left: `${stickyLeftOffsets[col.id] ?? 0}px` } : undefined}
                         onClick={() => handleSortClick(col)}
                       >
                         <span className="inline-flex items-center gap-1">
@@ -872,7 +902,7 @@ export function DataTable<TData>({
                           </td>
                         )}
                         {visibleColumns.map((col) => {
-                          const isPinned = isStickyHeader && stickyColumnId === col.id;
+                          const isPinned = !!stickyColumnIds?.includes(col.id);
                           const value = col.render ? col.render(row, globalRowIndex) : cellText(getCellValue(row, col));
                           return (
                             <td
@@ -880,11 +910,12 @@ export function DataTable<TData>({
                               className={cn(
                                 "border-b border-r border-gray-200 px-2 py-1.5 align-middle text-[11px] sm:px-2.5 sm:py-2 sm:text-xs",
                                 isPinned &&
-                                  "sticky left-0 z-[5] bg-background shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
+                                  "sticky z-[5] bg-background shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
                                 col.align === "right" && "text-right",
                                 col.align === "center" && "text-center",
                                 col.cellClassName,
                               )}
+                              style={isPinned ? { left: `${stickyLeftOffsets[col.id] ?? 0}px` } : undefined}
                               onClick={col.preventRowClick ? (e) => e.stopPropagation() : undefined}
                             >
                               {value}

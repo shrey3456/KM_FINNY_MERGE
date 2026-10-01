@@ -2510,19 +2510,48 @@ export default function OrderImport() {
               ) : (
                 <>
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-full caption-bottom border-collapse text-xs">
+                    {/* w-full, never min-w-full — min-w-full was what let the table grow PAST its
+                        container to fit the Chevron/PlantBadge/numbers' own minimum content
+                        width, pushing Action off into the horizontal scrollbar. table-fixed on
+                        its own already forces every column (including Action) to fit inside
+                        whatever width the table is given, so plain w-full is enough to fill the
+                        card edge-to-edge without the scrollbar coming back. */}
+                    <table className="w-full table-fixed caption-bottom border-collapse text-xs">
+                      {/* Fixed column widths (table-fixed above) instead of letting the browser's
+                          auto layout stretch whatever has the longest content — that's what was
+                          spreading Uploaded By/Uploaded At apart with a big gap before Action
+                          while the number columns got squeezed. */}
+                      {/* Percentages deliberately leave slack below 100% (84%, not 95%) — border-
+                          collapse's own divider lines between 9 columns aren't counted in a
+                          percentage at all, and without this margin that handful of extra pixels
+                          was enough to clip the fixed-width Action column into the scrollbar. */}
+                      <colgroup>
+                        <col className="w-8" />
+                        <col className="w-[19%]" />
+                        <col className="w-[10%]" />
+                        <col className="w-[9%]" />
+                        <col className="w-[7%]" />
+                        <col className="w-[8%]" />
+                        <col className="w-[9%]" />
+                        <col className="w-[11%]" />
+                        <col className="w-[11%]" />
+                        <col className="w-16" />
+                      </colgroup>
                       <thead>
                         <tr className="bg-[#001d6e]">
-                          <th className="w-8 border-r border-[#1a3a9c] px-2 py-2.5"></th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">CSV File</th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicles</th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Total Rows</th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Total Qty</th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded By</th>
-                          <th className="whitespace-nowrap border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded At</th>
-                          <th className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Action</th>
+                          <th className="border-r border-[#1a3a9c] px-2 py-2.5"></th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">CSV File</th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Plant</th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Order Date</th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Vehicles</th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Total Rows</th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-right text-[11px] font-semibold tracking-wide uppercase text-white">Total Qty</th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded By</th>
+                          <th className="truncate border-r border-[#1a3a9c] px-3 py-2.5 text-left text-[11px] font-semibold tracking-wide uppercase text-white">Uploaded At</th>
+                          {/* No label — "Action" itself didn't fit this narrow a column at this
+                              font size; every other icon-only column (the chevron) is blank the
+                              same way, so a trash icon with no header reads the same as that. */}
+                          <th className="px-2 py-2.5"></th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2539,15 +2568,15 @@ export default function OrderImport() {
                                 <td className="border-r border-b border-gray-200 px-2 py-2 text-center">
                                   <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
                                 </td>
-                                <td className="border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]" title={u.csvFileName}>{u.csvFileName}</td>
+                                <td className="truncate border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]" title={u.csvFileName}>{u.csvFileName}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2"><PlantBadge plant={u.plant} /></td>
-                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.orderDate}</td>
+                                <td className="truncate border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.orderDate}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.vehicleCount}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.totalRows.toLocaleString()}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-right font-semibold text-[#001d6e] tabular-nums">{(u.totalQty ?? 0).toLocaleString()}</td>
-                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.importedByName ?? u.importedByCode ?? "—"}</td>
-                                <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 whitespace-nowrap">{new Date(u.uploadedAt).toLocaleString()}</td>
-                                <td className="border-b border-gray-200 px-3 py-2 text-right">
+                                <td className="truncate border-r border-b border-gray-200 px-3 py-2 text-gray-700" title={u.importedByName ?? u.importedByCode ?? undefined}>{u.importedByName ?? u.importedByCode ?? "—"}</td>
+                                <td className="truncate border-r border-b border-gray-200 px-3 py-2 text-gray-700" title={new Date(u.uploadedAt).toLocaleString()}>{new Date(u.uploadedAt).toLocaleString()}</td>
+                                <td className="border-b border-gray-200 px-2 py-2 text-center">
                                   <button
                                     className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
                                     title="Delete this CSV"
@@ -2585,31 +2614,46 @@ export default function OrderImport() {
                           );
                         })}
                       </tbody>
-                      {/* Two totals: this page, and every upload the filters match. With 20 rows a
-                          page, a single footer figure would quietly describe only what is on screen. */}
+                      {/* One row's enough when every matching upload is already on screen — a
+                          second row repeating the exact same numbers just reads as a mistake.
+                          The "this page" + "all N" split only earns its place once a page is
+                          genuinely showing a subset. */}
                       <tfoot>
-                        <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold text-gray-700">
-                          <td className="px-2 py-2"></td>
-                          <td className="px-3 py-2" colSpan={3}>Total on this page</td>
-                          <td className="px-3 py-2 tabular-nums">
-                            {unloadCsvUploads.reduce((n, u) => n + (u.vehicleCount ?? 0), 0).toLocaleString()}
-                          </td>
-                          <td className="px-3 py-2 tabular-nums">
-                            {unloadCsvUploads.reduce((n, u) => n + (u.totalRows ?? 0), 0).toLocaleString()}
-                          </td>
-                          <td className="px-3 py-2 text-right text-[#001d6e] tabular-nums">
-                            {unloadCsvUploads.reduce((n, u) => n + (u.totalQty ?? 0), 0).toLocaleString()}
-                          </td>
-                          <td className="px-3 py-2" colSpan={3}></td>
-                        </tr>
-                        <tr className="border-t border-gray-200 bg-[#001d6e]/[0.06] font-bold text-[#001d6e]">
-                          <td className="px-2 py-2"></td>
-                          <td className="px-3 py-2" colSpan={3}>Total — all {unloadCsvHistoryTotal.toLocaleString()} upload(s)</td>
-                          <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.vehicles.toLocaleString()}</td>
-                          <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.rows.toLocaleString()}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{unloadCsvGrandTotals.qty.toLocaleString()}</td>
-                          <td className="px-3 py-2" colSpan={3}></td>
-                        </tr>
+                        {unloadCsvHistoryTotal > unloadCsvUploads.length ? (
+                          <>
+                            <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold text-gray-700">
+                              <td className="px-2 py-2"></td>
+                              <td className="px-3 py-2" colSpan={3}>Total on this page</td>
+                              <td className="px-3 py-2 tabular-nums">
+                                {unloadCsvUploads.reduce((n, u) => n + (u.vehicleCount ?? 0), 0).toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2 tabular-nums">
+                                {unloadCsvUploads.reduce((n, u) => n + (u.totalRows ?? 0), 0).toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2 text-right text-[#001d6e] tabular-nums">
+                                {unloadCsvUploads.reduce((n, u) => n + (u.totalQty ?? 0), 0).toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2" colSpan={3}></td>
+                            </tr>
+                            <tr className="border-t border-gray-200 bg-[#001d6e]/[0.06] font-bold text-[#001d6e]">
+                              <td className="px-2 py-2"></td>
+                              <td className="px-3 py-2" colSpan={3}>Total ({unloadCsvHistoryTotal.toLocaleString()})</td>
+                              <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.vehicles.toLocaleString()}</td>
+                              <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.rows.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{unloadCsvGrandTotals.qty.toLocaleString()}</td>
+                              <td className="px-3 py-2" colSpan={3}></td>
+                            </tr>
+                          </>
+                        ) : (
+                          <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold text-gray-700">
+                            <td className="px-2 py-2"></td>
+                            <td className="px-3 py-2" colSpan={3}>Total ({unloadCsvHistoryTotal.toLocaleString()})</td>
+                            <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.vehicles.toLocaleString()}</td>
+                            <td className="px-3 py-2 tabular-nums">{unloadCsvGrandTotals.rows.toLocaleString()}</td>
+                            <td className="px-3 py-2 text-right text-[#001d6e] tabular-nums">{unloadCsvGrandTotals.qty.toLocaleString()}</td>
+                            <td className="px-3 py-2" colSpan={3}></td>
+                          </tr>
+                        )}
                       </tfoot>
                     </table>
                   </div>

@@ -24,6 +24,11 @@ interface CurrentUser {
 
 // Pages that scan at a fixed station, where the header is worth trading away for table height.
 const HEADER_HIDEABLE_PATHS = ['/scan', '/unloading', '/loading'];
+// Vehicle Planning trades the header away too, but starts HIDDEN by default (the opposite of the
+// scan stations above) — it's a planning board, not a station someone sits at all day, so there's
+// no ongoing value in the "Welcome, <name>" greeting eating into its vertical space every time it
+// opens. Its own localStorage key, since the two groups of pages want different defaults.
+const HEADER_HIDDEN_BY_DEFAULT_PATHS = ['/vehicle-planning'];
 
 const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   const [location] = useLocation();
@@ -57,8 +62,21 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   useEffect(() => {
     localStorage.setItem('scanHeaderHidden', String(scanHeaderHidden));
   }, [scanHeaderHidden]);
-  const hideHeader = isScanPage && scanHeaderHidden;
-  
+
+  const isHiddenByDefaultPage = HEADER_HIDDEN_BY_DEFAULT_PATHS.includes(location);
+  const [defaultHiddenHeaderHidden, setDefaultHiddenHeaderHidden] = useState(
+    () => localStorage.getItem('headerHiddenByDefaultPages') !== 'false',
+  );
+  useEffect(() => {
+    localStorage.setItem('headerHiddenByDefaultPages', String(defaultHiddenHeaderHidden));
+  }, [defaultHiddenHeaderHidden]);
+
+  // Whichever group this page belongs to drives the toggle — a page is never in both lists.
+  const canToggleHeader = isScanPage || isHiddenByDefaultPage;
+  const headerHidden = isScanPage ? scanHeaderHidden : defaultHiddenHeaderHidden;
+  const setHeaderHidden = isScanPage ? setScanHeaderHidden : setDefaultHiddenHeaderHidden;
+  const hideHeader = canToggleHeader && headerHidden;
+
   useEffect(() => {
     // Get user information from localStorage
     const userStr = localStorage.getItem('currentUser');
@@ -148,11 +166,11 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
                 userRole={currentUser?.role || ''}
                 onLogout={onLogout}
               />
-              {isScanPage && (
+              {canToggleHeader && (
                 <button
-                  onClick={() => setScanHeaderHidden(true)}
+                  onClick={() => setHeaderHidden(true)}
                   className="mr-3 ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-[#001d6e]"
-                  title="Hide header for more scanning space"
+                  title="Hide header for more space"
                 >
                   <ChevronUp className="h-4 w-4" /> Hide header
                 </button>
@@ -246,10 +264,10 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
           </div>
         </div>
         
-        {/* When the scan header is collapsed, a small floating pill brings it back. */}
+        {/* When the header is collapsed, a small floating pill brings it back. */}
         {hideHeader && (
           <button
-            onClick={() => setScanHeaderHidden(false)}
+            onClick={() => setHeaderHidden(false)}
             className="fixed left-1/2 top-2 z-40 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-[#001d6e] px-4 py-1.5 text-xs font-semibold text-white shadow-lg transition-colors hover:bg-[#00154b]"
             title="Show header"
           >
