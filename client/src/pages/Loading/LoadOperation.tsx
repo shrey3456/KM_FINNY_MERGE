@@ -126,6 +126,9 @@ type ProformaSlip = {
   // as locked text and the server stamps every scan event with it, ignoring anything the client
   // sends. Null only on slips started before this was required.
   loadingStv: string | null;
+  // Who ran Create Operation for this order (server/routes/loading.ts's withRto) — used only to
+  // decide whether the Complete button's creator-always-allowed rule applies to this user.
+  createdByCode: string | null; createdByName: string | null;
 };
 type VehicleSuggestion = {
   id: number; vehicleNumber: string; rtoNumber: string | null; driver: string | null;
@@ -273,13 +276,15 @@ function isAdminOrSuper(): boolean {
   return ADMIN_ROLES.includes(String(u.role ?? "").trim().toLowerCase());
 }
 // Mirrors the server's canCompleteLoad (server/routes/loading.ts) exactly, for a clean hide
-// instead of a click-then-403 — real enforcement still happens server-side either way.
-function canCompleteLoadClient(): boolean {
-  const u = currentUser();
-  const role = (u.role ?? "").toLowerCase().trim();
-  if (["admin", "super-admin"].includes(role)) return true;
-  const designation = (u.designation ?? "").toLowerCase().trim();
-  return !["loader", "helper", "driver", "scanner"].includes(designation);
+// instead of a click-then-403 — real enforcement still happens server-side either way. Complete
+// is restricted to whoever has a real stake in THIS load: its creator, its current owner, or
+// admin/super-admin/Supervisor — needs the slip itself, not just the signed-in user.
+function canCompleteLoadClient(slip: ProformaSlip | null): boolean {
+  if (!slip) return false;
+  if (isAdminOrSuper() || isSupervisor()) return true;
+  const myCode = currentUser()?.userCode;
+  if (!myCode) return false;
+  return (!!slip.loadingOwnerCode && slip.loadingOwnerCode === myCode) || (!!slip.createdByCode && slip.createdByCode === myCode);
 }
 // Mirrors the server's isSupervisor (server/routes/loading.ts) — Supervisor gets the same
 // ownership-bypass as admin here (open/view/scan/pause any load, change its STV, reopen it),
@@ -343,7 +348,6 @@ export default function LoadOperation() {
   // would stay hidden despite the server now accepting the request.
   const canWrite = hasPageWriteAccess("loading") || isSupervisor();
   const admin = isAdminOrSuper();
-  const canComplete = canCompleteLoadClient();
   // Kept separate from `admin` — Supervisor gets the same ownership-bypass admin gets (open/
   // view/scan/pause/STV-change/reopen ANY load), but not everything `admin` implies elsewhere on
   // this page (e.g. canResetLoad below stays admin-only, mirroring the server's
@@ -383,6 +387,36 @@ export default function LoadOperation() {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   }
 
+  // ─── Landing-view filters — same controls/layout Load Operations uses (search box, date +
+  // plant filters, status count buttons, status tabs). Date/search/plant/tab are all sent to the
+  // server (below) and applied in SQL before pagination — filtering only the one page of rows
+  // already on screen is what made the date filter look broken (a matching row sitting on another
+  // page just never got checked) and made the stat tiles never move (they summed the same
+  // unfiltered page no matter what was picked). Excel-style column filters (recordColumnConditions)
+  // stay client-side, over whichever page is currently loaded — a smaller, known limitation.
+  // All persisted for the sitting (sessionStorage) — these narrow which loads you're looking at,
+  // and rebuilding them after every hop to another page is pure friction.
+  const [listSearch, setListSearch] = usePersistentFilter("loading:listSearch", "");
+  const debouncedListSearch = useDebounced(listSearch, 300);
+  // Stored as an ISO string, not a Date: JSON round-tripping a Date yields a string back, so
+  // persisting the Date itself would silently hand the rest of this page a non-Date.
+  const [selectedDateIso, setSelectedDateIso] = usePersistentFilter<string | null>("loading:listDate", null);
+  const selectedDate = selectedDateIso ? new Date(selectedDateIso) : null;
+  const setSelectedDate = (d: Date | null) => setSelectedDateIso(d ? d.toISOString() : null);
+  // This top calendar filter matches the proforma slip's own Order Date (ps.order_date), not
+  // Load Date — send it as a plain "YYYY-MM-DD" in local time, never selectedDate.toISOString(),
+  // which is a UTC moment and would
+  // shift a day in any timezone ahead of or behind UTC.
+  const selectedDateParam = selectedDate
+    ? `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, "0")}-${String(selectedDate.getDate()).padStart(2, "0")}`
+    : "";
+  const [selectedPlants, setSelectedPlants] = usePersistentFilter<string[]>("loading:listPlants", []);
+  const [activeViewTab, setActiveViewTab] = usePersistentFilter("loading:listTab", "overall");
+  const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate">("loading:listSortBy", "creationDate");
+  const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "desc");
+  // Excel-style column filters for the landing list (see recordFilterColumns below).
+  const [recordColumnConditions, setRecordColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("loading:columnFilters", {});
+
   // Server-paginated (20/page by default, matching Scan History) rather than fetching every
   // slip anyone's ever loaded in one request. Page size is user-selectable (same options/pattern
   // as Unloading's own "Show:" selector) — changing it resets back to page 1 since the old page
@@ -391,32 +425,29 @@ export default function LoadOperation() {
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsPageSize, setRecordsPageSize] = usePersistentFilter("loading:listPageSize", 20);
   const recordsOffset = (recordsPage - 1) * recordsPageSize;
-  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number }>({
-    queryKey: ["/api/loading/records", recordsPage, recordsPageSize],
-    queryFn: async () => (await apiRequest("GET", `/api/loading/records?limit=${recordsPageSize}&offset=${recordsOffset}`)).json(),
+  // Changing any filter can leave recordsPage pointing past the end of the now-smaller matching
+  // set (or just land on a confusingly stale page) — same reasoning as the page-size reset above.
+  useEffect(() => {
+    setRecordsPage(1);
+  }, [selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab]);
+  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; slipsCount: number; loadingCount: number; readyDespCount: number }>({
+    queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab],
+    queryFn: async () => {
+      const params = new URLSearchParams({ limit: String(recordsPageSize), offset: String(recordsOffset) });
+      if (selectedDateParam) params.set("date", selectedDateParam);
+      if (debouncedListSearch.trim()) params.set("search", debouncedListSearch.trim());
+      if (selectedPlants.length > 0) params.set("plants", selectedPlants.join(","));
+      if (activeViewTab !== "overall") params.set("tab", activeViewTab);
+      return (await apiRequest("GET", `/api/loading/records?${params.toString()}`)).json();
+    },
     enabled: view === "list",
   });
   const recordsTotal = recordsQuery.data?.total ?? 0;
   const recordsItems = recordsQuery.data?.records ?? [];
   const recordsHasMore = recordsOffset + recordsItems.length < recordsTotal;
-
-  // ─── Landing-view filters — same controls/layout Load Operations uses (search box, date +
-  // plant filters, status count buttons, status tabs). All applied client-side over the current
-  // page of records, exactly like Load Operations filters its own already-fetched list.
-  // All persisted for the sitting (sessionStorage) — these narrow which loads you're looking at,
-  // and rebuilding them after every hop to another page is pure friction.
-  const [listSearch, setListSearch] = usePersistentFilter("loading:listSearch", "");
-  // Stored as an ISO string, not a Date: JSON round-tripping a Date yields a string back, so
-  // persisting the Date itself would silently hand the rest of this page a non-Date.
-  const [selectedDateIso, setSelectedDateIso] = usePersistentFilter<string | null>("loading:listDate", null);
-  const selectedDate = selectedDateIso ? new Date(selectedDateIso) : null;
-  const setSelectedDate = (d: Date | null) => setSelectedDateIso(d ? d.toISOString() : null);
-  const [selectedPlants, setSelectedPlants] = usePersistentFilter<string[]>("loading:listPlants", []);
-  const [activeViewTab, setActiveViewTab] = usePersistentFilter("loading:listTab", "overall");
-  const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate">("loading:listSortBy", "creationDate");
-  const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "desc");
-  // Excel-style column filters for the landing list (see recordFilterColumns below).
-  const [recordColumnConditions, setRecordColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("loading:columnFilters", {});
+  const slipsCount = recordsQuery.data?.slipsCount ?? 0;
+  const inProgressCount = recordsQuery.data?.loadingCount ?? 0;
+  const readyDespCount = recordsQuery.data?.readyDespCount ?? 0;
 
   // Plant options for PlantFilter, straight from Plant Management (same source PlantBadge reads),
   // so the filter's colors match the badges rendered in the rows.
@@ -494,27 +525,17 @@ export default function LoadOperation() {
     );
   };
 
+  // Whether any filter narrowing the list is currently active — drives the empty-state message
+  // below ("nothing loaded yet" vs "nothing matches"), now that recordsItems IS the already
+  // server-filtered page rather than the raw unfiltered one.
+  const listFiltersActive =
+    !!selectedDateParam || !!debouncedListSearch.trim() || selectedPlants.length > 0 ||
+    activeViewTab !== "overall" || recordConditionList.length > 0;
+
+  // Date/search/plant/tab are already applied server-side (recordsQuery above) — only the
+  // Excel-style column conditions and the display sort still run over the fetched page here.
   const filteredRecords = recordsItems
-    .filter((r) => {
-      if (activeViewTab === "loading" && r.loadingCompletedAt) return false;
-      if (activeViewTab === "ready-desp" && !r.loadingCompletedAt) return false;
-      if (selectedPlants.length > 0 && !selectedPlants.includes(r.plant ?? "")) return false;
-      if (!matchAllConditions(r, recordConditionList, recordFilterColumns)) return false;
-      if (selectedDate) {
-        const d = new Date(r.createdAt);
-        if (
-          d.getDate() !== selectedDate.getDate() ||
-          d.getMonth() !== selectedDate.getMonth() ||
-          d.getFullYear() !== selectedDate.getFullYear()
-        ) return false;
-      }
-      const q = listSearch.trim().toLowerCase();
-      if (q) {
-        const hay = [r.orderNumber, r.partyName, r.plant, r.vehicleNumber, r.rtoNumber, recordStatus(r), r.loadingStv, r.loadingOwnerName];
-        if (!hay.some((v) => (v ?? "").toLowerCase().includes(q))) return false;
-      }
-      return true;
-    })
+    .filter((r) => matchAllConditions(r, recordConditionList, recordFilterColumns))
     .sort((a, b) => {
       const dir = sortOrder === "asc" ? 1 : -1;
       if (sortBy === "orderNumber") {
@@ -522,9 +543,6 @@ export default function LoadOperation() {
       }
       return dir * (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     });
-
-  const inProgressCount = recordsItems.filter((r) => !r.loadingCompletedAt).length;
-  const readyDespCount = recordsItems.filter((r) => r.loadingCompletedAt).length;
 
   function refreshOwnerHistory(orderNumber: string | null | undefined) {
     if (!orderNumber) return;
@@ -1504,6 +1522,9 @@ export default function LoadOperation() {
   const isLoadPaused = !!slip?.loadingPausedAt;
   const isLoadOwner = !slip?.loadingOwnerCode || slip.loadingOwnerCode === currentUser()?.userCode;
   const canScanThisLoad = canWrite && !locked && !isLoadPaused && (isLoadOwner || canBypassOwnership);
+  // Write access to Loading at all, AND (creator/current owner/admin/super-admin/Supervisor) —
+  // a read-only user never sees this button now, regardless of their designation.
+  const canComplete = canWrite && canCompleteLoadClient(slip);
 
   function stopItemCamera() {
     itemScannerRef.current?.stop();
@@ -2540,7 +2561,7 @@ export default function LoadOperation() {
                   <Layers className="mr-1.5 h-4 w-4 shrink-0 text-gray-700 sm:mr-2" />
                   <div className="flex flex-col items-start">
                     <span className="whitespace-nowrap text-xs font-bold">SLIPS</span>
-                    <span className="text-sm font-semibold">{recordsItems.length}</span>
+                    <span className="text-sm font-semibold">{slipsCount}</span>
                   </div>
                 </Button>
                 <Button
@@ -2609,10 +2630,10 @@ export default function LoadOperation() {
                   <Truck className="h-7 w-7 text-[#001d6e]/40" />
                 </div>
                 <div className="mb-1 text-sm font-semibold text-[#001d6e]">
-                  {recordsItems.length === 0 ? "No loading slips yet" : "No slips match these filters"}
+                  {!listFiltersActive ? "No loading slips yet" : "No slips match these filters"}
                 </div>
                 <p className="mb-4 max-w-xs text-xs text-muted-foreground">
-                  {recordsItems.length === 0
+                  {!listFiltersActive
                     ? (canWrite ? "Start a new load to scan a proforma slip and link it to a vehicle." : "Nothing has been loaded yet.")
                     : "Try clearing the search, date or plant filter."}
                 </p>
@@ -2620,29 +2641,31 @@ export default function LoadOperation() {
             ) : (
               <>
                 {/* Desktop View - Loading Slips Table. overflow-x-auto is a safety net, not the
-                    primary fit strategy — Order/Load Date and Vehicle/RTO are each merged into
-                    one stacked cell (below) specifically so this fits comfortably. The switch
-                    point is xl (1280px), not lg (1024px), because the app's own sidebar eats
-                    ~256px of viewport width when open — a "1100px" browser window can really
-                    only offer this table ~850px, well short of what 11 columns need — so this
-                    table only shows once there's enough SPARE width to survive that; anything
-                    narrower gets the card list instead (see the xl:hidden card view further
-                    down), which never scrolls horizontally at all. */}
+                    primary fit strategy — Vehicle/RTO is merged into one stacked cell (below,
+                    Order/Load Date used to be merged the same way too, but that hid Load Date
+                    from its own column filter/sort and was split back out on request)
+                    specifically so this fits comfortably. The switch point is xl (1280px), not
+                    lg (1024px), because the app's own sidebar eats ~256px of viewport width when
+                    open — a "1100px" browser window can really only offer this table ~850px,
+                    well short of what 12 columns need — so this table only shows once there's
+                    enough SPARE width to survive that; anything narrower gets the card list
+                    instead (see the xl:hidden card view further down), which never scrolls
+                    horizontally at all. */}
                 <div className={`border rounded-md w-full overflow-x-auto ${bigView ? "hidden" : "hidden xl:block"}`}>
                   {/* [&_th]/[&_td]:px-2 shrinks this table's own cell padding from the shared
-                      Table component's default px-4 — 11 columns × 16px saved per side adds up
+                      Table component's default px-4 — 12 columns × 16px saved per side adds up
                       to over 150px, which is what was pushing "Actions" past the edge at
-                      ~1024-1100px laptop widths even after merging Order/Load Date and
-                      Vehicle/RTO into single cells. Scoped to this table only via the
-                      descendant selector — doesn't touch the shared component or any other
-                      table on the site. */}
+                      ~1024-1100px laptop widths even after merging Vehicle/RTO into a single
+                      cell. Scoped to this table only via the descendant selector — doesn't touch
+                      the shared component or any other table on the site. */}
                   <Table className="[&_th]:px-2 [&_td]:px-2">
                     <TableHeader>
                       {/* Same navy/white uppercase header every other table on the site uses,
                           instead of the plain shadcn default (muted-gray text on white) — makes
                           the header read as a header rather than blending into the rows. */}
                       <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Order date (top) — the proforma slip's own date; Load date (below) — when this load operation was started">{recordColumnHeader("orderDate", "Order / Load Date")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">{recordColumnHeader("orderDate", "Order Date")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="When this load operation was started">{recordColumnHeader("loadDate", "Load Date")}</TableHead>
                         <TableHead
                           className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
                           onClick={() => { setSortBy("orderNumber"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
@@ -2674,16 +2697,12 @@ export default function LoadOperation() {
                                 request. The row's own action buttons are still the way in. */}
                             <TableRow>
                               <TableCell>
-                                <div className="flex flex-col">
-                                  <span>
-                                    {r.orderDate
-                                      ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
-                                      : "-"}
-                                  </span>
-                                  <span className="text-xs text-muted-foreground">
-                                    Load: {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
-                                  </span>
-                                </div>
+                                {r.orderDate
+                                  ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+                                  : "-"}
+                              </TableCell>
+                              <TableCell>
+                                {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
                               </TableCell>
                               <TableCell>#{r.orderNumber}</TableCell>
                               <TableCell>{r.partyName || "-"}</TableCell>

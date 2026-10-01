@@ -177,6 +177,12 @@ function checkLoadViewAccess(slip: any, req: Request, owner: { code: string | nu
   if (!owner.code) return null;
   if (slip.loadingPausedAt) return null;
   if (owner.code === actor(req).userCode || isAdmin(req) || isSupervisor(req)) return null;
+  // A pure read-only user (no Write Access grant to Loading at all) can't scan/act on this load
+  // regardless of who owns it — there's nothing for the ownership rule to protect against for
+  // them, so it never applies here; they can open and look at ANY slip. Write-capable users
+  // still get the ownership block below, since for them it's warning against a real conflict
+  // (thinking they can scan a load someone else is actively on).
+  if (!hasWriteAccess(req.user as any, 'loading')) return null;
   return `This load is currently owned by ${owner.name ?? owner.code} — ask them to pause it before opening it.`;
 }
 
@@ -273,20 +279,30 @@ function formatStoreKeeperInfo(userName: string | null | undefined, stv: string)
   return buildStoreKeeperInfo([fullNameOf(userName)], [stv]);
 }
 
-// Mirrors Order Scan's canCompletePart exactly (server/routes/order-scan.ts) — anyone can
-// complete a load EXCEPT designations "Loader"/"Helper"/"Driver"/"Scanner"; admin/super-admin
-// always allowed. This is the "force complete even if not everything is loaded" button.
-function canCompleteLoad(user: any): boolean {
-  const role = (user?.role ?? '').toLowerCase().trim();
-  if (['admin', 'super-admin'].includes(role)) return true;
-  const designation = (user?.designation ?? '').toLowerCase().trim();
-  return !['loader', 'helper', 'driver', 'scanner'].includes(designation);
+// Who created this load's very first loading_records row — the same "Creator" the landing list
+// already shows. Kept separate from resolveLoadOwner (which only falls back to this when no
+// owner has been explicitly set) because Complete access below allows the creator ALWAYS, even
+// once ownership has since moved on to someone else via a handoff.
+async function resolveLoadCreatorCode(orderNumber: string): Promise<string | null> {
+  const { rows } = await pool.query(
+    `SELECT created_by_code AS "code" FROM loading_records WHERE order_number = $1 ORDER BY created_at ASC LIMIT 1`,
+    [orderNumber],
+  );
+  return rows[0]?.code ?? null;
 }
 
-function requireCompleteLoadAccess(req: Request, res: Response, next: NextFunction) {
-  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
-  if (!canCompleteLoad(req.user)) return res.status(403).json({ message: 'You do not have permission to complete this load.' });
-  next();
+// Complete is restricted to whoever has a real stake in THIS load: its creator, its current
+// owner, or admin/super-admin/Supervisor — never a blanket "anyone whose designation isn't
+// Loader/Helper/Driver/Scanner" rule (that let any office-type user force-complete any load,
+// not just one they actually started or are holding).
+async function canCompleteLoad(req: Request, slip: any): Promise<boolean> {
+  if (isAdmin(req) || isSupervisor(req)) return true;
+  const userCode = actor(req).userCode;
+  if (!userCode) return false;
+  const owner = await resolveLoadOwner(slip);
+  if (owner.code === userCode) return true;
+  const creatorCode = await resolveLoadCreatorCode(slip.orderNumber);
+  return creatorCode === userCode;
 }
 
 // Reopening (undoing Complete) is stricter than completing: an admin/super-admin, or the load's
@@ -337,20 +353,26 @@ async function withRto(slip: any) {
   // loadDate — when this order's load operation actually started (loading_records.created_at,
   // the same value the landing table's own "Load Date" column shows), separate from the slip's
   // own orderDate. Null until Create Operation has been run for this order at least once.
+  // createdByCode/Name — who ran Create Operation for this order (the landing list's own
+  // "Creator" column) — same row, so no extra query: the client needs this to know whether
+  // Complete's creator-always-allowed rule (canCompleteLoad) applies to the signed-in user.
   const { rows: loadRecordRows } = await pool.query(
-    `SELECT created_at FROM loading_records WHERE order_number = $1 ORDER BY created_at ASC LIMIT 1`,
+    `SELECT created_at, created_by_code AS "createdByCode", created_by_name AS "createdByName"
+     FROM loading_records WHERE order_number = $1 ORDER BY created_at ASC LIMIT 1`,
     [slip.orderNumber],
   );
   const loadDate = loadRecordRows[0]?.created_at ?? null;
+  const createdByCode = loadRecordRows[0]?.createdByCode ?? null;
+  const createdByName = loadRecordRows[0]?.createdByName ?? null;
 
-  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null, vehicleVolume: null, suggestedVehicle: null, loadDate };
+  if (!slip?.vehicleNumber) return { ...slip, rtoNumber: null, vehicleVolume: null, suggestedVehicle: null, loadDate, createdByCode, createdByName };
   const vehicle = slip.vehicleInfoId
     ? await storage.getVehicleInfo(slip.vehicleInfoId)
     : await storage.getVehicleInfoByVehicleNumberOrRto(slip.vehicleNumber);
   const suggestedVehicle = !slip.vehicleAssignedByCode && vehicle
     ? { id: vehicle.id, vehicleNumber: vehicle.vehicleNumber, rtoNumber: vehicle.rtoNumber, driver: vehicle.driver, company: vehicle.company, manufacturer: vehicle.manufacturer, volume: vehicle.volume }
     : null;
-  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, vehicleVolume: vehicle?.volume ?? null, suggestedVehicle, loadDate };
+  return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, vehicleVolume: vehicle?.volume ?? null, suggestedVehicle, loadDate, createdByCode, createdByName };
 }
 
 // Attaches load progress to each proforma item (expected/loaded/remaining/itemsPerPallet,
@@ -780,7 +802,7 @@ router.get('/loading/proforma/:orderNumber/handoffs', requirePageAccess('loading
 // also carries plenty of other companies' vehicles (TRANSPORT, SCRAP, ...) that are real data
 // but never relevant to assign onto a Krupa load. Applied to BOTH the local search and the
 // Notion fallback below, so neither path can surface one.
-function qualifiesForLoadingVehiclePicker(company: string | null | undefined): boolean {
+export function qualifiesForLoadingVehiclePicker(company: string | null | undefined): boolean {
   const c = (company ?? '').toLowerCase();
   return c.includes('krupa') || c.includes('dummy');
 }
@@ -882,21 +904,66 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
     const limit  = Math.max(1, Math.min(100, parseInt(String(req.query.limit  ?? '20'), 10) || 20));
     const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
 
+    // Every filter the landing list's toolbar exposes (date/search/plant picker, SLIPS/LOADING/
+    // READY≈DESP tab) is applied HERE, in SQL, before COUNT and LIMIT/OFFSET — not client-side
+    // over whichever one page of rows happened to already be fetched. Filtering only the loaded
+    // page is what made the date filter look broken (a matching row two pages back just never
+    // got far enough to be checked) and made the stat tiles never move (they summed the same
+    // unfiltered page no matter what was picked). Excel-style column filters stay client-side —
+    // a smaller, known limitation, not what was reported broken.
+    const dateParam = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateParam);
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const plantsParam = typeof req.query.plants === 'string' ? req.query.plants.trim() : '';
+    const selectedPlants = plantsParam ? plantsParam.split(',').map((p) => p.trim()).filter(Boolean) : [];
+    const tab = typeof req.query.tab === 'string' ? req.query.tab : 'overall';
+
     // Plant-scoped, same as everywhere else (unloading.ts's canAccessPlant/getUserPlants) —
     // "list available to all" only ever meant all USERS, not all plants; a user with no access
     // to a plant still shouldn't see that plant's loads here.
     const userPlants = getUserPlants(req.user);
+    const baseConditions: string[] = [];
     const params: any[] = [];
-    let plantWhere = '';
     if (userPlants !== null) {
       params.push(userPlants);
-      plantWhere = `WHERE LOWER(lr.plant) = ANY($${params.length})`;
+      baseConditions.push(`LOWER(lr.plant) = ANY($${params.length})`);
     }
+    if (selectedPlants.length > 0) {
+      params.push(selectedPlants.map((p) => p.toLowerCase()));
+      baseConditions.push(`LOWER(lr.plant) = ANY($${params.length})`);
+    }
+    if (dateMatch) {
+      // Matches the proforma slip's own Order Date (ps.order_date, a plain `date` column — no
+      // time/timezone component to shift), not Load Date (lr.created_at, when the load operation
+      // itself was started) — the top calendar filter is about the ORDER's date, same as every
+      // other "Order Date" column on this page. Load Date still has its own Excel column filter.
+      params.push(dateParam);
+      baseConditions.push(`ps.order_date = $${params.length}::date`);
+    }
+    if (search) {
+      params.push(`%${search.toLowerCase()}%`);
+      const idx = params.length;
+      baseConditions.push(
+        `(LOWER(lr.order_number) LIKE $${idx} OR LOWER(lr.party_name) LIKE $${idx} OR ` +
+        `LOWER(lr.plant) LIKE $${idx} OR LOWER(lr.vehicle_number) LIKE $${idx} OR ` +
+        `LOWER(lr.rto_number) LIKE $${idx} OR LOWER(ps.loading_stv) LIKE $${idx} OR ` +
+        `LOWER(ps.loading_owner_name) LIKE $${idx})`,
+      );
+    }
+    const baseWhere = baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : '';
+
+    const statusCondition = tab === 'loading' ? 'ps.loading_completed_at IS NULL'
+      : tab === 'ready-desp' ? 'ps.loading_completed_at IS NOT NULL'
+      : null;
+    const listWhere = statusCondition
+      ? `${baseWhere ? `${baseWhere} AND` : 'WHERE'} ${statusCondition}`
+      : baseWhere;
+    const listParams = [...params];
     params.push(limit, offset);
     const limitIdx = params.length - 1;
     const offsetIdx = params.length;
 
-    const [dataRes, countRes] = await Promise.all([
+    const [dataRes, totalRes, loadingCountRes, readyDespCountRes] = await Promise.all([
       pool.query(
         `SELECT lr.id, lr.order_number AS "orderNumber", lr.proforma_slip_id AS "proformaSlipId",
                 lr.party_name AS "partyName", lr.plant, lr.vehicle_number AS "vehicleNumber",
@@ -913,20 +980,37 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 ps.loading_stv AS "loadingStv"
          FROM loading_records lr
          LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
-         ${plantWhere}
+         ${listWhere}
          ORDER BY lr.created_at DESC
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         params,
       ),
       pool.query(
-        `SELECT COUNT(*) AS total FROM loading_records lr ${plantWhere}`,
-        userPlants !== null ? [userPlants] : [],
+        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${listWhere}`,
+        listParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ps.loading_completed_at IS NULL` : 'WHERE ps.loading_completed_at IS NULL'}`,
+        listParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ps.loading_completed_at IS NOT NULL` : 'WHERE ps.loading_completed_at IS NOT NULL'}`,
+        listParams,
       ),
     ]);
 
+    const loadingCount = parseInt(loadingCountRes.rows[0]?.total ?? '0', 10);
+    const readyDespCount = parseInt(readyDespCountRes.rows[0]?.total ?? '0', 10);
+
     res.json({
       records: dataRes.rows,
-      total: parseInt(countRes.rows[0]?.total ?? '0', 10),
+      total: parseInt(totalRes.rows[0]?.total ?? '0', 10),
+      // Counts for the SLIPS/LOADING/READY≈DESP tiles — scoped to the date/search/plant filter
+      // currently applied, but deliberately NOT to the tab itself, since all three tiles need to
+      // stay visible (and clickable, to switch tabs) at once.
+      slipsCount: loadingCount + readyDespCount,
+      loadingCount,
+      readyDespCount,
       limit, offset,
     });
   } catch (error) {
@@ -1436,14 +1520,17 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
   }
 });
 
-// POST /api/loading/proforma/:orderNumber/complete — manual override, same designation-based
-// permission Order Scan uses for its Complete button ("complete button if not loaded, same as
-// Order Scan") — works even if items are still short, unlike the automatic path above.
-router.post('/loading/proforma/:orderNumber/complete', requireLoadingWrite, requireCompleteLoadAccess, async (req: Request, res: Response) => {
+// POST /api/loading/proforma/:orderNumber/complete — manual override: works even if items are
+// still short, unlike the automatic path above. Permission is resolved per-slip (see
+// canCompleteLoad) rather than as route middleware, since it needs the slip's own owner/creator.
+router.post('/loading/proforma/:orderNumber/complete', requireLoadingWrite, async (req: Request, res: Response) => {
   try {
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (!(await canCompleteLoad(req, slip))) {
+      return res.status(403).json({ message: "Only this load's creator, its current owner, or an admin/supervisor can complete it." });
+    }
 
     const { userCode, userName } = actor(req);
     const updated = await storage.updateProformaSlip(slip.id, {

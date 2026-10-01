@@ -1479,7 +1479,11 @@ router.post('/reports/upload-to-notion', requirePageWrite('scan-history'), async
 router.get('/reports/stock-adjustments', async (req: Request, res: Response) => {
   try {
     const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
-    const plant = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    // Comma-separated when opened from a merged row (Overall Stock's All/State tabs fold every
+    // plant for this barcode into one row — see combinedPlants client-side) — a single plant
+    // name still works exactly as before, just as a one-element list.
+    const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    const plantList = plantParam ? plantParam.split(',').map((p) => p.trim()).filter(Boolean) : [];
     if (!barcode) return res.status(400).json({ message: 'barcode is required' });
 
     const allowed = getUserPlants(req.user);
@@ -1493,7 +1497,10 @@ router.get('/reports/stock-adjustments', async (req: Request, res: Response) => 
       `COALESCE(sm.source, '') <> 'loading'`,
     ];
     const params: any[] = [barcode];
-    if (plant) { params.push(plant); conditions.push(`LOWER(TRIM(sm.plant)) = LOWER(TRIM($${params.length}))`); }
+    if (plantList.length > 0) {
+      params.push(plantList.map((p) => p.toLowerCase()));
+      conditions.push(`LOWER(TRIM(sm.plant)) = ANY($${params.length}::text[])`);
+    }
     if (allowed !== null) { params.push(allowed); conditions.push(`LOWER(sm.plant) = ANY($${params.length}::text[])`); }
     // The period, when the page is showing one: same from/to the stock report uses.
     const from = typeof req.query.from === 'string' && req.query.from.trim() ? req.query.from.trim() : '';
@@ -1622,12 +1629,20 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
                -- Opening leaves the Settings-wide actions out for the same reason Closing does
                -- (below): a bulk clear run last month is not what this plant "had" at the start
-               -- of the period as far as the day-to-day ledger is concerned.
+               -- of the period as far as the day-to-day ledger is concerned. origin = 'opening'
+               -- rows (Settings > Import Opening Stock) are a NORMAL contributor here, same as
+               -- any other pre-period movement — server/routes/opening-stock.ts dates each one
+               -- the day BEFORE whatever "as of" date was picked (defaults to today), exactly
+               -- like a plain accounting Opening Balance, so it naturally lands here as soon as
+               -- the viewed period starts on or after that date — no special-casing needed.
                COALESCE(SUM(qty) FILTER (WHERE d < $1::date AND origin <> 'settings'), 0)::int AS opening_purchase,
                COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type = 'receive'), 0)::int AS purchase,
                -- Corrections a person or an ordinary action made (a page edit, a voided scan, a
-               -- deleted CSV, an exchange) — the ones worth reading item by item.
-               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin <> 'settings'), 0)::int AS adjust,
+               -- deleted CSV, an exchange) — the ones worth reading item by item. origin='opening'
+               -- is excluded here (not from opening_purchase above) so that if an Opening Stock
+               -- import's effective date ever falls WITHIN the viewed period instead of before
+               -- it, it still can't double up as an in-period Adjust on top of being Opening.
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin NOT IN ('settings', 'opening')), 0)::int AS adjust,
                -- Settings-wide actions (Clear Stock). Their own figure, so one clear across the
                -- whole catalogue can't bury the corrections above.
                COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin = 'settings'), 0)::int AS system_adjust,
@@ -1723,6 +1738,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         COALESCE(live.in_stock, 0)                         AS "liveStock",
         COALESCE(p.name, p_bc.name, pps.barcode)            AS "itemName",
         COALESCE(p.item_no, p_bc.item_no)                   AS "itemNo",
+        -- Product Master's own "New Sr." (products.new_sr) — the same canonical cross-plant Sr
+        -- every other report's Sr No column shows, not a row-position counter.
+        COALESCE(p.new_sr, p_bc.new_sr)                     AS "srNo",
         CASE
           WHEN UPPER(pl.state) = 'GJ' THEN COALESCE(p.gj_sap, p_bc.gj_sap, p.sap_code, p_bc.sap_code)
           WHEN UPPER(pl.state) = 'MP' THEN COALESCE(p.mp_sap, p_bc.mp_sap, p.sap_code, p_bc.sap_code)
@@ -1770,14 +1788,14 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       }
     `, params);
 
-    const items = rows.map((r: any, i: number) => {
+    const items = rows.map((r: any) => {
       const definedIpp = r.itemsPerPallet != null ? Number(r.itemsPerPallet) : 0;
       const inStock = Number(r.inStock) || 0;
       // No GJ/MP PLT configured — treat the item as exactly one pallet sized to its own
       // current stock, rather than showing a blank/zero pallet figure.
       const ipp = definedIpp > 0 ? definedIpp : Math.max(1, inStock);
       return {
-        srNo: i + 1,
+        srNo: r.srNo ?? null,
         barcode: r.barcode,
         plant: r.plant,
         itemName: r.itemName,

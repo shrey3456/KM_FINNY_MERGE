@@ -346,4 +346,46 @@ router.delete('/plant-stock', requireAdminRole, async (req: Request, res: Respon
   }
 });
 
+// DELETE /api/plant-stock/movements/:id — removes ONE stock_movements row from the ledger (the
+// Adjustments history dialog's own delete button). Scoped to type='adjust' only — a 'receive'/
+// 'dispatch' row is tied to a real scan event elsewhere (Order Scan/Unloading/Loading) with its
+// own void flow, and deleting it here would desync the two. This is a ledger/reporting
+// correction only: it does NOT touch product_plant_stock.in_stock. A stray or duplicate entry
+// (e.g. a stale "Opening stock import" row left over from testing, or any other Clear Stock/
+// manual adjust already superseded by later real activity) only ever distorts the Opening/
+// Adjust/Total Stock figures Overall Stock computes FROM the ledger — it was never the live
+// stock number itself, which has already moved on independently since.
+router.delete('/plant-stock/movements/:id', requireAdminRole, async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid movement id' });
+  const { userCode, userName } = actor(req);
+
+  try {
+    const { rows } = await pool.query(
+      `DELETE FROM stock_movements WHERE id = $1 AND type = 'adjust' RETURNING barcode, plant, qty, reason, origin`,
+      [id],
+    );
+    const deleted = rows[0];
+    if (!deleted) return res.status(404).json({ message: 'Adjustment not found (or not deletable — only manual/opening/settings corrections can be removed here)' });
+
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Overall Stock',
+        action: 'delete',
+        entityType: 'stock_movement',
+        entityId: String(id),
+        details: `Deleted an Adjust ledger entry for ${deleted.barcode} at ${deleted.plant} by ${userName ?? userCode}: `
+          + `${deleted.qty >= 0 ? '+' : ''}${deleted.qty} (${deleted.reason ?? 'no reason recorded'}). Live stock was not changed.`,
+        userCode,
+        userName,
+      });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting a stock movement:', error);
+    res.status(500).json({ message: 'Failed to delete this entry' });
+  }
+});
+
 export default router;

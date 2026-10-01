@@ -31,6 +31,7 @@ import { useForm } from 'react-hook-form';
 import { useEffect, useState } from 'react';
 import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, Download, CalendarDays, RefreshCw, Webhook, ExternalLink } from 'lucide-react';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 import { apiRequest } from '@/lib/queryClient';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { hasPageWriteAccess } from '@/lib/permissions';
@@ -51,8 +52,30 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
-// ─── Opening Stock CSV column auto-detection — required: Barcode, Quantity ────────────────────
+// ─── Opening Stock CSV column auto-detection + manual mapping — same two-step pattern Order
+// Import uses (client/src/pages/OrderImport.tsx: cleanHeader/parseCsvRaw/autoMatch/the mapping
+// dialog): auto-match runs first, but the result always opens in a dialog where every field can
+// be manually re-pointed at a different CSV column. Previously this just toast-failed and gave
+// up the moment auto-match missed Barcode/Quantity — with no way to tell it which column really
+// held them (a real header like "BARCODE" exported from Excel as UTF-16/with a stray BOM could
+// come through mangled, and there was no fallback once normalisation failed to recognise it).
+// Local calendar date, not toISOString() (a UTC moment that can land on the wrong day in a
+// timezone ahead of or behind UTC) — matches the "YYYY-MM-DD" the server's own todayDateStr()
+// produces, and what the <input type="date"> below reads and writes.
+function osTodayLocalDateStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 const osNormHeader = (h: string) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 const OS_COLUMN_CANDIDATES: Record<"barcode" | "itemName" | "quantity", string[]> = {
   barcode: ["barcode", "itemcode", "sku", "ean", "productbarcode", "code"],
@@ -70,6 +93,142 @@ function osMatchColumn(headers: string[], key: keyof typeof OS_COLUMN_CANDIDATES
     if (partial) return partial.raw;
   }
   return null;
+}
+
+const OS_SKIP = "__skip__";
+const OS_TARGET_FIELDS: { key: "barcode" | "itemName" | "quantity"; label: string }[] = [
+  { key: "barcode", label: "Barcode / SKU" },
+  { key: "itemName", label: "Item Name" },
+  { key: "quantity", label: "Quantity" },
+];
+type OsMapping = Record<"barcode" | "itemName" | "quantity", string>;
+function osAutoMatch(headers: string[]): OsMapping {
+  return {
+    barcode: osMatchColumn(headers, "barcode") ?? OS_SKIP,
+    itemName: osMatchColumn(headers, "itemName") ?? OS_SKIP,
+    quantity: osMatchColumn(headers, "quantity") ?? OS_SKIP,
+  };
+}
+
+// parseFloat (not a strip-non-digits-then-parseInt) — stripping every non-digit character would
+// remove the decimal point too, so a cell written as "200.00" (a common Excel export format for
+// a whole-number column) would become "20000", 100x too large. Commas are stripped first since
+// those are a thousands separator, not part of the number.
+function osParseQty(raw: string): number {
+  const n = parseFloat((raw ?? "0").replace(/,/g, "").trim());
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
+
+// Excel leaves a barcode cell in one of a few damaged shapes depending on how the sheet was
+// saved, all of which a plain .trim() lets straight through as "valid":
+//  - ="8906010500375" — the formula-wrapper trick used to force a long number to stay text
+//    instead of auto-converting to scientific notation. The digits inside are the real,
+//    undamaged barcode — just needs unwrapping.
+//  - 8.90601E+12 — the number WAS allowed to auto-convert, which rounds it to ~6 significant
+//    digits. The original barcode is gone for good at that point; this cell can't be repaired,
+//    only recognised and rejected so it doesn't silently get imported as a different real item's
+//    barcode (or as a new phantom row nothing else will ever match).
+//  - A trailing "Grand Total"/"TOTAL" row some exports add at the bottom isn't a barcode at all —
+//    rejected the same way: a cell with no digits in it whatsoever can't be one.
+function cleanOsBarcodeCell(raw: string): { value: string; rejected: "scientific" | "not-a-barcode" | null } {
+  const trimmed = (raw ?? "").trim();
+  const unwrapped = /^="(.*)"$/.exec(trimmed)?.[1]?.trim() ?? trimmed;
+  if (/^\d+(\.\d+)?E\+\d+$/i.test(unwrapped)) return { value: unwrapped, rejected: "scientific" };
+  if (unwrapped && !/\d/.test(unwrapped)) return { value: unwrapped, rejected: "not-a-barcode" };
+  return { value: unwrapped, rejected: null };
+}
+
+function buildOsRowsFromMapping(
+  csvData: { headers: string[]; rows: Record<string, string>[] },
+  mapping: OsMapping,
+): { rows: { barcode: string; itemName: string | null; quantity: number }[]; skipped: { raw: string; reason: string }[] } {
+  const barcodeCol = mapping.barcode;
+  const itemNameCol = mapping.itemName;
+  const qtyCol = mapping.quantity;
+  const rows: { barcode: string; itemName: string | null; quantity: number }[] = [];
+  const skipped: { raw: string; reason: string }[] = [];
+  for (const row of csvData.rows) {
+    const rawBarcode = barcodeCol && barcodeCol !== OS_SKIP ? (row[barcodeCol] ?? "") : "";
+    if (!rawBarcode.trim()) continue; // same as the old .filter((r) => r.barcode) — a blank row, not a bad one
+    const { value: barcode, rejected } = cleanOsBarcodeCell(rawBarcode);
+    if (rejected === "scientific") {
+      skipped.push({ raw: rawBarcode, reason: "Excel rounded this to scientific notation — the real barcode can't be recovered from this file; fix it at the source and re-export" });
+      continue;
+    }
+    if (rejected === "not-a-barcode") {
+      skipped.push({ raw: rawBarcode, reason: "doesn't look like a barcode (e.g. a totals row)" });
+      continue;
+    }
+    rows.push({
+      barcode,
+      itemName: itemNameCol && itemNameCol !== OS_SKIP ? (row[itemNameCol] ?? "").trim() || null : null,
+      quantity: qtyCol && qtyCol !== OS_SKIP ? osParseQty(row[qtyCol] ?? "0") : 0,
+    });
+  }
+  return { rows, skipped };
+}
+
+// Strips a leading BOM and any other non-ASCII byte that an Excel "CSV UTF-16"/"CSV (Macintosh)"
+// export can leave sitting inside a header cell — exactly what turns a plainly-named "BARCODE"
+// column into something auto-match (and even a human skimming it) can no longer recognise.
+function osCleanHeader(h: string): string {
+  return h.replace(/^﻿/, "").replace(/[^\x20-\x7E]/g, "").trim();
+}
+
+// Reads a .csv as plain text rows via Papa, or a real .xlsx/.xls workbook's first sheet via
+// SheetJS — either way the result is the same raw string[][] grid, so everything downstream
+// (header-row detection, cleaning, mapping) doesn't care which format the file actually was.
+// Reading a native workbook directly (raw: true, no number-format string applied) matters for
+// more than convenience: a barcode CSV-exported FROM Excel is where values like ="8906010500375"
+// or 8.90601E+12 get baked in as literal, permanently-damaged text in the first place — handing
+// over the original .xlsx instead means SheetJS reads the cell's actual value, never Excel's
+// own CSV-export mangling of it.
+function readFileAsGrid(file: File): Promise<string[][]> {
+  const isExcel = /\.xlsx?$/i.test(file.name);
+  if (isExcel) {
+    return file.arrayBuffer().then((buf) => {
+      const workbook = XLSX.read(buf, { type: "array" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) return [];
+      const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "", raw: true });
+      // String(n) on a JS number never switches to scientific notation below 1e21 — far past any
+      // real barcode's length — so a numeric cell's exact digits come through intact.
+      return aoa.map((row) => row.map((cell) => (cell == null ? "" : String(cell))));
+    });
+  }
+  return new Promise((resolve) => {
+    Papa.parse<string[]>(file, {
+      header: false,
+      skipEmptyLines: true,
+      delimiter: "", // auto-detect
+      encoding: "UTF-8",
+      complete: (result) => resolve(result.data as string[][]),
+      error: () => resolve([]),
+    });
+  });
+}
+
+// Mirrors OrderImport.tsx's parseCsvRaw: picks the REAL header row by which row has the most
+// non-empty cells in the first 15 — an Excel export with a report-title row above the actual
+// headers would otherwise hand the title row to the mapping dialog instead, and every column
+// would come back unmatched.
+async function parseOsCsvRaw(file: File): Promise<{ name: string; headers: string[]; rows: Record<string, string>[] } | null> {
+  const rawRows = await readFileAsGrid(file);
+  if (rawRows.length === 0) return null;
+  let headerRowIdx = 0;
+  let maxCols = 0;
+  for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+    const nonEmpty = rawRows[i].filter((c) => c.trim() !== "").length;
+    if (nonEmpty > maxCols) { maxCols = nonEmpty; headerRowIdx = i; }
+  }
+  const headers = rawRows[headerRowIdx].map((h) => osCleanHeader(h)).filter((h) => h !== "");
+  if (headers.length === 0) return null;
+  const rows = rawRows.slice(headerRowIdx + 1).map((row) => {
+    const obj: Record<string, string> = {};
+    headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
+    return obj;
+  });
+  return { name: file.name, headers, rows };
 }
 
 const Settings = () => {
@@ -455,22 +614,38 @@ const Settings = () => {
     }
   };
 
-  // ── Opening Stock: bulk-SETS (overwrites) a plant's baseline stock from a CSV — distinct from
-  // Order Scan/Unloading (which ADD via scan events) and Clear Stock (which zeroes). Admin-only,
-  // same severity class as Clear Stock, so it gets the same impact-preview + type-to-confirm gate.
+  // ── Opening Stock: ADDS each barcode's quantity onto the plant's current stock from a CSV,
+  // same as a real receipt (Order Scan/Unloading also add via scan events) — and also records it
+  // as Opening Stock on the ledger (server/routes/opening-stock.ts), so Stock Overview attributes
+  // it correctly instead of as a Purchase. Never an absolute override — re-importing adds more on
+  // top, it never resets a barcode to a fixed number (unlike Clear Stock, which zeroes it).
+  // Admin-only, same severity class as Clear Stock, so it gets the same impact-preview +
+  // type-to-confirm gate.
   const [showOpeningStockDialog, setShowOpeningStockDialog] = useState(false);
   const [osPlant, setOsPlant] = useState('');
+  // The day this count was actually taken — the stock going INTO this date, same meaning as a
+  // plain accounting Opening Balance. Defaults to today; lets a count taken a few days ago (or
+  // planned to take effect on a future date) land in the right place instead of always being
+  // "as of today".
+  const [osAsOfDate, setOsAsOfDate] = useState(osTodayLocalDateStr());
   const [osFile, setOsFile] = useState<File | null>(null);
   const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; quantity: number }[] | null>(null);
   const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number } | null>(null);
   const [osPreviewLoading, setOsPreviewLoading] = useState(false);
   const [osImporting, setOsImporting] = useState(false);
   const [osConfirmText, setOsConfirmText] = useState('');
+  // Column-mapping step — same two-stage flow as Order Import: parse the file, auto-match what
+  // it can, then ALWAYS let the mapping be reviewed/corrected in a dialog before any row is
+  // built, rather than silently accepting a guess or hard-failing when auto-match misses.
+  const [showOsMappingDialog, setShowOsMappingDialog] = useState(false);
+  const [osCsvData, setOsCsvData] = useState<{ name: string; headers: string[]; rows: Record<string, string>[] } | null>(null);
+  const [osMapping, setOsMapping] = useState<OsMapping>({ barcode: OS_SKIP, itemName: OS_SKIP, quantity: OS_SKIP });
 
   const handleOpeningStockDialogOpenChange = (open: boolean) => {
     setShowOpeningStockDialog(open);
     if (!open) {
-      setOsPlant(''); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
+      setOsPlant(''); setOsAsOfDate(osTodayLocalDateStr()); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
+      setShowOsMappingDialog(false); setOsCsvData(null);
     }
   };
 
@@ -478,45 +653,54 @@ const Settings = () => {
     setOsFile(file);
     setOsRows(null);
     setOsPreview(null);
-    const parsed = await new Promise<Record<string, string>[]>((resolve, reject) => {
-      Papa.parse<Record<string, string>>(file, {
-        header: true, skipEmptyLines: true,
-        complete: (result) => resolve(result.data),
-        error: (err) => reject(err),
-      });
-    }).catch((err) => {
-      toast({ title: 'Could not parse CSV', description: err?.message, variant: 'destructive' });
-      return null;
-    });
-    if (!parsed || parsed.length === 0) {
-      toast({ title: 'Empty file', description: 'This CSV has no rows.', variant: 'destructive' });
+    const parsed = await parseOsCsvRaw(file);
+    if (!parsed) {
+      toast({ title: 'Could not read this file', description: 'No column headers could be detected in it.', variant: 'destructive' });
       return;
     }
-    const headers = Object.keys(parsed[0]);
-    const barcodeCol = osMatchColumn(headers, 'barcode');
-    const itemNameCol = osMatchColumn(headers, 'itemName');
-    const qtyCol = osMatchColumn(headers, 'quantity');
-    if (!barcodeCol) { toast({ title: 'Could not find a "Barcode" column in this CSV.', variant: 'destructive' }); return; }
-    if (!qtyCol) { toast({ title: 'Could not find a "Quantity" column in this CSV.', variant: 'destructive' }); return; }
-
-    // parseFloat (not a strip-non-digits-then-parseInt) — stripping every non-digit character
-    // would remove the decimal point too, so a cell written as "200.00" (a common Excel export
-    // format for a whole-number column) would become "20000", 100x too large. Commas are still
-    // stripped first since those are a thousands separator, not part of the number.
-    const parseQty = (raw: string) => {
-      const n = parseFloat((raw ?? '0').replace(/,/g, '').trim());
-      return Number.isFinite(n) ? Math.round(n) : 0;
-    };
-    const rows = parsed.map((row) => ({
-      barcode: (row[barcodeCol] ?? '').trim(),
-      itemName: itemNameCol ? (row[itemNameCol] ?? '').trim() || null : null,
-      quantity: parseQty(row[qtyCol] ?? '0'),
-    })).filter((r) => r.barcode);
-    if (rows.length === 0) {
-      toast({ title: 'No valid barcodes found in this CSV.', variant: 'destructive' });
+    if (parsed.rows.length === 0) {
+      toast({ title: 'Empty file', description: 'This file has no rows.', variant: 'destructive' });
       return;
+    }
+    setOsCsvData(parsed);
+    setOsMapping(osAutoMatch(parsed.headers));
+    // Two modal dialogs open at once (this one stacked on the still-open "Import Opening Stock"
+    // AlertDialog) fights Radix's own focus-trap/pointer-events handling — closing the outer one
+    // first (NOT via handleOpeningStockDialogOpenChange, which would wipe osPlant/osFile too) is
+    // what actually lets the mapping dialog receive clicks. confirmOsMapping/cancelOsMapping
+    // below re-open it once the mapping step is done.
+    setShowOpeningStockDialog(false);
+    setShowOsMappingDialog(true);
+  }
+
+  function confirmOsMapping() {
+    if (!osCsvData) return;
+    const { rows, skipped } = buildOsRowsFromMapping(osCsvData, osMapping);
+    if (rows.length === 0) {
+      toast({ title: 'No valid barcodes found', description: 'Check the Barcode column mapping.', variant: 'destructive' });
+      return;
+    }
+    if (skipped.length > 0) {
+      const reasons = new Set(skipped.map((s) => s.reason));
+      toast({
+        title: `Skipped ${skipped.length} row(s) with an unreadable barcode`,
+        description: Array.from(reasons).join(' — '),
+        variant: 'destructive',
+      });
     }
     setOsRows(rows);
+    setShowOsMappingDialog(false);
+    setShowOpeningStockDialog(true);
+  }
+
+  // Back out of mapping without importing anything — same place (the outer dialog, file/mapping
+  // cleared) whether triggered by the Cancel button or by dismissing the dialog itself (Escape /
+  // overlay click), so the user never ends up with neither dialog open.
+  function cancelOsMapping() {
+    setShowOsMappingDialog(false);
+    setOsCsvData(null);
+    setOsFile(null);
+    setShowOpeningStockDialog(true);
   }
 
   useEffect(() => {
@@ -529,15 +713,16 @@ const Settings = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [osPlant, osRows]);
 
-  const osExpectedConfirmText = `SET ${osPlant}`.toUpperCase();
+  const osExpectedConfirmText = `ADD ${osPlant}`.toUpperCase();
 
   const importOpeningStock = async () => {
     if (!osPlant || !osRows) return;
     setOsImporting(true);
     try {
-      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows }, false, true);
-      toast({ title: 'Opening stock imported', description: `${data.rowsSet} barcode(s) set for ${osPlant}.` });
+      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows, asOfDate: osAsOfDate }, false, true);
+      toast({ title: 'Opening stock added', description: `${data.rowsSet} barcode(s) added to current stock and Opening Stock for ${osPlant}.` });
       queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
       handleOpeningStockDialogOpenChange(false);
     } catch (error: any) {
       console.error('Error importing opening stock:', error);
@@ -1610,8 +1795,9 @@ const Settings = () => {
           <AlertDialogHeader>
             <AlertDialogTitle>Import Opening Stock</AlertDialogTitle>
             <AlertDialogDescription>
-              Sets the selected plant's stock to exactly what this CSV says for each barcode — overwrites
-              whatever's currently there. Every change is still logged to the stock ledger.
+              Adds each barcode's quantity onto this plant's current stock, and records it as
+              Opening Stock for the date below. This adds on top of what's already there — it
+              never resets a barcode to a fixed number.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -1629,9 +1815,17 @@ const Settings = () => {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="osFile">CSV File (Barcode + Quantity required)</Label>
+              <Label htmlFor="osAsOfDate">Opening stock as of</Label>
+              <Input id="osAsOfDate" type="date" value={osAsOfDate} onChange={(e) => setOsAsOfDate(e.target.value)} />
+              <p className="text-xs text-gray-500">
+                The day this count was taken — Stock Overview will show it as Opening Stock for any period starting on or after this date.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="osFile">CSV or Excel File (Barcode + Quantity required)</Label>
               <Input
-                id="osFile" type="file" accept=".csv"
+                id="osFile" type="file" accept=".csv,.xlsx,.xls"
                 onChange={(e) => { const f = e.target.files?.[0]; if (f) handleOpeningStockFile(f); }}
               />
               {osFile && <div className="text-xs text-gray-500">{osFile.name}{osRows ? ` — ${osRows.length} row(s)` : ''}</div>}
@@ -1653,14 +1847,15 @@ const Settings = () => {
                     <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.barcodesWithExistingStock ?? 0}</div>
                   </div>
                   <div className="p-2 rounded border bg-white">
-                    <div className="font-medium">Total qty to set</div>
+                    <div className="font-medium">Total qty to add</div>
                     <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.totalQtyToSet ?? 0}</div>
                   </div>
                 </div>
 
                 {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && (
                   <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
-                    {osPreview?.barcodesWithExistingStock} barcode(s) already have stock at {osPlant} — this will overwrite it, not add to it.
+                    {osPreview?.barcodesWithExistingStock} barcode(s) already have stock at {osPlant} — this ADDS on top of it,
+                    it doesn't replace it. Only re-import these if you mean to add more.
                   </div>
                 )}
 
@@ -1689,6 +1884,124 @@ const Settings = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ── Opening Stock column mapping dialog — same pattern as Order Import's (client/src/
+          pages/OrderImport.tsx): auto-match pre-fills every field, but each one stays a Select
+          the user can re-point at any other CSV column before anything is built from it. ── */}
+      <Dialog open={showOsMappingDialog} onOpenChange={(open) => { if (!open) cancelOsMapping(); }}>
+        <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col rounded-xl">
+          <DialogHeader>
+            <DialogTitle>Map CSV Columns</DialogTitle>
+            <DialogDescription>
+              {osCsvData
+                ? `"${osCsvData.name}" — ${osCsvData.rows.length} rows detected. Match each target field to a CSV column.`
+                : "Map columns."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {osCsvData && (
+            <div className="flex flex-col gap-4 overflow-y-auto flex-1 min-h-0 pr-1">
+              <div className="border border-blue-100 bg-blue-50 px-4 py-3">
+                <p className="mb-2 text-xs font-semibold text-blue-700">
+                  {osCsvData.headers.length} columns detected in "{osCsvData.name}"
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {osCsvData.headers.map((h) => (
+                    <span key={h} className="border border-blue-200 bg-white px-2 py-0.5 text-xs text-blue-800 font-mono">
+                      {h}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="border bg-gray-50 p-4">
+                <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Map each target field → CSV column
+                </p>
+                <div className="grid grid-cols-1 gap-3">
+                  {OS_TARGET_FIELDS.map((field) => {
+                    const matched = osMapping[field.key] !== OS_SKIP && osMapping[field.key] !== "";
+                    return (
+                      <div key={field.key} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                        <div className="flex w-full items-center gap-1.5 sm:w-[140px] sm:shrink-0">
+                          <span className={`h-2 w-2 rounded-full ${matched ? "bg-green-500" : "bg-gray-300"}`} />
+                          <Label className="text-sm">{field.label}</Label>
+                        </div>
+                        <Select
+                          value={osMapping[field.key] || OS_SKIP}
+                          onValueChange={(v) => setOsMapping((m) => ({ ...m, [field.key]: v }))}
+                        >
+                          <SelectTrigger className={`sm:flex-1 h-9 text-sm rounded-full ${!matched ? "border-dashed text-gray-400" : ""}`}>
+                            <SelectValue placeholder="— skip this field —" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={OS_SKIP}>— skip this field —</SelectItem>
+                            {osCsvData.headers.map((h) => (
+                              <SelectItem key={h} value={h}>{h}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  Preview — first {Math.min(5, osCsvData.rows.length)} of {osCsvData.rows.length} rows
+                </p>
+                <div className="overflow-x-auto border">
+                  <table className="w-max min-w-full border-collapse text-xs">
+                    <thead>
+                      <tr>
+                        {OS_TARGET_FIELDS.map((f) => {
+                          const col = osMapping[f.key];
+                          const matched = col && col !== OS_SKIP;
+                          return (
+                            <th key={f.key} className={`sticky top-0 whitespace-nowrap border-b border-r px-3 py-2 text-left font-semibold ${matched ? "bg-green-50 text-green-800" : "bg-gray-100 text-gray-400"}`}>
+                              {f.label}
+                              {matched && (
+                                <div className="font-normal text-green-600 text-xs mt-0.5">← {col}</div>
+                              )}
+                            </th>
+                          );
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {osCsvData.rows.slice(0, 5).map((row, i) => (
+                        <tr key={i} className="border-b hover:bg-gray-50">
+                          {OS_TARGET_FIELDS.map((f) => {
+                            const col = osMapping[f.key];
+                            const val = col && col !== OS_SKIP ? (row[col] ?? "") : "";
+                            return (
+                              <td key={f.key} className={`max-w-[180px] truncate whitespace-nowrap border-r px-3 py-2 ${val ? "" : "text-gray-300"}`} title={val}>
+                                {val || "—"}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="mt-2 gap-2">
+            <Button variant="outline" className="rounded-xl" onClick={cancelOsMapping}>
+              Cancel
+            </Button>
+            <Button
+              onClick={confirmOsMapping}
+              disabled={!osCsvData || osMapping.barcode === OS_SKIP || osMapping.quantity === OS_SKIP}
+              className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl"
+            >
+              <Upload className="mr-1.5 h-4 w-4" />Use this mapping
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 };

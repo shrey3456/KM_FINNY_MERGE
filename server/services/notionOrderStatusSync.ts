@@ -44,23 +44,32 @@ async function existingStoreKeeperTags(notion: Client, orderDatabaseId: string):
 // Uses a tag Notion already has wherever one fits, so the app doesn't pile up near-duplicates:
 //   - a name ("YASH") or any part matching an existing tag, ignoring case and stray spaces, uses
 //     that tag's exact spelling (some existing tags carry a trailing space, e.g. "pt: 1 ");
-//   - the STV (always the last part) is matched BY ITS NUMBER to the platform tags Notion already
-//     uses: "PLT-05" or "STV-05" -> the existing "pt: 5". Only a plain code-and-number is matched;
-//     something like "STV-01&02" is left as it is.
+//   - failing that, the same comparison again with ALL whitespace/hyphens/colons stripped first
+//     (not just trimmed) — "PLT 8", "PLT-8" and "PLT8" are all the same platform, so this is what
+//     stops a locally-typed "PLT 8" from creating a brand-new "PLT 8" tag next to an existing
+//     "PLT8" or "PLT-8" one just because the spacing/punctuation didn't match byte-for-byte;
+//   - the STV (always the last part) is also matched BY ITS NUMBER to the platform tags Notion
+//     already uses: "PLT-05", "PLT 05" or "STV-05" -> the existing "pt: 5". Only a plain
+//     code-and-number is matched; something like "STV-01&02" is left as it is.
 // Anything with no existing match is sent as-is, and Notion creates that tag.
 function resolveStoreKeeperTags(parts: string[], existing: string[]): string[] {
   const norm = (value: string) => value.trim().toUpperCase();
+  // Collapses "PLT 8", "PLT-8", "PLT_8" and "PLT8" to the same key — whitespace, hyphens,
+  // underscores and colons are all just formatting noise for a platform/STV code, never a
+  // meaningful difference between two tags.
+  const normCompact = (value: string) => norm(value).replace(/[\s\-_:]+/g, '');
   const byName = new Map(existing.map((name) => [norm(name), name]));
+  const byCompactName = new Map(existing.map((name) => [normCompact(name), name]));
   const platformByNumber = new Map<number, string>();
   for (const name of existing) {
     const m = /^\s*pt\s*:\s*0*(\d+)\s*$/i.exec(name);
     if (m && !platformByNumber.has(Number(m[1]))) platformByNumber.set(Number(m[1]), name);
   }
   return parts.map((part, index) => {
-    const exact = byName.get(norm(part));
+    const exact = byName.get(norm(part)) ?? byCompactName.get(normCompact(part));
     if (exact) return exact;
     if (index === parts.length - 1) {
-      const code = /^[A-Za-z]+\s*-\s*0*(\d+)$/.exec(part.trim());
+      const code = /^[A-Za-z]+[\s\-_]*0*(\d+)$/.exec(part.trim());
       const platform = code ? platformByNumber.get(Number(code[1])) : undefined;
       if (platform) return platform;
     }

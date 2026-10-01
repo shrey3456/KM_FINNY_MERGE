@@ -41,7 +41,9 @@ import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 // One row per (barcode, plant) for the selected period. inStock = Purchase in the period (every
 // physical box in, extras included); extraQty is the extra portion of it, shown separately.
 type PlantStockRow = {
-  srNo: number;
+  // Product Master's own "New Sr." (COALESCE(p.new_sr, p_bc.new_sr) server-side) — not a
+  // row-position counter, so it's null whenever the row has no Product Master match at all.
+  srNo: string | null;
   barcode: string | null;
   plant: string;
   itemName: string;
@@ -234,7 +236,7 @@ const ALL_COLUMNS = [
   { key: "purchase",     label: "Purchase (includes Extra)" },
   { key: "extra",        label: "Extra" },
   { key: "adjust",       label: "Adjust" },
-  { key: "totalIn",      label: "Total In (Purchase + Adjust)" },
+  { key: "totalIn",      label: "Total Stock (Opening + Purchase + Adjust)" },
   { key: "expectedSale", label: "Expected Sale (proforma)" },
   { key: "sale",         label: "Sale (loaded)" },
   { key: "closing",      label: "Closing" },
@@ -413,7 +415,16 @@ export default function OverallStock() {
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
   // Date control: "single" shows one editable date input, "range" shows editable From + To.
   // The item whose corrections are being read, if any — set by clicking an Adjust figure.
-  const [adjustHistoryTarget, setAdjustHistoryTarget] = useState<{ barcode: string; plant: string; itemName: string } | null>(null);
+  // combinedPlants carries every underlying plant when opened from a merged All/State row (whose
+  // own `plant` is a fake placeholder like "ALL" or a state code, never a real plant) — without
+  // it, a merged row's OTHER plants' entries (e.g. a stray duplicate sitting under a different
+  // plant than the one this row happens to be labelled with) would never show up here at all.
+  const [adjustHistoryTarget, setAdjustHistoryTarget] = useState<{ barcode: string; plant: string; itemName: string; combinedPlants?: string[] } | null>(null);
+  // The one Adjust ledger row about to be deleted from the Adjustments dialog — a stray or
+  // duplicate entry (e.g. a stale "Opening stock import" row) distorting the Opening/Adjust/
+  // Total Stock figures. Deleting it never touches live stock, only the ledger it's computed
+  // from — see the server's own comment on DELETE /plant-stock/movements/:id.
+  const [deleteMovementTarget, setDeleteMovementTarget] = useState<StockAdjustment | null>(null);
   const [datePickMode, setDatePickMode] = useState<"single" | "range">("single");
   const [dateOpen, setDateOpen] = useState(false);
   // The calendar half opens separately from the quick-ranges half — two buttons, two
@@ -724,21 +735,39 @@ export default function OverallStock() {
   type StockAdjustment = {
     id: number; barcode: string; plant: string; qty: number; extraQty: number | null;
     reason: string | null; at: string; byCode: string | null; byName: string | null;
-    origin: "page" | "operation" | "settings";
+    origin: "page" | "operation" | "settings" | "opening";
   };
+  // Real plant names to actually filter by — combinedPlants when this was opened from a merged
+  // row (its own `plant` is a fake placeholder, never a real one), otherwise just the one plant.
+  const adjustHistoryPlants = adjustHistoryTarget?.combinedPlants?.length ? adjustHistoryTarget.combinedPlants : (adjustHistoryTarget?.plant ? [adjustHistoryTarget.plant] : []);
   const adjustHistoryQuery = useQuery<{ items: StockAdjustment[] }>({
-    queryKey: ["/api/scan-sessions/reports/stock-adjustments", adjustHistoryTarget?.barcode, adjustHistoryTarget?.plant, fromDate, toDate],
+    queryKey: ["/api/scan-sessions/reports/stock-adjustments", adjustHistoryTarget?.barcode, adjustHistoryPlants.join(","), fromDate, toDate],
     queryFn: () => apiRequest(
       "GET",
       buildUrl("/api/scan-sessions/reports/stock-adjustments", {
         barcode: adjustHistoryTarget?.barcode,
-        plant: adjustHistoryTarget?.plant || undefined,
+        plant: adjustHistoryPlants.join(",") || undefined,
         from: fromDate || undefined,
         to: toDate || undefined,
       }),
       undefined, false, true,
     ),
     enabled: !!adjustHistoryTarget?.barcode,
+  });
+
+  // Deletes one Adjust ledger entry (the Adjustments dialog's per-row trash button) — never
+  // touches live stock, see the server endpoint's own comment. Refetches both this dialog's own
+  // list and the main stock report, since Opening/Adjust/Total Stock are computed from the same
+  // ledger this just changed.
+  const deleteMovementMutation = useMutation({
+    mutationFn: (id: number) => apiRequest("DELETE", `/api/plant-stock/movements/${id}`, undefined, false, true),
+    onSuccess: () => {
+      toast({ title: "Entry deleted", description: "That ledger entry was removed. Live stock was not changed." });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/stock-adjustments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      setDeleteMovementTarget(null);
+    },
+    onError: (err: any) => toast({ title: "Could not delete entry", description: err?.message, variant: "destructive" }),
   });
 
   const stockUrl = buildUrl("/api/scan-sessions/reports/plant-stock", {
@@ -914,7 +943,7 @@ export default function OverallStock() {
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
       { id: "adjust", label: "Adjust", filterType: "number", options: numberOptions((r) => r.adjustQty), accessor: (r) => r.adjustQty ?? null },
       { id: "system", label: "System (Clear Stock)", filterType: "number", options: numberOptions((r) => r.systemQty), accessor: (r) => r.systemQty ?? null },
-      { id: "totalIn", label: "Total In", filterType: "number", options: numberOptions((r) => r.inStock + (r.adjustQty ?? 0)), accessor: (r) => r.inStock + (r.adjustQty ?? 0) },
+      { id: "totalIn", label: "Total Stock", filterType: "number", options: numberOptions((r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0)), accessor: (r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0) },
       { id: "expectedSale", label: "Expected Sale", filterType: "number", options: numberOptions((r) => r.expectedSaleQty), accessor: (r) => r.expectedSaleQty ?? null },
       { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
       { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
@@ -1264,7 +1293,7 @@ export default function OverallStock() {
       .filter((e) => e.qty > 0)
       .filter((e) => !search || "empty box".includes(q) || normalizedText(e.plant).includes(q))
       .map((e) => ({
-        srNo: 0, barcode: "EMPTY_BOX", plant: e.plant, itemName: "Empty Box",
+        srNo: null, barcode: "EMPTY_BOX", plant: e.plant, itemName: "Empty Box",
         itemNo: null, sapCode: null, hsnCode: null, category: null, brand: null,
         itemsPerPallet: null, inStock: e.qty, extraQty: 0, pallets: null, extraPallets: null,
         lastArrived: null, isEmptyBox: true, emptyBoxCount: e.count,
@@ -1298,29 +1327,29 @@ export default function OverallStock() {
   // Export rows — same order as the table's own columns.
   const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [
     [
-      "#", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant",
+      "Sr No", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant",
       "Expected Qty", "Expected Pallets",
       "Opening Stock", "Opening Pallets",
       "Purchase Qty", "Purchase Pallets", "Extra Qty (within Purchase)", "Extra Pallets",
-      "Adjust Qty", "Total In (Purchase + Adjust)", "System (Clear Stock)",
+      "Adjust Qty", "Total Stock (Opening + Purchase + Adjust)", "System (Clear Stock)",
       "Expected Sale Qty", "Expected Sale Pallets",
       "Sale Qty (loaded)", "Sale Pallets",
       "Closing Stock", "Closing Pallets",
       "Last Updated",
     ],
-    ...src.map((r, i) => {
+    ...src.map((r) => {
       // inStock already IS the full physical purchase (extras included) — never add extraQty.
       const purchaseQty = r.inStock;
       const ipp = r.itemsPerPallet ? Number(r.itemsPerPallet) : 0;
       const purchasePallets = ipp > 0 ? purchaseQty / ipp : null;
       const plt = (v: number | null | undefined) => (v != null ? v.toFixed(2) : "");
       return [
-        i + 1, r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
+        r.srNo ?? "", r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
         r.category ?? "", r.brand ?? "", r.plant,
         r.expectedQty ?? "", plt(r.expectedPallets),
         r.openingStock ?? "", plt(r.openingPallets),
         purchaseQty, plt(purchasePallets), r.extraQty, plt(r.extraPallets),
-        r.adjustQty ?? 0, purchaseQty + (r.adjustQty ?? 0), r.systemQty ?? 0,
+        r.adjustQty ?? 0, (r.openingStock ?? 0) + purchaseQty + (r.adjustQty ?? 0), r.systemQty ?? 0,
         r.expectedSaleQty ?? "", plt(r.expectedSalePallets),
         r.saleQty ?? "", plt(r.salePallets),
         r.closingStock ?? "", plt(r.closingPallets),
@@ -1403,12 +1432,22 @@ export default function OverallStock() {
   const stockColumns: DataTableColumn<PlantStockRow>[] = [
     {
       id: "srNo",
-      header: "#",
+      header: columnHeader("srNo", "Sr No"),
       hideable: false,
       width: 44,
+      sortable: true,
+      // Numeric, not a plain string compare — Sr No is mostly digits ("1", "2", "10"), and a
+      // string sort would read "10" as less than "2". Falls back to the raw string so a
+      // non-numeric Sr No (if one ever exists) still sorts somewhere sensible instead of
+      // vanishing as null.
+      accessor: (row) => {
+        const n = Number(row.srNo);
+        return row.srNo != null && Number.isFinite(n) ? n : row.srNo;
+      },
+      totalable: false,
       headerClassName: headerBorder,
       cellClassName: `text-gray-400 tabular-nums ${cellBorder}`,
-      render: (_row, rowIndex) => rowIndex + 1,
+      render: (row) => row.srNo || dash,
     },
     {
       id: "itemName",
@@ -1628,7 +1667,7 @@ export default function OverallStock() {
             type="button"
             className="w-full text-right hover:underline"
             title="Show every correction behind this figure"
-            onClick={(e) => { e.stopPropagation(); setAdjustHistoryTarget({ barcode: row.barcode ?? "", plant: row.plant, itemName: row.itemName ?? row.barcode ?? "" }); }}
+            onClick={(e) => { e.stopPropagation(); setAdjustHistoryTarget({ barcode: row.barcode ?? "", plant: row.plant, itemName: row.itemName ?? row.barcode ?? "", combinedPlants: row.combinedPlants }); }}
           >
             {stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-red-600" : "text-emerald-600")}
           </button>
@@ -1658,24 +1697,26 @@ export default function OverallStock() {
       },
     },
     {
-      // Purchase + Adjust — what the period actually added to stock once corrections are counted.
-      // Editing an item's stock by hand lands in Adjust, so Purchase alone (40) no longer looks
-      // like the whole story when the edit made it 80; this column is the figure that does.
+      // Opening + Purchase + Adjust — the full total this plant has to work with in the period,
+      // not just what came in during it. Editing an item's stock by hand lands in Adjust, so
+      // Purchase alone (40) no longer looks like the whole story when the edit made it 80, or
+      // when the item started the period already holding stock (Opening); this column is the
+      // figure that accounts for all three.
       id: "totalIn",
-      header: columnHeader("totalIn", "Total In"),
+      header: columnHeader("totalIn", "Total Stock"),
       width: 110,
       align: "right",
       sortable: true,
-      accessor: (row) => row.inStock + (row.adjustQty ?? 0),
+      accessor: (row) => (row.openingStock ?? 0) + row.inStock + (row.adjustQty ?? 0),
       total: (rows) => {
-        const qty = rows.reduce((sum, r) => sum + r.inStock + (r.adjustQty ?? 0), 0);
+        const qty = rows.reduce((sum, r) => sum + (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0), 0);
         return stackedCell(qty, null, "text-[#001d6e]");
       },
       headerClassName: headerBorder,
       cellClassName: `font-semibold tabular-nums ${cellBorder}`,
       render: (row) => {
         if (row.isEmptyBox) return dash;
-        const qty = row.inStock + (row.adjustQty ?? 0);
+        const qty = (row.openingStock ?? 0) + row.inStock + (row.adjustQty ?? 0);
         const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
         return stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-red-600" : "text-[#001d6e]");
       },
@@ -1808,31 +1849,41 @@ export default function OverallStock() {
   }));
 
   const detailsTabContent = (
-    <div className="max-h-[360px] overflow-y-auto border border-gray-300">
-      <table className="w-full border-collapse text-xs">
+    <div className="max-h-[360px] overflow-y-auto overflow-x-auto border border-gray-300">
+      <table className="w-max border-collapse text-xs">
         <thead>
           <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0">
-            <th className="border-r border-gray-300 px-3 py-2 font-semibold">Plant</th>
-            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Expected</th>
-            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Stock</th>
-            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Extra</th>
-            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Sale</th>
-            <th className="border-r border-gray-300 px-3 py-2 text-right font-semibold">Via Scan Order</th>
-            <th className="px-3 py-2 text-right font-semibold">Via Unloading</th>
+            <th className="border-r border-gray-300 px-2 py-2 font-semibold">Plant</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Expected</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Opening</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Purchase</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Adjust</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Stock</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Extra</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Sale</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Expected Sale</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Via Scan Order</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Via Unloading</th>
+            <th className="px-2 py-2 text-right font-semibold">Via Adjust</th>
           </tr>
         </thead>
         <tbody>
           {sourceBreakdownLoading && !sourceBreakdownData ? (
-            <tr><td colSpan={7} className="p-0"><SectionSkeleton lines={3} /></td></tr>
+            <tr><td colSpan={12} className="p-0"><SectionSkeleton lines={3} /></td></tr>
           ) : detailPlantRows.map(({ plant, stock, breakdown }) => (
             <tr key={plant} className="border-b border-gray-200 bg-white">
-              <td className="border-r border-gray-200 px-3 py-2 font-medium text-gray-900">{plant}</td>
-              <td className="border-r border-gray-200 px-3 py-2 text-right">{stackedCell(stock?.expectedQty, stock?.expectedPallets, "text-purple-700")}</td>
-              <td className="border-r border-gray-200 px-3 py-2 text-right font-bold tabular-nums text-[#001d6e]">{(stock?.liveStock ?? stock?.inStock) ?? 0}</td>
-              <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-amber-600">{stock?.extraQty ? stock.extraQty : <span className="text-gray-300">—</span>}</td>
-              <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-emerald-600">{stock?.saleQty != null ? stock.saleQty : <span className="text-gray-300">—</span>}</td>
-              <td className="border-r border-gray-200 px-3 py-2 text-right tabular-nums text-gray-700">{breakdown?.scanningQty ? breakdown.scanningQty : <span className="text-gray-300">—</span>}</td>
-              <td className="px-3 py-2 text-right tabular-nums text-gray-700">{breakdown?.unloadingQty ? breakdown.unloadingQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 font-medium text-gray-900">{plant}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right">{stackedCell(stock?.expectedQty, stock?.expectedPallets, "text-purple-700")}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.openingStock ? stock.openingStock : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.inStock ? stock.inStock : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.adjustQty ? stock.adjustQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right font-bold tabular-nums text-[#001d6e]">{stock?.closingStock ?? 0}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-amber-600">{stock?.extraQty ? stock.extraQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-emerald-600">{stock?.saleQty != null ? stock.saleQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right">{stackedCell(stock?.expectedSaleQty, stock?.expectedSalePallets, "text-purple-700")}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{breakdown?.scanningQty ? breakdown.scanningQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{breakdown?.unloadingQty ? breakdown.unloadingQty : <span className="text-gray-300">—</span>}</td>
+              <td className="px-2 py-2 text-right tabular-nums text-gray-700">{stock?.adjustQty ? stock.adjustQty : <span className="text-gray-300">—</span>}</td>
             </tr>
           ))}
         </tbody>
@@ -2163,10 +2214,11 @@ export default function OverallStock() {
   );
 
   // Inline Details/History drill-down — rendered as the DataTable's expanded row when an item
-  // name is clicked (detailRow set). Sticky-left + width-capped so it stays visible without its
-  // own horizontal scroll inside the wide, side-scrolling table.
+  // name is clicked (detailRow set). Sticky-left so it stays visible regardless of how far the
+  // wide, side-scrolling table is scrolled; widened to max-w-[95vw] (from max-w-3xl) so the
+  // Details tab's 12 columns fit without needing their own inner scrollbar on a normal screen.
   const movementsPanel = (
-    <div className="sticky left-0 w-full max-w-3xl bg-gray-50 p-3">
+    <div className="sticky left-0 w-full max-w-[95vw] bg-gray-50 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[#001d6e]">
         <History className="h-4 w-4 shrink-0" />
         <span className="text-sm font-semibold">{detailRow?.itemName ?? "Item"}</span>
@@ -2839,7 +2891,8 @@ export default function OverallStock() {
             <DialogDescription className="space-y-0.5 pt-1">
               <span className="block font-semibold text-gray-900">{adjustHistoryTarget?.itemName}</span>
               <span className="block font-mono text-xs text-gray-400">
-                {adjustHistoryTarget?.barcode}{adjustHistoryTarget?.plant ? ` · ${adjustHistoryTarget.plant}` : ""}
+                {adjustHistoryTarget?.barcode}
+                {adjustHistoryPlants.length > 1 ? ` · ${adjustHistoryPlants.join(", ")}` : adjustHistoryPlants[0] ? ` · ${adjustHistoryPlants[0]}` : ""}
               </span>
             </DialogDescription>
           </DialogHeader>
@@ -2854,10 +2907,12 @@ export default function OverallStock() {
                 <thead>
                   <tr className="sticky top-0 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
                     <th className="border-r border-gray-200 px-3 py-2 font-semibold">Date &amp; Time</th>
+                    {adjustHistoryPlants.length > 1 && <th className="border-r border-gray-200 px-3 py-2 font-semibold">Plant</th>}
                     <th className="border-r border-gray-200 px-3 py-2 font-semibold">By</th>
                     <th className="border-r border-gray-200 px-3 py-2 text-right font-semibold">Qty</th>
                     <th className="border-r border-gray-200 px-3 py-2 font-semibold">From</th>
-                    <th className="px-3 py-2 font-semibold">Reason</th>
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">Reason</th>
+                    {isAdminOrSuper && <th className="px-3 py-2 font-semibold">&nbsp;</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -2869,6 +2924,7 @@ export default function OverallStock() {
                           hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
                         })}
                       </td>
+                      {adjustHistoryPlants.length > 1 && <td className="border-r border-gray-100 px-3 py-2 text-gray-600">{a.plant}</td>}
                       <td className="border-r border-gray-100 px-3 py-2 text-gray-600">{a.byName ?? a.byCode ?? "—"}</td>
                       <td className={`border-r border-gray-100 px-3 py-2 text-right font-semibold tabular-nums ${a.qty < 0 ? "text-red-600" : "text-emerald-600"}`}>
                         {a.qty > 0 ? `+${a.qty.toLocaleString()}` : a.qty.toLocaleString()}
@@ -2877,11 +2933,23 @@ export default function OverallStock() {
                         <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
                           a.origin === "settings" ? "bg-slate-200 text-slate-700"
                           : a.origin === "page" ? "bg-[#001d6e]/10 text-[#001d6e]"
+                          : a.origin === "opening" ? "bg-purple-100 text-purple-700"
                           : "bg-amber-100 text-amber-700"}`}>
-                          {a.origin === "settings" ? "Settings" : a.origin === "page" ? "Stock page" : "Operation"}
+                          {a.origin === "settings" ? "Settings" : a.origin === "page" ? "Stock page" : a.origin === "opening" ? "Opening" : "Operation"}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-gray-600">{a.reason ?? "—"}</td>
+                      <td className="border-r border-gray-100 px-3 py-2 text-gray-600">{a.reason ?? "—"}</td>
+                      {isAdminOrSuper && (
+                        <td className="px-3 py-2 text-right">
+                          <Button
+                            size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-red-600"
+                            title="Delete this ledger entry — doesn't change live stock"
+                            onClick={() => setDeleteMovementTarget(a)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -2891,6 +2959,40 @@ export default function OverallStock() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setAdjustHistoryTarget(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete-one-ledger-entry confirm — a lighter-weight confirm than the full item Delete
+          below (no type-to-confirm text) since this only removes one history row, never live
+          stock; still a real, logged, admin-only action so it isn't a single accidental click. */}
+      <Dialog open={!!deleteMovementTarget} onOpenChange={(open) => { if (!open) setDeleteMovementTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete this entry?</DialogTitle>
+            <DialogDescription>
+              {deleteMovementTarget && (
+                <>
+                  <span className={`font-semibold ${deleteMovementTarget.qty < 0 ? "text-red-600" : "text-emerald-600"}`}>
+                    {deleteMovementTarget.qty > 0 ? `+${deleteMovementTarget.qty}` : deleteMovementTarget.qty}
+                  </span>
+                  {" "}· {deleteMovementTarget.reason ?? "no reason recorded"} · {deleteMovementTarget.plant}
+                  <br />
+                  This removes it from the ledger only — it will no longer count toward Opening/Adjust/Total Stock.
+                  It does not change this item's current live stock.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteMovementTarget(null)} disabled={deleteMovementMutation.isPending}>Cancel</Button>
+            <Button
+              className="bg-red-600 hover:bg-red-700"
+              disabled={deleteMovementMutation.isPending}
+              onClick={() => deleteMovementTarget && deleteMovementMutation.mutate(deleteMovementTarget.id)}
+            >
+              {deleteMovementMutation.isPending ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin inline" />Deleting...</>) : "Delete entry"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
