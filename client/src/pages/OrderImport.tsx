@@ -372,6 +372,7 @@ export default function OrderImport() {
   // instead of waiting for a separate "Map & Import" click.
   const reuploadPendingRef = useRef(false);
   const [deactivateTarget, setDeactivateTarget] = useState<number | null>(null);
+  const [reopenTarget, setReopenTarget] = useState<{ id: number; csvFileName: string } | null>(null);
   const [completeTarget, setCompleteTarget] = useState<number | null>(null);
   const [lastImport, setLastImport] = useState<{ rowCount: number } | null>(null);
   // Session id whose "Edit CSV" dialog is open — set from the Edit button on an Available/
@@ -2084,7 +2085,7 @@ export default function OrderImport() {
                               className="h-7 px-2 text-xs text-amber-700 border-amber-200 hover:bg-amber-50 rounded-full"
                               disabled={reopenMutation.isPending}
                               title="Undo an accidental Complete — continue scanning this session"
-                              onClick={() => reopenMutation.mutate(s.id)}>
+                              onClick={() => setReopenTarget({ id: s.id, csvFileName: s.csvFileName })}>
                               {reopenMutation.isPending && reopenMutation.variables === s.id
                                 ? <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" />
                                 : <RotateCcw className="h-3.5 w-3.5 sm:mr-1" />}
@@ -2974,6 +2975,27 @@ export default function OrderImport() {
               onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
               disabled={deactivateMutation.isPending || !canWriteOrderImport}>
               {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── Reopen confirmation — undoes an accidental Complete, same as Load Operations'
+          own Reopen confirm. */}
+      <AlertDialog open={reopenTarget !== null} onOpenChange={(open) => { if (!open) setReopenTarget(null); }}>
+        <AlertDialogContent className="rounded-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reopen this session?</AlertDialogTitle>
+            <AlertDialogDescription>
+              <strong>{reopenTarget ? stripCsvExt(reopenTarget.csvFileName) : ""}</strong> will be marked in-progress again so scanning can continue on it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-amber-600 text-white hover:bg-amber-700"
+              onClick={() => { if (reopenTarget) { reopenMutation.mutate(reopenTarget.id); setReopenTarget(null); } }}
+              disabled={reopenMutation.isPending}>
+              {reopenMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Reopen"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
+import { parseApiErrorMessage } from "@/lib/apiError";
 import { buildPageList, DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import {
   AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton,
@@ -1628,9 +1629,15 @@ function SortSlipDetail({
     );
   }
   if (detailQuery.isError || !slip) {
+    // detailQuery.error is apiRequest's raw thrown Error — its message is literally
+    // "404: {\"message\":\"No sort slip for this order\"}" (the status code and the server's
+    // JSON body glued together as text), not something to show a person directly.
+    // parseApiErrorMessage pulls the server's own clean message back out of that.
     return (
       <div className="p-8 text-center">
-        <p className="text-sm text-gray-500">{(detailQuery.error as any)?.message ?? "This sort slip could not be opened."}</p>
+        <p className="text-sm text-gray-500">
+          {detailQuery.error ? parseApiErrorMessage(detailQuery.error) : "This sort slip could not be opened."}
+        </p>
         <Button variant="outline" className="mt-3" onClick={onBack}><ArrowLeft className="mr-2 h-4 w-4" /> Back</Button>
       </div>
     );

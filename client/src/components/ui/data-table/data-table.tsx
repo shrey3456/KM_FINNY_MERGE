@@ -798,7 +798,12 @@ export function DataTable<TData>({
                         }}
                         onDragEnd={() => { setDragColId(null); setDragOverColId(null); }}
                         className={cn(
-                          "relative whitespace-nowrap border-b border-r bg-background px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:px-2.5 sm:py-2.5 sm:text-[11px]",
+                          // overflow-hidden matters here: this table is table-layout:fixed, which
+                          // fixes each column's BOX width but does nothing to content wider than
+                          // it — without this, a header longer than its column doesn't wrap or
+                          // truncate, it just bleeds visibly into the next column's own header
+                          // text, rendering as overlapping, garbled-looking characters.
+                          "relative overflow-hidden whitespace-nowrap border-b border-r bg-background px-2 py-2 text-left align-middle text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:px-2.5 sm:py-2.5 sm:text-[11px]",
                           isStickyHeader && "sticky top-0 z-10 bg-background",
                           // Independent of isStickyHeader — a left-pin works with no vertical
                           // sticky header at all, so it needs its own "sticky" + background here
@@ -908,7 +913,13 @@ export function DataTable<TData>({
                             <td
                               key={col.id}
                               className={cn(
-                                "border-b border-r border-gray-200 px-2 py-1.5 align-middle text-[11px] sm:px-2.5 sm:py-2 sm:text-xs",
+                                // Same overflow-hidden fix as the header <th> above, and for the
+                                // same reason — a cell's own content (a button's label, a long
+                                // value) wider than its fixed column otherwise bleeds into the
+                                // next cell instead of being clipped. Safe for popovers/dropdowns
+                                // rendered inside a cell — those portal their open content to
+                                // <body>, so they're never actually descendants of this <td>.
+                                "overflow-hidden border-b border-r border-gray-200 px-2 py-1.5 align-middle text-[11px] sm:px-2.5 sm:py-2 sm:text-xs",
                                 isPinned &&
                                   "sticky z-[5] bg-background shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)]",
                                 col.align === "right" && "text-right",

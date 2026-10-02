@@ -3,11 +3,11 @@ import { Client } from '@notionhq/client';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
-import { qualifiesForLoadingVehiclePicker } from './loading';
+import { fetchProformaOrdersFromNotion, writeOrderToDb, type OrderData } from '../services/proformaNotionSync';
+import type { VehiclePlanningOrderEntry } from '@shared/schema';
 
-// Vehicle Planning — a Gantt-style "when is each vehicle free" view over Krupa's own fleet
-// (same company filter as Loading's vehicle picker: company contains "krupa" or "dummy"), so a
-// planner can see which vehicle to assign a pending order to.
+// Vehicle Planning — a Gantt-style "when is each vehicle free" view over a configurable slice of
+// the fleet, so a planner can see which vehicle to assign a pending order to.
 //
 // TEST MODE — remove once this page is trusted: every WRITE here (assign) is restricted to
 // these three dummy order numbers only, so a bug in this brand-new page can't touch a real
@@ -77,6 +77,9 @@ type LiveOrder = {
 // per-order-number fetch) rather than one query per vehicle; each returned page can match
 // several of the batch's vehicles (a relation can hold more than one), so pages are bucketed by
 // vehicle notionPageId and only the latest (by "Ord Date :") is kept per vehicle.
+//
+// Only ever called from runVehiclePlanningSync now (manual "Sync from Notion" button + the 24h
+// timer) — never from the page-load GET, which reads vehicle_planning_state instead.
 async function fetchCurrentOrdersByVehicle(vehicleNotionPageIds: string[]): Promise<Map<string, LiveOrder>> {
   const latestByVehicle = new Map<string, LiveOrder>();
   if (!ORDER_DATABASE_ID || vehicleNotionPageIds.length === 0) return latestByVehicle;
@@ -157,46 +160,339 @@ async function fetchCurrentOrdersByVehicle(vehicleNotionPageIds: string[]): Prom
   return latestByVehicle;
 }
 
-// Short-lived cache for the whole fleet view — the live Notion lookup above is what actually
-// takes time (multiple batched, paginated requests), and this page gets reloaded/refetched far
-// more often than the underlying data actually changes within a few tens of seconds. Not
-// per-user (the data isn't user-specific), so every viewer shares one cache. Still "live from
-// Notion" in the sense that matters — a cache this short is never the reason someone sees a
-// truly stale assignment — just not re-fetched on literally every single render.
-const FLEET_CACHE_TTL_MS = 30_000;
-let fleetCache: { at: number; body: any } | null = null;
+// ─── Company filter settings ───────────────────────────────────────────────
 
-// GET /api/vehicle-planning/vehicles — one row per qualifying vehicle, with its most recent
-// order (if any) and a best-effort busy/free read.
-router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), async (req: Request, res: Response) => {
+const DEFAULT_COMPANY_FILTERS = ['krupa', 'transport'];
+
+// Vehicle Planning's own company scope — deliberately separate from Loading's
+// qualifiesForLoadingVehiclePicker (krupa/dummy): this page's default fleet is krupa + transport,
+// and unlike Loading's picker it's meant to be widened by whoever's using the page, via the
+// company filter control, not hardcoded.
+function qualifiesForVehiclePlanning(company: string | null | undefined, filters: string[]): boolean {
+  const c = (company ?? '').toLowerCase();
+  return filters.some((f) => c.includes(f.toLowerCase()));
+}
+
+async function getCompanyFilters(): Promise<string[]> {
+  const { rows } = await pool.query(`SELECT company_filters AS "companyFilters" FROM vehicle_planning_settings ORDER BY id LIMIT 1`);
+  return rows[0]?.companyFilters ?? DEFAULT_COMPANY_FILTERS;
+}
+
+router.get('/vehicle-planning/settings', requirePageAccess('vehicle-planning'), async (_req: Request, res: Response) => {
   try {
-    if (fleetCache && Date.now() - fleetCache.at < FLEET_CACHE_TTL_MS) {
-      return res.json(fleetCache.body);
-    }
-
+    const companyFilters = await getCompanyFilters();
     const all = await storage.getAllVehicleInfo();
-    const fleet = all.filter((v) => qualifiesForLoadingVehiclePicker(v.company));
+    const availableCompanies = Array.from(new Set(all.map((v) => v.company).filter((c): c is string => !!c))).sort();
+    res.json({ companyFilters, availableCompanies });
+  } catch (error) {
+    console.error('Error loading vehicle planning settings:', error);
+    res.status(500).json({ message: 'Failed to load settings' });
+  }
+});
 
-    // Entirely live from Notion — proforma_slips is not reliably synced, so it is never
-    // consulted here, not even as a starting point for "which order is current".
+router.post('/vehicle-planning/settings', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const companyFilters = Array.isArray(req.body?.companyFilters)
+      ? req.body.companyFilters.map((f: unknown) => String(f).trim()).filter(Boolean)
+      : null;
+    if (!companyFilters || companyFilters.length === 0) {
+      return res.status(400).json({ message: 'companyFilters must be a non-empty array' });
+    }
+    await pool.query(
+      `UPDATE vehicle_planning_settings SET company_filters = $1
+       WHERE id = (SELECT id FROM vehicle_planning_settings ORDER BY id LIMIT 1)`,
+      [JSON.stringify(companyFilters)],
+    );
+    res.json({ companyFilters });
+  } catch (error) {
+    console.error('Error saving vehicle planning settings:', error);
+    res.status(500).json({ message: 'Failed to save settings' });
+  }
+});
+
+// ─── Sync from Notion (manual button + 24h automatic timer) ───────────────
+
+// Narrow date window for a scoped single-order proforma lookup (assign-flow fallback) — wide
+// enough to cover almost any real order without turning into "sync everything".
+function recentWindow(): { startDate: string; endDate: string } {
+  const start = new Date();
+  start.setDate(start.getDate() - 45);
+  const end = new Date();
+  end.setDate(end.getDate() + 7);
+  return { startDate: start.toISOString().slice(0, 10), endDate: end.toISOString().slice(0, 10) };
+}
+
+// Builds one order_history entry for a vehicle's current live order, cross-referencing
+// proforma_slips by order number (linked, never relied on for "which order is current"). If the
+// slip doesn't exist locally yet, falls back to whatever Notion has for that order number — via
+// getNotionOrders, a cache shared across the WHOLE sync run (fetchProformaOrdersFromNotion pulls
+// its entire date window, not one order, so calling it per-vehicle would mean hundreds of
+// redundant full-window Notion fetches instead of at most one).
+async function buildHistoryEntry(
+  vehicle: { vehicleNumber: string | null },
+  currentOrder: LiveOrder,
+  stateByPlant: Map<string, string | null>,
+  getNotionOrders: () => Promise<Map<string, OrderData>>,
+): Promise<VehiclePlanningOrderEntry> {
+  let slip = await storage.getProformaSlipByOrderNumber(currentOrder.orderNumber);
+  if (!slip) {
+    try {
+      const ordersMap = await getNotionOrders();
+      const orderData = ordersMap.get(currentOrder.orderNumber);
+      if (orderData) {
+        await writeOrderToDb(orderData);
+        slip = await storage.getProformaSlipByOrderNumber(currentOrder.orderNumber);
+      }
+    } catch (err) {
+      console.error(`[Vehicle Planning] Scoped proforma sync failed for order ${currentOrder.orderNumber}:`, err);
+    }
+  }
+
+  const vehicleMismatch = !!(slip?.vehicleNumber && vehicle.vehicleNumber && slip.vehicleNumber !== vehicle.vehicleNumber);
+  const plantState = currentOrder.plant ? stateByPlant.get(currentOrder.plant.trim().toLowerCase()) ?? null : null;
+
+  return {
+    orderNumber: currentOrder.orderNumber,
+    proformaSlipId: slip?.id ?? null,
+    orderDate: currentOrder.orderDate,
+    status: currentOrder.status,
+    driver: currentOrder.driver,
+    tripCompletesOn: currentOrder.tripCompletesOn,
+    tripDays: currentOrder.tripDays,
+    partyName: slip?.partyName ?? currentOrder.partyName,
+    plant: currentOrder.plant,
+    state: plantState,
+    vehicleMismatch,
+    mismatchProformaVehicleNumber: vehicleMismatch ? slip!.vehicleNumber : null,
+    // Filled in by upsertHistoryEntry, which can see whether this order was already terminal as
+    // of an earlier sync — this function builds a fresh snapshot each time, with no memory of that.
+    actualCompletedAt: null,
+  };
+}
+
+// Reads the existing order_history array for a vehicle, replaces the entry with the same order
+// number (or appends if new), and writes it back. Also creates the vehicle_planning_state row if
+// this vehicle has never been synced before.
+async function upsertHistoryEntry(vehicleId: number, entry: VehiclePlanningOrderEntry): Promise<void> {
+  const { rows } = await pool.query(
+    `SELECT id, order_history AS "orderHistory" FROM vehicle_planning_state WHERE vehicle_id = $1`,
+    [vehicleId],
+  );
+  const existingHistory: VehiclePlanningOrderEntry[] = rows[0]?.orderHistory ?? [];
+  const previousEntry = existingHistory.find((e) => e.orderNumber === entry.orderNumber);
+  // Once set, this never moves — it's "the sync that first saw this go terminal", not "the most
+  // recent sync where it happened to still be terminal". A status that was already terminal last
+  // time keeps its original observed date; one that's terminal for the first time right now gets
+  // today's date; one that isn't terminal at all yet stays null.
+  if (previousEntry?.actualCompletedAt) {
+    entry.actualCompletedAt = previousEntry.actualCompletedAt;
+  } else if (TERMINAL_STATUSES.has(String(entry.status ?? '').toUpperCase())) {
+    entry.actualCompletedAt = new Date().toISOString().slice(0, 10);
+  }
+  const nextHistory = existingHistory.filter((e) => e.orderNumber !== entry.orderNumber);
+  nextHistory.push(entry);
+
+  if (rows[0]) {
+    await pool.query(
+      `UPDATE vehicle_planning_state SET order_history = $1, last_synced_at = now() WHERE vehicle_id = $2`,
+      [JSON.stringify(nextHistory), vehicleId],
+    );
+  } else {
+    await pool.query(
+      `INSERT INTO vehicle_planning_state (vehicle_id, order_history, last_synced_at) VALUES ($1, $2, now())`,
+      [vehicleId, JSON.stringify(nextHistory)],
+    );
+  }
+}
+
+// Runs `task` over `items` with at most `limit` in flight at once — plain Promise.all with no cap
+// fires one query per item ALL AT ONCE; against an 849-vehicle fleet and a 20-connection pool
+// (server/db.ts), that's exactly what crashed the whole server with "timeout exceeded when trying
+// to connect" (an unhandled rejection from inside this function, with nothing catching it before
+// it reached the process) — most of those queries were just queued past the pool's own timeout,
+// competing with every other request the app was serving at the same moment.
+async function mapWithConcurrency<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      await task(items[idx]);
+    }
+  });
+  await Promise.all(workers);
+}
+
+let isVehiclePlanningSyncing = false;
+
+// The only function that talks to Notion for Vehicle Planning. Runs for every vehicle currently
+// matching the saved company filter, finds its current order, links it to proforma_slips, and
+// upserts the result into vehicle_planning_state. Called by the manual "Sync from Notion" button
+// and by the 24h automatic timer in server/index.ts — never by the page-load GET.
+export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number }> {
+  if (isVehiclePlanningSyncing) {
+    console.log('[Vehicle Planning] Sync already in progress, skipping this run');
+    return { syncedVehicles: 0, mismatches: 0 };
+  }
+  isVehiclePlanningSyncing = true;
+  console.log('[Vehicle Planning] Sync started');
+  try {
+    const companyFilters = await getCompanyFilters();
+    const all = await storage.getAllVehicleInfo();
+    const fleet = all.filter((v) => qualifiesForVehiclePlanning(v.company, companyFilters));
+
+    // Ensure every qualifying vehicle has a state row, even one with no current order yet, so it
+    // shows up (as "no history") rather than being invisible until its first order. Capped at 8
+    // at once (see mapWithConcurrency's own comment) instead of firing all 849 simultaneously.
+    await mapWithConcurrency(fleet, 8, async (v) => {
+      await pool.query(
+        `INSERT INTO vehicle_planning_state (vehicle_id, order_history) VALUES ($1, '[]')
+         ON CONFLICT (vehicle_id) DO NOTHING`,
+        [v.id],
+      );
+    });
+
     const vehiclesWithNotionId = fleet.filter((v): v is typeof v & { notionPageId: string } => !!v.notionPageId);
     const currentOrderByVehicle = await fetchCurrentOrdersByVehicle(vehiclesWithNotionId.map((v) => v.notionPageId));
 
-    // Plant -> state (Plant Master's own short code, e.g. "GJ") — the State column shows THIS,
-    // for the order's plant, never the order's party/destination state (that's a different field
-    // Notion happens to also call "State :"). Looked up fresh each request; Plant Master is tiny
-    // and rarely changes, so no caching needed beyond the fleet response's own 30s cache.
     const allPlants = await storage.getAllPlants();
     const stateByPlant = new Map(allPlants.map((p) => [p.name.trim().toLowerCase(), p.state] as const));
 
-    const rows = fleet.map((v) => {
+    // Fetched at most ONCE for this whole run, the first time some vehicle's order isn't already
+    // in proforma_slips — every other vehicle missing a slip reuses this same resolved (or
+    // REJECTED) promise instead of each triggering its own full date-window pull from Notion. A
+    // failure is deliberately cached too, not retried per vehicle — if Notion is unreachable this
+    // run, retrying for every single vehicle missing a slip just turns one outage into dozens of
+    // doomed network calls; this run simply leaves those entries unlinked and the next sync (in
+    // 24h, or a manual click) tries again fresh.
+    let notionOrdersPromise: Promise<Map<string, OrderData>> | null = null;
+    const getNotionOrders = () => {
+      if (!notionOrdersPromise) {
+        const { startDate, endDate } = recentWindow();
+        notionOrdersPromise = fetchProformaOrdersFromNotion(startDate, endDate);
+      }
+      return notionOrdersPromise;
+    };
+
+    let mismatches = 0;
+    for (const v of fleet) {
       const currentOrder = v.notionPageId ? currentOrderByVehicle.get(v.notionPageId) ?? null : null;
+      if (!currentOrder) {
+        await pool.query(`UPDATE vehicle_planning_state SET last_synced_at = now() WHERE vehicle_id = $1`, [v.id]);
+        continue;
+      }
+      const entry = await buildHistoryEntry(v, currentOrder, stateByPlant, getNotionOrders);
+      if (entry.vehicleMismatch) mismatches++;
+      await upsertHistoryEntry(v.id, entry);
+    }
+
+    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${mismatches} mismatch(es)`);
+    return { syncedVehicles: fleet.length, mismatches };
+  } finally {
+    isVehiclePlanningSyncing = false;
+  }
+}
+
+router.post('/vehicle-planning/sync', requirePageWrite('vehicle-planning'), async (_req: Request, res: Response) => {
+  try {
+    const result = await runVehiclePlanningSync();
+    res.json(result);
+  } catch (error) {
+    console.error('Error running vehicle planning sync:', error);
+    res.status(500).json({ message: 'Failed to sync from Notion' });
+  }
+});
+
+// ─── Resolve a vehicle-number mismatch (Notion's relation vs. proforma_slips) ──
+
+router.post('/vehicle-planning/resolve-mismatch', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const vehicleId = Number(req.body?.vehicleId);
+    const orderNumber = String(req.body?.orderNumber ?? '').trim();
+    const keep = req.body?.keep === 'proforma' ? 'proforma' : 'notion';
+    if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
+
+    const { rows } = await pool.query(
+      `SELECT order_history AS "orderHistory" FROM vehicle_planning_state WHERE vehicle_id = $1`,
+      [vehicleId],
+    );
+    const history: VehiclePlanningOrderEntry[] = rows[0]?.orderHistory ?? [];
+    const entry = history.find((e) => e.orderNumber === orderNumber);
+    if (!entry) return res.status(404).json({ message: 'No matching order history entry found' });
+
+    if (keep === 'notion') {
+      const vehicle = await storage.getVehicleInfo(vehicleId);
+      const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+      if (vehicle?.vehicleNumber && slip) {
+        await storage.updateProformaSlip(slip.id, { vehicleNumber: vehicle.vehicleNumber, vehicleInfoId: vehicle.id } as any);
+      }
+    }
+    // keep === 'proforma': proforma_slips is treated as already correct — nothing to write there.
+
+    entry.vehicleMismatch = false;
+    entry.mismatchProformaVehicleNumber = null;
+    await pool.query(
+      `UPDATE vehicle_planning_state SET order_history = $1 WHERE vehicle_id = $2`,
+      [JSON.stringify(history), vehicleId],
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error resolving vehicle planning mismatch:', error);
+    res.status(500).json({ message: 'Failed to resolve mismatch' });
+  }
+});
+
+// GET /api/vehicle-planning/vehicles/:id/history — every past order this vehicle has carried,
+// newest first. Fetched on demand (clicking a row), not bundled into the main /vehicles list —
+// the fleet-wide response stays small, and most of the time nobody clicks into any given row.
+router.get('/vehicle-planning/vehicles/:id/history', requirePageAccess('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const vehicleId = Number(req.params.id);
+    if (!Number.isFinite(vehicleId)) return res.status(400).json({ message: 'Invalid vehicle id' });
+    const { rows } = await pool.query(
+      `SELECT order_history AS "orderHistory" FROM vehicle_planning_state WHERE vehicle_id = $1`,
+      [vehicleId],
+    );
+    const history: VehiclePlanningOrderEntry[] = rows[0]?.orderHistory ?? [];
+    const sorted = [...history].sort((a, b) => (b.orderDate ?? '').localeCompare(a.orderDate ?? ''));
+    res.json({ history: sorted });
+  } catch (error) {
+    console.error('Error loading vehicle order history:', error);
+    res.status(500).json({ message: 'Failed to load order history' });
+  }
+});
+
+// ─── GET /api/vehicle-planning/vehicles — reads vehicle_planning_state only, never Notion ──
+
+router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), async (_req: Request, res: Response) => {
+  try {
+    const companyFilters = await getCompanyFilters();
+    const all = await storage.getAllVehicleInfo();
+    const fleet = all.filter((v) => qualifiesForVehiclePlanning(v.company, companyFilters));
+
+    const { rows: stateRows } = await pool.query(
+      `SELECT vehicle_id AS "vehicleId", order_history AS "orderHistory", last_synced_at AS "lastSyncedAt"
+       FROM vehicle_planning_state WHERE vehicle_id = ANY($1)`,
+      [fleet.map((v) => v.id)],
+    );
+    const stateByVehicleId = new Map(stateRows.map((r: any) => [r.vehicleId, r]));
+
+    const rows = fleet.map((v) => {
+      const state = stateByVehicleId.get(v.id);
+      const history: VehiclePlanningOrderEntry[] = state?.orderHistory ?? [];
+      // "Current" = the single most-recently-dated entry, regardless of status — same "latest
+      // wins" rule the old live Notion fetch used (busy/free is a separate computed flag below).
+      const currentOrder = history.length > 0
+        ? history.reduce((latest, e) => (!latest || (e.orderDate ?? '') > (latest.orderDate ?? '') ? e : latest))
+        : null;
+
       if (!v.vehicleNumber || !currentOrder) {
         return {
           id: v.id, vehicleNumber: v.vehicleNumber ?? null, rtoNumber: v.rtoNumber, driver: v.driver,
           state: null, company: v.company, currentOrder: null, busy: false, busyUntil: null, tripDays: null,
+          hasHistory: history.length > 0, lastSyncedAt: state?.lastSyncedAt ?? null,
         };
       }
+
       const status = String(currentOrder.status ?? '').toUpperCase();
       const tripEndDate = parseDmyDate(currentOrder.tripCompletesOn);
       // A vehicle is free once EITHER the status is explicitly terminal OR its calculated trip
@@ -206,7 +502,6 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
       const tripHasEnded = !!tripEndDate && tripEndDate < todayMidnightUTC();
       const busy = !TERMINAL_STATUSES.has(status) && !tripHasEnded;
       const busyUntil = busy ? currentOrder.tripCompletesOn : null;
-      const plantState = currentOrder.plant ? stateByPlant.get(currentOrder.plant.trim().toLowerCase()) ?? null : null;
 
       return {
         id: v.id, vehicleNumber: v.vehicleNumber, rtoNumber: v.rtoNumber,
@@ -214,20 +509,22 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
         // recorded per TRIP in Notion (currentOrder.driver), not per vehicle. Vehicle Master's
         // value is kept as a fallback only, for a vehicle whose Notion driver field is blank.
         driver: currentOrder.driver ?? v.driver,
-        // Plant Master's state for THIS order's plant — follows whichever order is current, so
-        // it changes on its own the day a vehicle moves from a Valsad order to an Indore one.
-        state: plantState, company: v.company,
+        state: currentOrder.state, company: v.company,
         currentOrder: {
           orderNumber: currentOrder.orderNumber, partyName: currentOrder.partyName,
           plant: currentOrder.plant, orderDate: currentOrder.orderDate, notionStatus: currentOrder.status,
+          // Always present (not just when busy) — the Gantt bar itself needs this to draw a
+          // PAST trip's bar too, not only a currently-ongoing one. busyUntil below stays the
+          // "is it free yet" signal; this is just "when did/does this trip end".
+          tripCompletesOn: currentOrder.tripCompletesOn,
+          vehicleMismatch: currentOrder.vehicleMismatch, mismatchProformaVehicleNumber: currentOrder.mismatchProformaVehicleNumber,
         },
         busy, busyUntil, tripDays: currentOrder.tripDays,
+        hasHistory: true, lastSyncedAt: state?.lastSyncedAt ?? null,
       };
     });
 
-    const body = { vehicles: rows, testModeOrderNumbers: TEST_MODE_ORDER_NUMBERS };
-    fleetCache = { at: Date.now(), body };
-    res.json(body);
+    res.json({ vehicles: rows, testModeOrderNumbers: TEST_MODE_ORDER_NUMBERS, companyFilters });
   } catch (error) {
     console.error('Error building vehicle planning fleet view:', error);
     res.status(500).json({ message: 'Failed to load vehicle planning data' });
@@ -268,8 +565,24 @@ router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), as
       });
     }
 
-    const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
-    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    let slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+    // Not found locally — try a scoped live pull from Notion before giving up, since a brand new
+    // order may not have been synced (manually or by the 24h timer) yet.
+    if (!slip) {
+      try {
+        const { startDate, endDate } = recentWindow();
+        const ordersMap = await fetchProformaOrdersFromNotion(startDate, endDate);
+        const orderData: OrderData | undefined = ordersMap.get(orderNumber);
+        if (orderData) {
+          await writeOrderToDb(orderData);
+          slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+        }
+      } catch (err) {
+        console.error(`[Vehicle Planning] Scoped proforma fetch failed for order ${orderNumber}:`, err);
+      }
+    }
+    if (!slip) return res.status(404).json({ message: `Order ${orderNumber} not found in Notion.` });
+
     const vehicle = await storage.getVehicleInfo(vehicleId);
     if (!vehicle) return res.status(404).json({ message: 'Vehicle not found' });
     if (!vehicle.vehicleNumber) return res.status(400).json({ message: 'This vehicle has no vehicle number set in Vehicle Master.' });
@@ -311,9 +624,24 @@ router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), as
       }
     }
 
-    // Bust the fleet cache — otherwise this exact vehicle could keep showing as free for up to
-    // FLEET_CACHE_TTL_MS more, right after assigning it.
-    fleetCache = null;
+    // Reflect the assignment into this vehicle's local history immediately, so the Gantt shows it
+    // without waiting for the next Sync — driver/trip fields fill in on the next sync.
+    await upsertHistoryEntry(vehicle.id, {
+      orderNumber,
+      proformaSlipId: updated.id,
+      orderDate: updated.orderDate ?? null,
+      status: updated.notionStatus ?? null,
+      driver: null,
+      tripCompletesOn: null,
+      tripDays: null,
+      partyName: updated.partyName ?? null,
+      plant: updated.plant ?? null,
+      state: null,
+      vehicleMismatch: false,
+      mismatchProformaVehicleNumber: null,
+      actualCompletedAt: null,
+    });
+
     res.json({ slip: updated });
   } catch (error) {
     console.error('Error assigning vehicle from vehicle planning:', error);

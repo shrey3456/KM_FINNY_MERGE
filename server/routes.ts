@@ -4240,6 +4240,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const slipData = insertProformaSlipSchema.parse(req.body);
 
+      // One slip per order number — this had no check at all before, so creating one twice for
+      // the same order (a double-click, or a second manual entry) silently produced two separate
+      // proforma_slips rows, which then showed as a duplicate everywhere downstream (Loading's
+      // list, etc). Must delete the existing one first to create a fresh one for this order.
+      if (slipData.orderNumber) {
+        const existing = await storage.getProformaSlipByOrderNumber(slipData.orderNumber);
+        if (existing) {
+          return res.status(409).json({
+            message: `A proforma slip for order ${slipData.orderNumber} already exists (#${existing.id}). Delete it first before creating a new one.`,
+          });
+        }
+      }
+
       // Ensure totalQuantity is 0 initially, it will be updated when items are added
       if (slipData.totalQuantity === undefined) {
         slipData.totalQuantity = 0;

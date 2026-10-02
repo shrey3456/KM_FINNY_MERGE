@@ -953,6 +953,15 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
         `LOWER(ps.loading_owner_name) LIKE $${idx})`,
       );
     }
+    // "My Slips" — the one-click button, one row per order so the person's OWN link-vehicle
+    // action is what counts as "created by them", same identity link-vehicle already stamps.
+    if (req.query.createdBy === 'me') {
+      const { userCode } = actor(req);
+      if (userCode) {
+        params.push(userCode);
+        baseConditions.push(`lr.created_by_code = $${params.length}`);
+      }
+    }
     const baseWhere = baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
     const statusCondition = tab === 'loading' ? 'ps.loading_completed_at IS NULL'
@@ -1019,6 +1028,30 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
   } catch (error) {
     console.error('Error listing loading records:', error);
     res.status(500).json({ message: 'Failed to fetch loading records' });
+  }
+});
+
+// GET /api/loading/my-active-slips — every slip the current user owns that's still LOADING
+// (not completed) — lightweight, just enough to label a tab. Powers the tab strip that lets
+// someone switch directly between several slips they're juggling at once, instead of going back
+// to the landing list each time (a user isn't restricted to owning just one active load — see
+// the ownership checks elsewhere in this file, which are all scoped per-load, never globally).
+router.get('/loading/my-active-slips', requirePageAccess('loading'), async (req: Request, res: Response) => {
+  try {
+    const { userCode } = actor(req);
+    if (!userCode) return res.json({ slips: [] });
+    const { rows } = await pool.query(
+      `SELECT order_number AS "orderNumber", vehicle_number AS "vehicleNumber",
+              party_name AS "partyName", plant
+       FROM proforma_slips
+       WHERE loading_owner_code = $1 AND loading_completed_at IS NULL AND UPPER(notion_status) = $2
+       ORDER BY order_date DESC`,
+      [userCode, NOTION_LOADING_STATUS],
+    );
+    res.json({ slips: rows });
+  } catch (error) {
+    console.error('Error listing active slips:', error);
+    res.status(500).json({ message: 'Failed to load active slips' });
   }
 });
 
@@ -1089,15 +1122,33 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requireLoadingWrite, 
       });
     }
 
-    // A history row for this action — this is what the Loading page's landing table lists.
-    // Snapshotted, not a live join (see shared/schema.ts's loadingRecords comment).
-    await storage.createLoadingRecord({
-      orderNumber: updated.orderNumber, proformaSlipId: updated.id,
-      partyName: updated.partyName, plant: updated.plant,
-      vehicleNumber: vehicle.vehicleNumber, rtoNumber: vehicle.rtoNumber ?? null,
-      volume: vehicle.volume != null ? String(vehicle.volume) : null,
-      createdByCode: userCode ?? null, createdByName: userName ?? null,
-    });
+    // This is what the Loading page's landing table lists — one row per order number.
+    // Snapshotted, not a live join (see shared/schema.ts's loadingRecords comment). Re-linking
+    // (a double-click on the same vehicle, or picking a different one afterwards) updates this
+    // same row in place rather than inserting another one — it used to insert unconditionally,
+    // which duplicated the order in the landing list every time link-vehicle ran more than once.
+    const { rows: existingRecordRows } = await pool.query(
+      `SELECT id FROM loading_records WHERE order_number = $1 LIMIT 1`,
+      [updated.orderNumber],
+    );
+    if (existingRecordRows[0]) {
+      await pool.query(
+        `UPDATE loading_records SET proforma_slip_id = $1, party_name = $2, plant = $3,
+                vehicle_number = $4, rto_number = $5, volume = $6,
+                created_by_code = $7, created_by_name = $8, created_at = now()
+         WHERE id = $9`,
+        [updated.id, updated.partyName, updated.plant, vehicle.vehicleNumber, vehicle.rtoNumber ?? null,
+         vehicle.volume != null ? String(vehicle.volume) : null, userCode ?? null, userName ?? null, existingRecordRows[0].id],
+      );
+    } else {
+      await storage.createLoadingRecord({
+        orderNumber: updated.orderNumber, proformaSlipId: updated.id,
+        partyName: updated.partyName, plant: updated.plant,
+        vehicleNumber: vehicle.vehicleNumber, rtoNumber: vehicle.rtoNumber ?? null,
+        volume: vehicle.volume != null ? String(vehicle.volume) : null,
+        createdByCode: userCode ?? null, createdByName: userName ?? null,
+      });
+    }
 
     res.json({ slip: await withRto(updated), vehicle, capacityWarning });
   } catch (error) {

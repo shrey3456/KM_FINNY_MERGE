@@ -1387,10 +1387,15 @@ router.post('/reports/scan-history/remove', async (req: Request, res: Response) 
     const where = target.kind === 'scan'
       ? `id = $1 AND COALESCE(voided, false) = true`
       : `id = $1 AND reason LIKE '${REMOVE_OPERATIONS_REASON}'`;
+    // order_scan_events has no plant column of its own (unlike loading_scan_events,
+    // unload_scan_events and stock_movements, which all do) — RETURNING it unconditionally used
+    // to throw "column \"plant\" does not exist" for every Order Scan void removal, the most
+    // common case, which is why this always came back as a 500.
+    const hasPlantColumn = target.table !== 'order_scan_events';
     const { rows } = await pool.query(
       `UPDATE ${target.table} SET hidden_in_history = true
        WHERE ${where} AND NOT COALESCE(hidden_in_history, false)
-       RETURNING barcode, plant`,
+       RETURNING barcode${hasPlantColumn ? ', plant' : ''}`,
       [target.rowId],
     );
     if (rows.length === 0) {
@@ -1555,6 +1560,10 @@ router.get('/reports/stock-adjustments', async (req: Request, res: Response) => 
       // Loading's own +/- corrections are Loading's history, not the item's stock-adjust history —
       // they already show as Load Adjust in Scan History.
       `COALESCE(sm.source, '') <> 'loading'`,
+      // A void (origin = 'void') is folded into Purchase now, not Adjust (see the purchases CTE
+      // in /reports/plant-stock) — it would be confusing to list it here as "what makes up the
+      // Adjust figure" when it no longer counts toward that figure at all.
+      `COALESCE(sm.origin, '') <> 'void'`,
     ];
     const params: any[] = [barcode];
     if (plantList.length > 0) {
@@ -1679,11 +1688,16 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         LEFT JOIN unload_import_sessions uis ON sm.source = 'unloading' AND uis.id = sm.session_id
         WHERE sm.source IS DISTINCT FROM 'loading' AND sm.type <> 'dispatch'
       ),
-      -- Purchase is what CAME IN (type = 'receive': order scanning and unloading). Everything
-      -- else on the purchase side is a correction — Clear Stock, a voided scan's rollback, a
-      -- deleted CSV's rollback, a manual Adjust, an exchange — and those are signed, so folding
-      -- them into Purchase made a big clear read as a NEGATIVE purchase, which nobody purchased.
-      -- They are summed separately as Adjust and still count towards Closing, so the row adds up:
+      -- Purchase is what CAME IN (type = 'receive': order scanning and unloading) MINUS what a
+      -- void took straight back out (origin = 'void' — a single scan undone; see
+      -- reverseLiveScanStock and Unloading's own void handler). A void always shares its
+      -- original scan's session_id, so it's always dated into the SAME period as the purchase
+      -- it's reversing — it can net against it here without ever landing as a stray negative
+      -- number in some unrelated period. Everything else on the purchase side is still a
+      -- SEPARATE correction — Clear Stock, a deleted CSV's rollback, a manual Adjust, an exchange,
+      -- a qty EDIT (not a void) — and those stay signed on their own, so folding them in too would
+      -- make a big clear read as a negative purchase, which nobody purchased. They're summed
+      -- separately as Adjust and still count towards Closing, so the row adds up:
       --   Closing = Opening + Purchase + Adjust - Sale.
       purchases AS (
         SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
@@ -1696,13 +1710,15 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
                -- like a plain accounting Opening Balance, so it naturally lands here as soon as
                -- the viewed period starts on or after that date — no special-casing needed.
                COALESCE(SUM(qty) FILTER (WHERE d < $1::date AND origin <> 'settings'), 0)::int AS opening_purchase,
-               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type = 'receive'), 0)::int AS purchase,
-               -- Corrections a person or an ordinary action made (a page edit, a voided scan, a
-               -- deleted CSV, an exchange) — the ones worth reading item by item. origin='opening'
-               -- is excluded here (not from opening_purchase above) so that if an Opening Stock
-               -- import's effective date ever falls WITHIN the viewed period instead of before
-               -- it, it still can't double up as an in-period Adjust on top of being Opening.
-               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin NOT IN ('settings', 'opening')), 0)::int AS adjust,
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND (type = 'receive' OR origin = 'void')), 0)::int AS purchase,
+               -- Corrections a person or an ordinary action made (a page edit, a deleted CSV, an
+               -- exchange) — the ones worth reading item by item. A void (origin='void') is
+               -- excluded here too — see the comment on purchase above, it's folded in there
+               -- instead, not double-counted in both. origin='opening' is excluded here (not from
+               -- opening_purchase above) so that if an Opening Stock import's effective date ever
+               -- falls WITHIN the viewed period instead of before it, it still can't double up as
+               -- an in-period Adjust on top of being Opening.
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin NOT IN ('settings', 'opening', 'void')), 0)::int AS adjust,
                -- Settings-wide actions (Clear Stock). Their own figure, so one clear across the
                -- whole catalogue can't bury the corrections above.
                COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin = 'settings'), 0)::int AS system_adjust,
@@ -1910,7 +1926,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       const productByBarcode = new Map<string, any>();
       if (barcodesNeedingLookup.length > 0) {
         const { rows: prodRows } = await pool.query(
-          `SELECT barcode, name, item_no, sap_code, gj_sap, mp_sap, hsn_code, category, brand,
+          `SELECT barcode, name, new_sr, item_no, sap_code, gj_sap, mp_sap, hsn_code, category, brand,
                   items_per_pallet, gj_plt, mp_plt, pallets
            FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
           [barcodesNeedingLookup.map((b) => b.toLowerCase())],
@@ -1927,8 +1943,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
         const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.expectedQty) || 0);
+        // Sr No used to be hardcoded 0 here (renders blank) instead of read from the product —
+        // an item that's only ever been on a planned order (never scanned/stocked) always took
+        // this path, so it always showed with no Sr No even though Product Master had one.
         expectedOnlyRows.push({
-          srNo: 0, barcode: r.barcode, plant: r.plant,
+          srNo: p?.new_sr ?? null, barcode: r.barcode, plant: r.plant,
           itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
           hsnCode: p?.hsn_code ?? null, category: p?.category ?? null, brand: p?.brand ?? null,
           itemsPerPallet: ipp || null, inStock: 0, extraQty: 0,
@@ -2001,7 +2020,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       const productByBarcode = new Map<string, any>();
       if (barcodesNeedingLookup.length > 0) {
         const { rows: prodRows } = await pool.query(
-          `SELECT barcode, name, item_no, sap_code, gj_sap, mp_sap, hsn_code, category, brand,
+          `SELECT barcode, name, new_sr, item_no, sap_code, gj_sap, mp_sap, hsn_code, category, brand,
                   items_per_pallet, gj_plt, mp_plt, pallets
            FROM products WHERE LOWER(barcode) = ANY($1::text[])`,
           [barcodesNeedingLookup.map((b) => b.toLowerCase())],
@@ -2022,8 +2041,10 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
         const ipp = definedIpp > 0 ? definedIpp : Math.max(1, Number(r.expectedSaleQty) || 0);
+        // Same fix as applyExpectedRows above — Sr No was hardcoded 0 (renders blank) instead of
+        // read from the product.
         saleOnlyRows.push({
-          srNo: 0, barcode: r.barcode, plant: r.plant,
+          srNo: p?.new_sr ?? null, barcode: r.barcode, plant: r.plant,
           itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
           hsnCode: p?.hsn_code ?? null, category: p?.category ?? null, brand: p?.brand ?? null,
           itemsPerPallet: ipp || null, inStock: 0, extraQty: 0,

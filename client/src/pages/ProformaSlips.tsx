@@ -255,13 +255,15 @@ export default function ProformaSlips() {
   // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
   // Seeded from whatever was left applied last time this page was open — see SLIP_FILTERS_KEY.
   const [activePlantTab, setActivePlantTab] = useState<string>(() => readSavedSlipFilters().plant ?? "");
-  // Defaults to today. The saved value is only honoured when it actually holds a date —
-  // once any filter has been persisted the bundle always carries date: "", which is not
-  // undefined, so an `=== undefined` check would let that empty string win and the page would
-  // open unfiltered.
-  const [dateValue, setDateValue] = useState<string>(
-    () => readSavedSlipFilters().date || `d:${format(new Date(), "yyyy-MM-dd")}`,
-  );
+  // Defaults to today — but ONLY the very first time, before this filter has ever been saved.
+  // Checking `=== undefined` (not `||`) matters: once the user explicitly clears the date, the
+  // saved bundle carries date: "" — a real, deliberate choice ("show every date") — and `||`
+  // would treat that empty string as falsy and silently snap back to today on the next reload,
+  // which is exactly the bug this used to have (clearing the filter never actually stuck).
+  const [dateValue, setDateValue] = useState<string>(() => {
+    const saved = readSavedSlipFilters().date;
+    return saved !== undefined ? saved : `d:${format(new Date(), "yyyy-MM-dd")}`;
+  });
   const [dateOpen, setDateOpen] = useState(false);
   // The calendar half opens separately from the quick-ranges half — two buttons, two
   // popovers, one shared date value.

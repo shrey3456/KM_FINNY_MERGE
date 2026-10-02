@@ -520,9 +520,13 @@ export async function reverseLiveScanStock(
     [totalQty, extraQty, barcode, plant, productId],
   );
 
+  // origin = 'void' — lets the Overall Stock report (server/routes/scan-sessions.ts,
+  // /reports/plant-stock) fold this back into Purchase instead of Adjust: this row always shares
+  // the original scan's session_id, so it's always dated into the SAME period as the purchase
+  // it's reversing — never a stray negative number landing in some unrelated period.
   await client.query(
-    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-     VALUES ($1, $2, $3, $4, $5, 'adjust', 'Voided scan', $6, NOW())`,
+    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, origin, created_at)
+     VALUES ($1, $2, $3, $4, $5, 'adjust', 'Voided scan', $6, 'void', NOW())`,
     [barcode, productId, plant, -totalQty, -extraQty, sessionId],
   );
 }

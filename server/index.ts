@@ -779,6 +779,23 @@ app.use((req, res, next) => {
     setInterval(() => { void runAutoScanHistorySync(); }, SCAN_HISTORY_SYNC_INTERVAL_MS);
     // Kick one off shortly after boot so it doesn't wait a full interval.
     setTimeout(() => { void runAutoScanHistorySync(); }, 15 * 1000);
+
+    // Auto-sync Vehicle Planning's local order history from Notion once a day — the page itself
+    // only ever reads the local vehicle_planning_state table, so this (plus the manual "Sync from
+    // Notion" button) is the only thing that keeps it from going stale. Skips a tick if the
+    // previous run is still going — see runVehiclePlanningSync.
+    const { runVehiclePlanningSync } = await import('./routes/vehicle-planning');
+    const VEHICLE_PLANNING_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    // .catch() here is load-bearing, not decoration: this runs completely unattended (a timer,
+    // not a request with its own try/catch), so an unhandled rejection from inside the sync
+    // doesn't just fail that one run — it crashes the ENTIRE server. This is exactly what
+    // happened once already (an unbounded Promise.all exhausted the connection pool, timed out,
+    // and took the whole process down with it — see mapWithConcurrency's own comment for the fix
+    // to that specific cause). This catch is the backstop for any OTHER failure mode, now or later.
+    const logVehiclePlanningSyncFailure = (err: unknown) => console.error('[Vehicle Planning] Scheduled sync failed:', err);
+    setInterval(() => { runVehiclePlanningSync().catch(logVehiclePlanningSyncFailure); }, VEHICLE_PLANNING_SYNC_INTERVAL_MS);
+    // Kick one off shortly after boot so the page isn't empty until the first daily tick.
+    setTimeout(() => { runVehiclePlanningSync().catch(logVehiclePlanningSyncFailure); }, 20 * 1000);
   } catch (error) {
     console.error('Error running migrations:', error);
   }

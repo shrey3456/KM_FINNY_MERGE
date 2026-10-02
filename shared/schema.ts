@@ -1054,6 +1054,57 @@ export type VehicleInfo = typeof vehicleInfo.$inferSelect;
 export type InsertVehicleInfo = z.infer<typeof insertVehicleInfoSchema>;
 
 // ============================================================================
+// VEHICLE PLANNING
+// Purpose : Local, synced copy of each vehicle's order history, so the Vehicle
+//           Planning page (/vehicle-planning) reads from here on every normal
+//           load instead of hitting Notion live. "Sync from Notion" (manual
+//           button + a 24h automatic timer) is the only thing that refreshes
+//           this table; proforma_slips is linked in by order number as a bonus
+//           enrichment source (party/plant/state), never as the source of
+//           truth for which order is current.
+// Used by : server/routes/vehicle-planning.ts, client VehiclePlanning.tsx.
+// ============================================================================
+
+export type VehiclePlanningOrderEntry = {
+  orderNumber: string;
+  proformaSlipId: number | null;
+  orderDate: string | null;
+  status: string | null;
+  driver: string | null;
+  tripCompletesOn: string | null;
+  tripDays: string | null;
+  partyName: string | null;
+  plant: string | null;
+  state: string | null;
+  vehicleMismatch: boolean;
+  mismatchProformaVehicleNumber: string | null;
+  // The real date a sync FIRST observed this order's status go terminal (DISPATCHED/DELIVERED/
+  // etc) — distinct from tripCompletesOn, which is Notion's own formula ESTIMATE of when the
+  // trip would be free. Set once, on the sync that first sees it terminal, and never overwritten
+  // afterward, so it stays "when did this actually finish" rather than drifting with every sync.
+  actualCompletedAt: string | null;
+};
+
+export const vehiclePlanningState = pgTable("vehicle_planning_state", {
+  id: serial("id").primaryKey(),
+  vehicleId: integer("vehicle_id").references(() => vehicleInfo.id).notNull().unique(),
+  orderHistory: jsonb("order_history").$type<VehiclePlanningOrderEntry[]>().notNull().default([]),
+  lastSyncedAt: timestamp("last_synced_at"),
+});
+
+export type VehiclePlanningStateRow = typeof vehiclePlanningState.$inferSelect;
+
+// Single-row settings table — which company names (substring match, same style as Loading's own
+// vehicle picker) Vehicle Planning currently cares about. Read by both the manual Sync button and
+// the unattended 24h timer, so this has to be a real row, not client-only state.
+export const vehiclePlanningSettings = pgTable("vehicle_planning_settings", {
+  id: serial("id").primaryKey(),
+  companyFilters: jsonb("company_filters").$type<string[]>().notNull().default(['krupa', 'transport']),
+});
+
+export type VehiclePlanningSettingsRow = typeof vehiclePlanningSettings.$inferSelect;
+
+// ============================================================================
 // MESSAGES  (Internal Messaging / Broadcasts)
 // Purpose : In-app messaging between employees. Supports direct messages
 //           and broadcasts to all users, a specific designation, or a

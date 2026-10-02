@@ -1441,9 +1441,12 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
         `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
         [qty, event.barcode, event.plant],
       );
+      // origin = 'void' — same reasoning as Order Scan's own void (see reverseLiveScanStock in
+      // server/lib/orderGroupReport.ts): lets Overall Stock fold this back into Purchase instead
+      // of Adjust, always in the same period as the receive it's reversing (same session_id).
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, origin)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading','void')`,
         [event.barcode, product?.id ?? null, event.plant, -qty, reason ?? 'Unloading scan voided', event.session_id, userCode ?? null],
       );
     }

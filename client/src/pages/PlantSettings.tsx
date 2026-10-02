@@ -631,7 +631,10 @@ export default function PlantSettings() {
         >
           <div className="flex items-center gap-1.5">
             {expandedPlantId === p.id ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            <span>View Dispatch Directories</span>
+            {/* Just "View" — the column header already says "Dispatch Directories"; the full
+                phrase repeated in every cell was wider than this column, and with no overflow
+                clipping on the shared table before now, it bled visibly into the next column. */}
+            <span>View</span>
           </div>
         </Button>
       ),

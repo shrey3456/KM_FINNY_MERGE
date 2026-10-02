@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileText,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronLeft, ChevronRight, Download, FileText,
   Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
@@ -400,7 +400,10 @@ export default function LoadOperation() {
   const debouncedListSearch = useDebounced(listSearch, 300);
   // Stored as an ISO string, not a Date: JSON round-tripping a Date yields a string back, so
   // persisting the Date itself would silently hand the rest of this page a non-Date.
-  const [selectedDateIso, setSelectedDateIso] = usePersistentFilter<string | null>("loading:listDate", null);
+  // Defaults to today, not "all dates" — usePersistentFilter only ever applies this initial
+  // value on a fresh session with nothing saved yet, so it never overwrites a date someone
+  // already picked.
+  const [selectedDateIso, setSelectedDateIso] = usePersistentFilter<string | null>("loading:listDate", new Date().toISOString());
   const selectedDate = selectedDateIso ? new Date(selectedDateIso) : null;
   const setSelectedDate = (d: Date | null) => setSelectedDateIso(d ? d.toISOString() : null);
   // This top calendar filter matches the proforma slip's own Order Date (ps.order_date), not
@@ -412,8 +415,13 @@ export default function LoadOperation() {
     : "";
   const [selectedPlants, setSelectedPlants] = usePersistentFilter<string[]>("loading:listPlants", []);
   const [activeViewTab, setActiveViewTab] = usePersistentFilter("loading:listTab", "overall");
-  const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate">("loading:listSortBy", "creationDate");
-  const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "desc");
+  // "My Slips" — one-click filter to just the slips the current user created (link-vehicle's own
+  // created_by_code), applied server-side (see /api/loading/records) same as every other filter
+  // here. Clicking it also switches the sort to newest-created-first, since that's the point of
+  // the button — see each button's own onClick below.
+  const [createdByMe, setCreatedByMe] = usePersistentFilter("loading:listCreatedByMe", false);
+  const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate">("loading:listSortBy", "orderNumber");
+  const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "asc");
   // Excel-style column filters for the landing list (see recordFilterColumns below).
   const [recordColumnConditions, setRecordColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("loading:columnFilters", {});
 
@@ -446,13 +454,14 @@ export default function LoadOperation() {
     }
   }, [recordsFilterSignature]);
   const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; slipsCount: number; loadingCount: number; readyDespCount: number }>({
-    queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab],
+    queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab, createdByMe],
     queryFn: async () => {
       const params = new URLSearchParams({ limit: String(recordsPageSize), offset: String(recordsOffset) });
       if (selectedDateParam) params.set("date", selectedDateParam);
       if (debouncedListSearch.trim()) params.set("search", debouncedListSearch.trim());
       if (selectedPlants.length > 0) params.set("plants", selectedPlants.join(","));
       if (activeViewTab !== "overall") params.set("tab", activeViewTab);
+      if (createdByMe) params.set("createdBy", "me");
       return (await apiRequest("GET", `/api/loading/records?${params.toString()}`)).json();
     },
     enabled: view === "list",
@@ -581,6 +590,12 @@ export default function LoadOperation() {
     onError: (err: any) => toast({ title: "Reopen failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
+  // Reopen and Claim used to fire straight from the button click — a confirmation dialog for
+  // each, same Dialog/target pattern Reset already uses, so an accidental tap can't undo a
+  // completed load or take ownership away from whoever currently has it.
+  const [reopenTarget, setReopenTarget] = useState<string | null>(null);
+  const [claimTarget, setClaimTarget] = useState<string | null>(null);
+
   const [resetTarget, setResetTarget] = useState<LoadingRecord | null>(null);
   // mode "void" keeps the scan entries (marked Voided); "remove" deletes them for good. Both return
   // the stock and put the slip back to its status from before Create Operation.
@@ -669,11 +684,18 @@ export default function LoadOperation() {
   // routes/loading.ts) — distinct from slip.totalVolume (the order's full planned volume) and
   // slip.vehicleVolume (the vehicle's capacity).
   const [loadedVolume, setLoadedVolume] = useState(0);
-  // Owner history / Sort loader history — a tab switch between the two (only one showing at a
-  // time), collapsed by default (null) since neither is something you need to see every time
-  // you open a load; a click on either tab reveals it instead of both always taking up their
-  // own banner row.
-  const [historyTab, setHistoryTab] = useState<"owner" | "sort" | null>(null);
+  // Total | Scanner | Owner History | Sort History — one shared tab, only one panel visible at
+  // a time (merged from what used to be two independent toggles: totalsScanTab for the first
+  // two, a separate historyTab for the last two — picking one used to leave the other group's
+  // panel sitting open too). Defaults to "scanner", the main work surface; re-clicking the
+  // active Owner/Sort History button falls back to "scanner" rather than to a "nothing open"
+  // state, since Total/Scanner never had one either.
+  const [activeTab, setActiveTab] = useState<"total" | "scanner" | "owner" | "sort">("scanner");
+  // One compact visual system for every work-area tab: Total, Scanner and both history views.
+  const workTabClass = (active: boolean) =>
+    active
+      ? "inline-flex items-center gap-1 rounded-full bg-[#001d6e] px-2.5 py-1 text-[11px] font-semibold text-white ring-1 ring-[#001d6e]/30"
+      : "inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50";
 
   // "Items on this order" table — click a row to expand it and see that item's own scan history.
   // Fetched once for the whole order (same endpoint the Loading landing table's own expand panel
@@ -720,6 +742,9 @@ export default function LoadOperation() {
   // flips units on a quarter turn, since that turns the subtree 90° (content-space height then
   // runs along the viewport's WIDTH, not its height).
   const kioskTableMaxHeight = bigView ? (quarterTurn ? "62vw" : "62vh") : "65vh";
+  // With an order open, the summary is fixed and the items grid owns the remaining viewport.
+  // This keeps a long item list from scrolling the summary out of view.
+  const openSlipTableMaxHeight = bigView ? kioskTableMaxHeight : "calc(100vh - 25rem)";
   // Reports this page's rotation to Layout so every popup it opens — dialogs, dropdowns, filter
   // popovers, calendars — turns to match (see lib/portalRotation). Reset on unmount so the next
   // page doesn't inherit a stale turn.
@@ -733,12 +758,6 @@ export default function LoadOperation() {
   // box below it as well.
   const [vehiclePanelOpen, setVehiclePanelOpen] = useState(false);
 
-  // Totals and Scan Items used to sit side by side in a draggable split; now a tab switch
-  // instead — one visible at a time, same row. The Scan Items card stays mounted underneath
-  // (see canScanThisLoad below) even while this says "total", just visually hidden, so the
-  // barcode-gun listener's refocus-after-scan and the camera stream aren't torn down every time
-  // the operator glances at totals.
-  const [totalsScanTab, setTotalsScanTab] = useState<"total" | "scanner">("scanner");
   const orderLoadHistoryQuery = useQuery<{ items: LoadHistoryEvent[] }>({
     queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", slip?.orderNumber],
     queryFn: async () =>
@@ -946,6 +965,18 @@ export default function LoadOperation() {
     },
     onError: (err: any) => toast({ title: "Could not start load", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
+
+  // Every slip the current user owns that's still LOADING — the tab strip lets them switch
+  // straight to one without going back to the list first. Only matters while an order is open
+  // (and only once there's more than one to switch between — a single tab buys nothing), and
+  // polls on the same 15s cadence the open order's own live-stock refresh already uses.
+  const activeSlipsQuery = useQuery<{ slips: Array<{ orderNumber: string; vehicleNumber: string | null; partyName: string | null; plant: string | null }> }>({
+    queryKey: ["/api/loading/my-active-slips"],
+    queryFn: async () => (await apiRequest("GET", "/api/loading/my-active-slips")).json(),
+    enabled: view === "create" && !!slip,
+    refetchInterval: view === "create" ? 15_000 : false,
+  });
+  const activeSlips = activeSlipsQuery.data?.slips ?? [];
 
   function openOrder(orderNumber: string, opts?: { silent?: boolean; confirm?: boolean }) {
     if (!orderNumber.trim()) return;
@@ -2313,8 +2344,8 @@ export default function LoadOperation() {
   // own wrapper is a container-fluid, which is a no-op here) — kept inside this page's scroll
   // container so the app shell still scrolls it the same way.
   return (
-    <div className="flex-1 overflow-y-auto px-2 pt-1 pb-4">
-      <div className="w-full space-y-6">
+    <div className={`flex-1 px-2 pt-1 pb-4 ${view === "create" ? "overflow-hidden" : "overflow-y-auto"}`}>
+      <div className={`w-full ${view === "create" ? "h-full" : "space-y-6"}`}>
         {/* ── Landing view — mirrors Load Operations' layout exactly: full-width search, a
              filter row (date + plant + status counters), status tabs, then a desktop table with
              a mobile card list below it. Same kiosk-rotate treatment the scan view has, so a
@@ -2339,6 +2370,14 @@ export default function LoadOperation() {
               iconClassName="h-5 w-5 fill-[#4d7eff]"
               title="Load Operations"
               description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
+              actions={canWrite && (
+                <Button
+                  className="h-10 shrink-0 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
+                  onClick={openOrderSearch}
+                >
+                  <Plus className="mr-1.5 h-4 w-4" /> Load Operation
+                </Button>
+              )}
             />
             {canWrite && (
               // A popup, not an inline card — this page is opened for the records table, and the
@@ -2540,6 +2579,25 @@ export default function LoadOperation() {
                 plantOptions={plantOptions}
               />
 
+              <Select
+                value={`${sortBy}:${sortOrder}`}
+                onValueChange={(value) => {
+                  const [column, direction] = value.split(":") as ["orderNumber" | "creationDate", "asc" | "desc"];
+                  setSortBy(column);
+                  setSortOrder(direction);
+                }}
+              >
+                <SelectTrigger className="h-9 w-[180px] text-xs" aria-label="Sort loading slips">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="orderNumber:asc">Order No. — Ascending</SelectItem>
+                  <SelectItem value="orderNumber:desc">Order No. — Descending</SelectItem>
+                  <SelectItem value="creationDate:asc">Load Date — Ascending</SelectItem>
+                  <SelectItem value="creationDate:desc">Load Date — Descending</SelectItem>
+                </SelectContent>
+              </Select>
+
               <AddColumnFilterButton
                 columns={recordFilterColumns}
                 conditions={recordColumnConditions}
@@ -2566,7 +2624,7 @@ export default function LoadOperation() {
                 </Button>
               )}
 
-              <div className="grid shrink-0 grid-cols-3 gap-2">
+              <div className="grid shrink-0 grid-cols-4 gap-2">
                 <Button
                   variant="outline"
                   size="sm"
@@ -2603,16 +2661,25 @@ export default function LoadOperation() {
                     <span className="text-sm font-semibold">{readyDespCount}</span>
                   </div>
                 </Button>
-              </div>
-
-              {canWrite && (
+                {/* One click: only the slips THIS user created (link-vehicle's created_by_code),
+                    newest first — toggles off back to everyone's, same sort/filter either way. */}
                 <Button
-                  className="h-10 shrink-0 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
-                  onClick={openOrderSearch}
+                  variant="outline"
+                  size="sm"
+                  className={`h-auto min-w-0 justify-start px-2 py-1.5 sm:px-3 ${createdByMe ? "bg-emerald-100 hover:bg-emerald-200" : "bg-emerald-50 hover:bg-emerald-100"}`}
+                  onClick={() => {
+                    setCreatedByMe((p) => !p);
+                    setSortBy("creationDate");
+                    setSortOrder("desc");
+                  }}
                 >
-                  <Plus className="mr-1.5 h-4 w-4" /> Load Operation
+                  <UserCircle2 className="mr-1.5 h-4 w-4 shrink-0 text-emerald-700 sm:mr-2" />
+                  <div className="flex flex-col items-start">
+                    <span className="whitespace-nowrap text-xs font-bold">MY SLIPS</span>
+                    <span className="text-sm font-semibold">{createdByMe ? "On" : "Off"}</span>
+                  </div>
                 </Button>
-              )}
+              </div>
             </div>
 
             {/* Navigation Tabs (hidden on mobile) */}
@@ -2678,15 +2745,10 @@ export default function LoadOperation() {
                       {/* Same navy/white uppercase header every other table on the site uses,
                           instead of the plain shadcn default (muted-gray text on white) — makes
                           the header read as a header rather than blending into the rows. */}
-                      <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
+                      <TableRow className="border-b border-white/20 bg-[#001d6e] hover:bg-[#001d6e]">
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">{recordColumnHeader("orderDate", "Order Date")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="When this load operation was started">{recordColumnHeader("loadDate", "Load Date")}</TableHead>
-                        <TableHead
-                          className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
-                          onClick={() => { setSortBy("orderNumber"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
-                        >
-                          {recordColumnHeader("orderNumber", "Order Number")} {sortBy === "orderNumber" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
-                        </TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("orderNumber", "Order Number")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("party", "Party Name")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("plant", "Plant")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>
@@ -2695,12 +2757,7 @@ export default function LoadOperation() {
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>
-                        <TableHead
-                          className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-white"
-                          onClick={() => { setSortBy("creationDate"); setSortOrder((p) => (p === "asc" ? "desc" : "asc")); }}
-                        >
-                          {recordColumnHeader("creator", "Creator")} {sortBy === "creationDate" && (sortOrder === "asc" ? <ChevronUp className="inline h-4 w-4" /> : <ChevronDown className="inline h-4 w-4" />)}
-                        </TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("creator", "Creator")}</TableHead>
                         <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -2749,7 +2806,7 @@ export default function LoadOperation() {
                                         size="sm"
                                         className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
                                         disabled={claimLoadMutation.isPending}
-                                        onClick={() => claimLoadMutation.mutate(r.orderNumber)}
+                                        onClick={() => setClaimTarget(r.orderNumber)}
                                       >
                                         Claim
                                       </Button>
@@ -2805,7 +2862,7 @@ export default function LoadOperation() {
                                       className="h-9 w-9 rounded-full bg-amber-50 hover:bg-amber-100"
                                       disabled={reopenMutation.isPending}
                                       title="Reopen this load"
-                                      onClick={() => reopenMutation.mutate(r.orderNumber)}
+                                      onClick={() => setReopenTarget(r.orderNumber)}
                                     >
                                       <RotateCcw className="h-5 w-5 text-amber-600" />
                                     </Button>
@@ -2886,7 +2943,7 @@ export default function LoadOperation() {
                                 className="h-9 w-9 p-0 rounded-full bg-amber-50 hover:bg-amber-100"
                                 disabled={reopenMutation.isPending}
                                 title="Reopen this load"
-                                onClick={(e) => { e.stopPropagation(); reopenMutation.mutate(r.orderNumber); }}
+                                onClick={(e) => { e.stopPropagation(); setReopenTarget(r.orderNumber); }}
                               >
                                 <RotateCcw className="h-4 w-4 text-amber-600" />
                               </Button>
@@ -3001,6 +3058,32 @@ export default function LoadOperation() {
           </div>
         )}
 
+
+        {/* Tab strip — switch directly between several slips you currently own (nobody's
+            restricted to just one active load at a time — see the ownership checks elsewhere in
+            this file, which are all scoped per-order). Only shown once there's more than one to
+            switch between; clicking a different tab reuses the same open-from-list path the
+            landing list itself uses, so there's no second code path to keep in sync. */}
+        {view === "create" && slip && activeSlips.length > 1 && (
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-100 pb-2">
+            {activeSlips.map((s) => {
+              const active = s.orderNumber === slip.orderNumber;
+              return (
+                <button
+                  key={s.orderNumber}
+                  type="button"
+                  onClick={() => { if (!active) openOrderFromList(s.orderNumber); }}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    active ? "bg-[#001d6e] text-white" : "border border-gray-200 text-gray-600 hover:bg-gray-50"
+                  }`}
+                  title={`${s.partyName ?? ""}${s.vehicleNumber ? ` — ${s.vehicleNumber}` : ""}`}
+                >
+                  #{s.orderNumber}{s.vehicleNumber ? ` · ${s.vehicleNumber}` : ""}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* ── Stage B(pre): order found, vehicle not yet CLAIMED — pick one in a dialog, then
             "Create Load Slip" before the actual load page (Stage B below) ever mounts. Gated on
@@ -3168,7 +3251,7 @@ export default function LoadOperation() {
             "no vehicle yet" placeholder that used to sit here is gone; this page simply doesn't
             mount until then. ──────────────────────────────────────────────────────────────── */}
         {view === "create" && slip && isVehicleClaimed && (
-          <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+          <div className={`flex h-full min-h-0 flex-col gap-3 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
               {/* Kiosk rotate — same floating button Order Scan/Unloading use, for a screen
                   physically mounted at an angle next to the loading bay. Fixed positioning
                   inside the (transform:rotate) wrapper above keeps it pinned to a natural
@@ -3185,7 +3268,11 @@ export default function LoadOperation() {
                   positioned and needs to be able to render past this card's edge; clipping it
                   made the suggestions invisible even though the search itself worked fine.
                   rounded-t-xl on the header strip below keeps the top corners clean without it. */}
-              <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+              {/* Sticky — stays pinned at the top of the scroll while the items table below it
+                  scrolls underneath, instead of scrolling away with everything else. z-20 keeps
+                  it above the items table's own sticky column header (itself sticky within the
+                  table's own scroll box). */}
+              <div className="sticky top-0 z-30 shrink-0 rounded-xl border border-gray-200 bg-white shadow-md">
                 {/* xl (not sm) is deliberate here — this switches to a side-by-side row only once
                     there's real room for both the identity badges AND the action buttons.
                     min-w-0 below (on the identity block) plus shrink-0 (on the actions) means
@@ -3198,22 +3285,27 @@ export default function LoadOperation() {
                     regardless of xl — xl: is a raw-window-width query, so a rotated kiosk on a
                     genuinely wide monitor would otherwise still pass it and get squeezed into
                     the side-by-side row despite its real (rotated) width being narrow. */}
-                <div className={`flex flex-col gap-2 px-3 sm:px-4 py-2 border-b border-gray-100 bg-[#001d6e]/5 rounded-t-xl ${bigView ? "" : "xl:flex-row xl:items-center xl:justify-between"}`}>
+                <div className={`flex flex-col gap-1 px-2.5 sm:px-3 py-1.5 border-b border-gray-100 bg-[#001d6e]/5 rounded-t-xl ${bigView ? "" : "xl:flex-row xl:items-center xl:justify-between"}`}>
                   {/* Slip identity — order#/party on one line, then plant (Plant Management's own
                       color, same PlantBadge every other page uses), date, volume and the linked
                       vehicle as a proper row of badges/text underneath, sized to actually be
                       readable at a glance instead of one tiny catch-all line. */}
                   <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                      <span className="text-base font-bold text-[#001d6e] truncate">#{slip.orderNumber}</span>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span className="text-sm font-bold text-[#001d6e] truncate">#{slip.orderNumber}</span>
                       <span className="text-sm text-gray-600 truncate">{slip.partyName}</span>
+                      {slip.plant && <PlantBadge plant={slip.plant} className="text-[10px]" />}
+                      <span className="ml-auto flex shrink-0 flex-wrap items-center gap-x-2 text-[11px]">
+                        {slip.orderDate && <span className="font-semibold text-gray-700">Order: {new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</span>}
+                        {slip.loadDate && <span className="font-semibold text-gray-500">Load: {new Date(slip.loadDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</span>}
+                      </span>
                     </div>
                     {/* text-xs (not text-sm) and a tighter gap here — this row can easily be
                         6-7 badges deep (plant, dates, item/qty counts, two volume pills, the
                         vehicle) and at text-sm each one claimed close to its own line on a phone,
                         which is most of what was pushing this card's height out. */}
                     <div className="flex flex-wrap items-center gap-1.5">
-                      {slip.plant && <PlantBadge plant={slip.plant} />}
+                      <div className="hidden">
                       {slip.orderDate && (
                         <span className="text-xs font-semibold text-gray-700" title="Order date — the proforma slip's own date">
                           Ord {new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
@@ -3224,6 +3316,7 @@ export default function LoadOperation() {
                           Load {new Date(slip.loadDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
                         </span>
                       )}
+                      </div>
                       <span className="text-xs text-gray-400">{items.length} item{items.length === 1 ? "" : "s"}</span>
                       <span className="text-xs text-gray-400">Qty {slip.totalQuantity ?? "—"}</span>
                       {/* Loaded volume vs. the order's own required volume — same figure the
@@ -3311,10 +3404,10 @@ export default function LoadOperation() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-7 rounded-full px-3 text-xs"
+                        className="h-6 rounded-full px-2 text-[11px]"
                         onClick={() => setVehiclePanelOpen((v) => !v)}
                       >
-                        <Truck className="mr-1.5 h-3.5 w-3.5" /> Change Vehicle
+                        <Truck className="mr-1 h-3 w-3" /> Vehicle
                       </Button>
                     )}
                     {canComplete && !locked && (
@@ -3349,7 +3442,7 @@ export default function LoadOperation() {
                         size="sm"
                         className="h-7 rounded-full bg-amber-500 px-3 text-xs text-white hover:bg-amber-600"
                         disabled={claimLoadMutation.isPending}
-                        onClick={() => claimLoadMutation.mutate(slip.orderNumber)}
+                        onClick={() => setClaimTarget(slip.orderNumber)}
                       >
                         {claimLoadMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                         Claim
@@ -3384,78 +3477,11 @@ export default function LoadOperation() {
                     <span className="text-xs text-amber-800">
                       Paused by {slip.loadingOwnerName ?? slip.loadingOwnerCode ?? "someone"} — claim it to keep scanning.
                     </span>
-                    {canWrite && (
-                      <Button
-                        size="sm"
-                        className="h-6 rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
-                        disabled={claimLoadMutation.isPending}
-                        onClick={() => claimLoadMutation.mutate(slip.orderNumber)}
-                      >
-                        Claim
-                      </Button>
-                    )}
                   </div>
                 )}
                 {!locked && !isLoadPaused && !isLoadOwner && !canBypassOwnership && (
                   <div className="px-4 sm:px-5 py-1.5 border-b border-gray-100 text-xs text-gray-500">
                     Owned by {slip.loadingOwnerName ?? slip.loadingOwnerCode} — you can view this but can't scan until they pause it.
-                  </div>
-                )}
-
-                {/* Owner history / Sort loader history — a tab switch between the two instead of
-                    two independent collapsible banners. "Owner": every user who's ever held this
-                    load, oldest first, with how much each one loaded — display only, access
-                    control never reads this (see checkLoadOwnership/checkLoadViewAccess).
-                    "Sort": the Sort Slip side of this order, who picked it and how much while
-                    sorting rather than loading. Either tab button is omitted when its own history
-                    has nothing to show (e.g. an order loaded without ever being sorted), and the
-                    whole row disappears if neither does. Collapsed by default (historyTab===null)
-                    — clicking a tab reveals it instead of it always taking up a banner row;
-                    clicking the active tab again collapses it. */}
-                {((loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 ||
-                  (sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0)) && (
-                  <div className="px-4 sm:px-5 py-2 border-b border-gray-100">
-                    <div className="flex items-center gap-2">
-                      {(loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => setHistoryTab((t) => (t === "owner" ? null : "owner"))}
-                          className={
-                            historyTab === "owner"
-                              ? "inline-flex items-center gap-1.5 rounded-full bg-[#001d6e] px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
-                              : "inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                          }
-                        >
-                          <UserCircle2 className="h-3.5 w-3.5" /> Owner History
-                        </button>
-                      )}
-                      {sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => setHistoryTab((t) => (t === "sort" ? null : "sort"))}
-                          className={
-                            historyTab === "sort"
-                              ? "inline-flex items-center gap-1.5 rounded-full bg-[#001d6e] px-3 py-1 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
-                              : "inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                          }
-                        >
-                          <ClipboardList className="h-3.5 w-3.5" /> Sort History
-                          <span className={historyTab === "sort" ? "text-white/70" : "text-gray-400"}>
-                            ({sortLoaderHistoryQuery.data.pickedQty ?? 0}/{sortLoaderHistoryQuery.data.totalQty ?? 0})
-                          </span>
-                        </button>
-                      )}
-                    </div>
-                    {historyTab === "owner" && (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
-                      <div className="mt-2 border rounded-md overflow-hidden bg-white">
-                        <OwnerTimelineSummary timeline={loadHandoffsQuery.data!.timeline} />
-                      </div>
-                    )}
-                    {historyTab === "sort" && (
-                      <div className="mt-2 border rounded-md overflow-hidden bg-white">
-                        <SortLoaderTimelineSummary timeline={sortLoaderHistoryQuery.data?.timeline ?? []} />
-                      </div>
-                    )}
                   </div>
                 )}
 
@@ -3548,58 +3574,106 @@ export default function LoadOperation() {
                     )}
                   </div>
                 )}
-              </div>
 
-          {/* Total | Scanner — a tab switch instead of the two cards stacked, so glancing at
-              totals doesn't push the barcode input off-screen. Only one panel visible at a
-              time; Scan Items stays mounted underneath while "Total" is active (hidden via
-              class, not unmounted) so the barcode-gun listener's refocus-after-scan and the
-              camera stream survive a tab switch. */}
-          <div className="space-y-3">
-            {canScanThisLoad && (
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setTotalsScanTab("total")}
-                  className={
-                    totalsScanTab === "total"
-                      ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
-                      : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                  }
-                >
-                  Total
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTotalsScanTab("scanner")}
-                  className={
-                    totalsScanTab === "scanner"
-                      ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
-                      : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
-                  }
-                >
-                  Scanner
-                </button>
+          {/* Total | Scanner | Owner History | Sort History — one merged row (used to be two
+              separate ones, stacked), now also part of the SAME card as the vehicle/progress
+              header above instead of a separate block underneath it — border-t marks where the
+              header ends, same divider convention every other internal row of this card already
+              uses. Total/Scanner is a tab switch instead of the two cards
+              stacked, so glancing at totals doesn't push the barcode input off-screen; Scan Items
+              stays mounted underneath while "Total" is active (hidden via class, not unmounted)
+              so the barcode-gun listener's refocus-after-scan and the camera stream survive a tab
+              switch. Owner/Sort History are independent toggles, not part of that same tab group
+              — "Owner": every user who's ever held this load, oldest first, with how much each
+              one loaded — display only, access control never reads this (see
+              checkLoadOwnership/checkLoadViewAccess). "Sort": the Sort Slip side of this order,
+              who picked it and how much while sorting rather than loading. Each group (Total/
+              Scanner/Add Extra needs canScanThisLoad; Owner/Sort History need their own history
+              to actually exist) only renders when it has something to show, and the whole row
+              disappears if none of them do. */}
+          <div className="space-y-2 border-t border-gray-100 px-3 sm:px-4 py-2">
+            {(canScanThisLoad
+              || (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0
+              || (sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0)) && (
+              <div className="flex flex-wrap items-center gap-2">
+                {canScanThisLoad && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("total")}
+                      className={workTabClass(activeTab === "total")}
+                    >
+                      Total
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("scanner")}
+                      className={workTabClass(activeTab === "scanner")}
+                    >
+                      Scanner
+                    </button>
+                  </>
+                )}
+                {(loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab((t) => (t === "owner" ? "scanner" : "owner"))}
+                    className={workTabClass(activeTab === "owner")}
+                  >
+                    <UserCircle2 className="h-3.5 w-3.5" /> Owner History
+                  </button>
+                )}
+                {sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab((t) => (t === "sort" ? "scanner" : "sort"))}
+                    className={workTabClass(activeTab === "sort")}
+                  >
+                    <ClipboardList className="h-3.5 w-3.5" /> Sort History
+                    <span className={activeTab === "sort" ? "text-white/70" : "text-gray-400"}>
+                      ({sortLoaderHistoryQuery.data.pickedQty ?? 0}/{sortLoaderHistoryQuery.data.totalQty ?? 0})
+                    </span>
+                  </button>
+                )}
                 {/* Moved here (next to Total/Scanner, not buried inside the Scanner-only panel)
                     so it stays reachable from the Total tab too, not just Scanner — deliberately
-                    loud/solid, not an outline pill like Total/Scanner, since it opens the
-                    dedicated Add Extra popup, the ONLY way to log an item not on this slip or
-                    more than what's remaining. */}
-                <button
-                  type="button"
-                  onClick={() => setExtraDialogOpen(true)}
-                  title="Add an item not on this slip, or more than what's remaining"
-                  className="ml-auto flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500 px-3.5 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
-                >
-                  <PackagePlus className="h-3.5 w-3.5" /> Add Extra
-                </button>
+                    loud/solid, not an outline pill like the others, since it opens the dedicated
+                    Add Extra popup, the ONLY way to log an item not on this slip or more than
+                    what's remaining. */}
+                {canScanThisLoad && (
+                  <button
+                    type="button"
+                    onClick={() => setExtraDialogOpen(true)}
+                    title="Add an item not on this slip, or more than what's remaining"
+                    className="ml-auto flex shrink-0 items-center gap-1 rounded-full bg-amber-500 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
+                  >
+                    <PackagePlus className="h-3.5 w-3.5" /> Add Extra
+                  </button>
+                )}
               </div>
             )}
 
-            <div className={canScanThisLoad && totalsScanTab !== "total" ? "hidden" : ""}>
-              <div className="flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm">
+            {activeTab === "owner" && (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
+              <div className="border rounded-md overflow-hidden bg-white">
+                <OwnerTimelineSummary timeline={loadHandoffsQuery.data!.timeline} />
+              </div>
+            )}
+            {activeTab === "sort" && (
+              <div className="border rounded-md overflow-hidden bg-white">
+                <SortLoaderTimelineSummary timeline={sortLoaderHistoryQuery.data?.timeline ?? []} />
+              </div>
+            )}
+
+            {/* Read-only viewers have no Total/Scanner buttons at all (canScanThisLoad is
+                false), so Totals is their default view too — shown unless they've switched to
+                Owner/Sort History, which they CAN still reach. */}
+            <div className={
+              activeTab === "total" || (!canScanThisLoad && activeTab !== "owner" && activeTab !== "sort")
+                ? "" : "hidden"
+            }>
+              <div className="flex min-w-0 flex-col gap-1 rounded-xl border bg-white p-1.5 shadow-sm">
                 <div className="flex items-baseline justify-between">
-                  <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">Load Totals</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Load Totals</p>
                   {itemTotals.expected <= 0 ? (
                     <p className="text-sm font-medium text-gray-400">—</p>
                   ) : itemPct >= 100 ? (
@@ -3613,7 +3687,7 @@ export default function LoadOperation() {
                 {/* Always 4 columns, even on the narrowest phone — was grid-cols-2 below sm
                     (wrapping to 2 rows); text/padding/gap now scale down with a sm: step
                     instead of the column count changing, so all four stay in one row. */}
-                <div className="grid grid-cols-4 gap-1 sm:gap-2">
+                <div className="grid grid-cols-4 gap-1">
                   {([
                     { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
                     { key: "done" as const, label: "Loaded", value: itemTotals.loaded, plt: itemTotals.pltLoaded, dot: "bg-emerald-500", text: "text-emerald-600" },
@@ -3628,7 +3702,7 @@ export default function LoadOperation() {
                         onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
                         aria-pressed={isActive}
                         title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                        className={`min-w-0 rounded-xl border px-1 py-1 text-center transition-colors sm:px-2.5 ${
+                        className={`min-w-0 rounded-xl border px-1 py-0.5 text-center transition-colors sm:px-2 ${
                           isActive ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30" : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
                         }`}
                       >
@@ -3636,14 +3710,14 @@ export default function LoadOperation() {
                           <span className={`h-1.5 w-1.5 shrink-0 rounded-full sm:h-2 sm:w-2 ${s.dot}`} />
                           <p className="truncate text-[9px] font-semibold uppercase tracking-wide text-gray-500 sm:text-xs">{s.label}</p>
                         </div>
-                        <p className={`text-base font-bold leading-tight sm:text-2xl ${s.text}`}>{s.value}</p>
-                        <p className={`text-xs font-bold sm:text-lg ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                        <p className={`text-base font-bold leading-tight sm:text-xl ${s.text}`}>{s.value}</p>
+                        <p className={`text-[11px] font-bold sm:text-sm ${s.text}`}>{s.plt.toFixed(2)} plt</p>
                       </button>
                     );
                   })}
                 </div>
                 <div className="space-y-1">
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
                     <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${itemPct}%` }} />
                   </div>
                   <div className="flex justify-between text-[10px] font-medium text-gray-400">
@@ -3658,7 +3732,7 @@ export default function LoadOperation() {
                 ever mounts (see Stage B(pre) above), so there's no "not linked yet" case to
                 guard here anymore. Same Camera/Manual pattern as order search. */}
             {canScanThisLoad && (
-              <div className={totalsScanTab !== "scanner" ? "hidden" : ""}>
+              <div className={activeTab !== "scanner" ? "hidden" : ""}>
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                   <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
@@ -3726,9 +3800,14 @@ export default function LoadOperation() {
               </div>
             )}
           </div>
+          {/* Closes the header card opened above (vehicle/progress identity row) — now one
+              continuous block through the Total/Scanner/Owner/Sort row, instead of ending right
+              after the identity row and starting a new, separately-bordered block for the tabs.
+              The items table below stays its own separate card. */}
+          </div>
 
           {/* Items table with live load progress — full width below the totals/scanner row. */}
-          <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+          <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
               <div className="flex flex-wrap items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                 <Package className="h-4 w-4 text-[#001d6e]" />
                 <span className="text-sm font-semibold text-gray-900">Items on this order</span>
@@ -3782,6 +3861,7 @@ export default function LoadOperation() {
                   once, since its own overflow-x-auto keeps that contained to the table, never
                   the page. */}
               <DataTable<ProformaItem>
+                className="min-h-0 flex-1"
                 containerClassName="rounded-none border-0"
                 headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-xs"
                 columns={loadingItemColumns}
@@ -3801,7 +3881,7 @@ export default function LoadOperation() {
                 totalsLabelColumnId="item"
                 enableColumnResizing
                 isStickyHeader
-                maxHeight={kioskTableMaxHeight}
+                maxHeight={openSlipTableMaxHeight}
                 showMobileSwipeHint
               />
             </div>
@@ -4010,6 +4090,17 @@ export default function LoadOperation() {
                     {pendingSlip?.slip?.vehicleAssignedByCode ? "Change vehicle" : "Link a vehicle"}
                   </h4>
                   <div className="p-3 space-y-3">
+                    {/* The search box below is deliberately empty here (it's for picking a
+                        DIFFERENT vehicle, not re-confirming this one) — without this, a slip
+                        that already has one confirmed looked exactly like a slip with none at
+                        all, since nothing else in this dialog shows what's actually assigned. */}
+                    {pendingSlip?.slip?.vehicleAssignedByCode && pendingSlip.slip.vehicleNumber && (
+                      <div className="flex items-center gap-1.5 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                        <Truck className="h-3.5 w-3.5 shrink-0" />
+                        Currently assigned: <span className="font-semibold">{pendingSlip.slip.vehicleNumber}</span>
+                        {pendingSlip.slip.rtoNumber && <span className="text-emerald-600">({pendingSlip.slip.rtoNumber})</span>}
+                      </div>
+                    )}
                     <div className="relative">
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
                       <Input
@@ -4141,9 +4232,22 @@ export default function LoadOperation() {
       </Dialog>
 
       {/* Confirm dialog — loose/partial regular scans. Extras never reach this — they go through
-          their own dedicated Add Extra popup below. */}
+          their own dedicated Add Extra popup below. Same product-photo-on-the-left treatment
+          Order Scan's own confirm dialog (and this page's own Add Extra dialog, just below) use
+          — this one never had it, unlike every other scan-confirmation screen in the app. No id
+          to look it up by here (ProformaItem carries no productId), so it goes by name, same as
+          the box-image-by-name/image-by-name fallback ProductPhoto already supports. */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
-        <DialogContent className={`max-w-sm`}>
+        <DialogContent className="overflow-x-hidden overflow-y-auto p-0 sm:max-w-lg">
+          <div className="flex flex-col sm:flex-row">
+            <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-48 sm:border-b-0 sm:border-r">
+              <ProductPhoto
+                name={pending?.item?.itemName ?? pending?.barcode}
+                className="max-h-48 w-full object-contain"
+                zoomable
+              />
+            </div>
+            <div className="min-w-0 flex-1 p-6">
           <DialogHeader>
             <DialogTitle>{pending?.item?.itemName ?? pending?.barcode ?? "Confirm scan"}</DialogTitle>
             <DialogDescription>
@@ -4221,6 +4325,8 @@ export default function LoadOperation() {
               Confirm
             </Button>
           </DialogFooter>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -4503,6 +4609,66 @@ export default function LoadOperation() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setResetTarget(null)} disabled={resetMutation.isPending}>
               Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reopen confirmation — admin-only action that undoes a completed, audited load. */}
+      <Dialog open={!!reopenTarget} onOpenChange={(o) => { if (!o) setReopenTarget(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-amber-700">Reopen this load?</DialogTitle>
+            <DialogDescription>
+              Order <span className="font-semibold text-gray-900">#{reopenTarget}</span> is marked complete.
+              Reopening puts it back to Loading so scanning can continue.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReopenTarget(null)} disabled={reopenMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-amber-600 text-white hover:bg-amber-700"
+              disabled={reopenMutation.isPending}
+              onClick={() => {
+                if (!reopenTarget) return;
+                reopenMutation.mutate(reopenTarget);
+                setReopenTarget(null);
+              }}
+            >
+              {reopenMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="mr-1.5 h-3.5 w-3.5" />}
+              Reopen
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Claim confirmation — takes over ownership of a paused load from whoever had it. */}
+      <Dialog open={!!claimTarget} onOpenChange={(o) => { if (!o) setClaimTarget(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Claim this load?</DialogTitle>
+            <DialogDescription>
+              Order <span className="font-semibold text-gray-900">#{claimTarget}</span> is currently paused.
+              Claiming it makes you the owner — you will be the one allowed to scan it from here on.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setClaimTarget(null)} disabled={claimLoadMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-amber-500 text-white hover:bg-amber-600"
+              disabled={claimLoadMutation.isPending}
+              onClick={() => {
+                if (!claimTarget) return;
+                claimLoadMutation.mutate(claimTarget);
+                setClaimTarget(null);
+              }}
+            >
+              {claimLoadMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Claim
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -1813,10 +1813,18 @@ export default function ScanViewer() {
           })()}
           {/* Settles the shortfall left on a CSV that was already COMPLETED with items still short —
               only for a PAST order date (a current one should be settled by scanning it). Same
-              write-access gate as Void on this page. */}
-          {canVoidScan && selectedSession && selectedSession.scanStatus === "completed"
-            && (selectedSession.orderDate ?? date) < todayIST()
-            && items.some((i) => (i.expectedQty ?? 0) > (i.totalScannedQty ?? 0)) && (
+              write-access gate as Void on this page. Admin/super-admin get it unconditionally —
+              always visible whenever a session is open, regardless of status/date/shortfall —
+              since they're explicitly trusted to use it outside the normal guardrails; the
+              confirmation dialog still stands in front of it either way, and the server's own
+              completed/past-date checks still apply underneath (clicking through on a session
+              that doesn't qualify just reports why, same as any other rejected request). */}
+          {canVoidScan && selectedSession && (
+            isAdminOrSuper
+            || (selectedSession.scanStatus === "completed"
+              && (selectedSession.orderDate ?? date) < todayIST()
+              && items.some((i) => (i.expectedQty ?? 0) > (i.totalScannedQty ?? 0)))
+          ) && (
             <Button
               size="sm" variant="outline"
               className="h-8 shrink-0 gap-1.5 border-amber-200 text-xs text-amber-700 hover:bg-amber-50"

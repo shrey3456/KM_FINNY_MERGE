@@ -208,7 +208,13 @@ router.get('/products/image-by-name', async (req: Request, res: Response) => {
       return res.status(304).end();
     }
 
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), (err) => {
+    // etag/lastModified/cacheControl: false — sendFile generates and sets its OWN versions of
+    // these by default, which runs AFTER (and silently overwrites) the ones just set above. That
+    // own-generated ETag is based on the file's stat (mtime/size), not the Notion content hash,
+    // so a re-sync that happens to land within the same mtime/size as before (or a filesystem
+    // with coarse mtime resolution) could still 304 against stale bytes — the content hash above
+    // is the one actually meant to decide this, so it has to be the only one that wins.
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
       if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
     });
   } catch (err) {
@@ -241,7 +247,7 @@ router.get('/products/box-image-by-name', async (req: Request, res: Response) =>
       return res.status(304).end();
     }
 
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), (err) => {
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
       if (err && !res.headersSent) res.status(404).json({ message: 'Box image file missing' });
     });
   } catch (err) {
@@ -282,7 +288,7 @@ router.get('/products/image-by-id', async (req: Request, res: Response) => {
       return res.status(304).end();
     }
 
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), (err) => {
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
       if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
     });
   } catch (err) {
@@ -319,7 +325,7 @@ router.get('/products/box-image-by-id', async (req: Request, res: Response) => {
       return res.status(304).end();
     }
 
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), (err) => {
+    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
       if (err && !res.headersSent) res.status(404).json({ message: 'Box image file missing' });
     });
   } catch (err) {
