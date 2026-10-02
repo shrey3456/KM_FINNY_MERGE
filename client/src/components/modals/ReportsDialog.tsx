@@ -247,7 +247,7 @@ function buildActivityRows(data: ScanActivity, scope: "part" | "group", includeT
   const groupCols = scope === "group";
   const header: Row = [
     "#", ...(groupCols ? ["Part", "File"] : []),
-    "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "STV", "Time", "Void",
+    "Scanned By", "User Code", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "Dispatch Directory", "Time", "Void",
   ];
   const timingRows = includeTiming && data.sessions
     ? buildTimingRows(data.sessions.map((s) => ({

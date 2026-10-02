@@ -513,7 +513,7 @@ export default function LoadOperation() {
     { id: "party", label: "Party Name", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.partyName)), accessor: (r) => r.partyName },
     { id: "plant", label: "Plant", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => r.plant)), accessor: (r) => r.plant },
     { id: "vehicle", label: "Vehicle No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.vehicleNumber)), accessor: (r) => r.vehicleNumber },
-    { id: "stv", label: "STV", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => r.loadingStv)), accessor: (r) => r.loadingStv },
+    { id: "stv", label: "Dispatch Directory", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => r.loadingStv)), accessor: (r) => r.loadingStv },
     { id: "status", label: "Status", filterType: "text", disableConditions: true, options: recordDistinct(recordsItems.map((r) => recordStatus(r))), accessor: (r) => recordStatus(r) },
     { id: "owner", label: "Current Owner", filterType: "text", options: recordDistinct(recordsItems.map(recordOwner)), accessor: recordOwner },
     { id: "completedBy", label: "Completed By", filterType: "text", options: recordDistinct(recordsItems.map(recordCompletedBy)), accessor: recordCompletedBy },
@@ -2243,7 +2243,7 @@ export default function LoadOperation() {
       ),
     },
     {
-      id: "stv", header: "STV", width: 70, minWidth: 50, totalable: false,
+      id: "stv", header: "Dispatch Directory", width: 70, minWidth: 50, totalable: false,
       accessor: (ev) => ev.stv ?? "",
       render: (ev) => <span className="text-[11px] text-gray-600">{ev.stv ?? "—"}</span>,
     },
@@ -2690,7 +2690,7 @@ export default function LoadOperation() {
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("party", "Party Name")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("plant", "Plant")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The STV/platform this load was started on — set once at Create Operation">{recordColumnHeader("stv", "STV")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The Dispatch Directory this load was started on — set once at Create Operation">{recordColumnHeader("stv", "Dispatch Directory")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
@@ -3288,7 +3288,7 @@ export default function LoadOperation() {
                         Slips page, not from the scanning screen. */}
                     {lockedStv && (
                       <div className="flex items-center gap-1">
-                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">STV</span>
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Dispatch Directory</span>
                         <span className="inline-flex h-6 items-center gap-1 rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-3 text-xs font-semibold text-[#001d6e]">
                           <Lock className="h-3 w-3" />{lockedStv}
                         </span>
@@ -3975,16 +3975,16 @@ export default function LoadOperation() {
               {canWrite && (
                 <div className="border rounded-md">
                   <h4 className="text-sm font-medium p-3 border-b bg-muted/30">
-                    STV / Platform <span className="text-red-600">*</span>
+                    Dispatch Directory <span className="text-red-600">*</span>
                   </h4>
                   <div className="p-3 space-y-2">
                     {stvs.length > 0 ? (
                       <Select value={pendingStv || NO_STV} onValueChange={(v) => setPendingStv(v === NO_STV ? "" : v)}>
                         <SelectTrigger className={pendingStv ? "" : "border-amber-400 bg-amber-50"}>
-                          <SelectValue placeholder="Select STV…" />
+                          <SelectValue placeholder="Select Dispatch Directory…" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value={NO_STV}>— Select STV —</SelectItem>
+                          <SelectItem value={NO_STV}>— Select Dispatch Directory —</SelectItem>
                           {stvs.map((st) => (
                             <SelectItem key={st} value={st}>{st}</SelectItem>
                           ))}
@@ -3992,7 +3992,7 @@ export default function LoadOperation() {
                       </Select>
                     ) : !stvsQuery.isLoading && (
                       <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                        No STV configured for {pendingSlip?.slip?.plant || "this plant"} — add one in Plant Settings before creating this operation.
+                        No Dispatch Directory configured for {pendingSlip?.slip?.plant || "this plant"} — add one in Plant Settings before creating this operation.
                       </div>
                     )}
                     <p className="text-xs text-muted-foreground">
@@ -4463,7 +4463,7 @@ export default function LoadOperation() {
             <DialogDescription>
               Order <span className="font-semibold text-gray-900">#{resetTarget?.orderNumber}</span>
               {resetTarget?.vehicleNumber ? <> on <span className="font-semibold text-gray-900">{resetTarget.vehicleNumber}</span></> : null}.
-              Either way, all loaded stock is returned, the vehicle, owner and STV are cleared, the status goes back to what
+              Either way, all loaded stock is returned, the vehicle, owner and Dispatch Directory are cleared, the status goes back to what
               it was before loading started, and the proforma slip itself is not changed.
             </DialogDescription>
           </DialogHeader>

@@ -539,8 +539,13 @@ export default function ExpenseVoucher() {
     }
 
     // Auto-detect: a term containing letters is treated as a driver name,
-    // a purely numeric term is treated as a voucher number.
-    const isDriverSearch = /[a-zA-Z]/.test(term);
+    // UNLESS it starts with a digit -- voucher numbers always start with a
+    // digit (and some carry a trailing letter suffix, e.g. "102547A" /
+    // "102547B" for split vouchers), while driver names never do. Without
+    // this guard, "102547A" was misread as a driver search (found nothing),
+    // while the unsuffixed "102547" matched *both* 102547A and 102547B via
+    // a `contains` filter and silently returned whichever came back first.
+    const isDriverSearch = /[a-zA-Z]/.test(term) && !/^\d/.test(term);
 
     if (isDriverSearch) {
       // Driver name is searched as-is; the server merges ALL of that driver's
@@ -949,10 +954,10 @@ export default function ExpenseVoucher() {
               <tr class="expense-row">
                 <td colspan="3"><span class="expense-label">{C}</span> Conveyance Allowance</td>
                 <td class="expense-amount">₹${(() => {
-                    const amount =
-                      editableConveyanceAllowance ||
-                      voucherInfo["Conveyance Allowance:"] ||
-                      "0.00";
+                    // Print always reflects the live merged voucher data, not
+                    // the "editable" state (which mirrors the last-loaded
+                    // voucher and can be stale by the time Print is clicked).
+                    const amount = voucherInfo["Conveyance Allowance:"] || "0.00";
                     if (amount && amount !== "N/A" && !isNaN(parseFloat(amount))) {
                       return new Intl.NumberFormat("en-IN", {
                         minimumFractionDigits: 2,
@@ -980,8 +985,9 @@ export default function ExpenseVoucher() {
               <tr class="final-payment-row">
                 <td colspan="3" class="final-payment-label" style="color: black">Final Payment :</td>
                 <td class="final-payment-amount">₹${(() => {
-                    const amount =
-                      editableFinalPayment || voucherInfo["ECS Payment :"] || "0.00";
+                    // Same reasoning as Conveyance Allowance above: read the
+                    // live merged value, not the possibly-stale editable state.
+                    const amount = voucherInfo["ECS Payment :"] || "0.00";
                     if (amount && amount !== "N/A" && !isNaN(parseFloat(amount))) {
                       return new Intl.NumberFormat("en-IN", {
                         minimumFractionDigits: 2,
@@ -1673,7 +1679,10 @@ export default function ExpenseVoucher() {
                           <div className="text-base font-semibold">
                             ₹
                             {new Intl.NumberFormat("en-IN").format(
-                              parseFloat(editableConveyanceAllowance) ||
+                              // Read the live merged value directly -- editableConveyanceAllowance
+                              // has no edit UI wired to it, so it's just a display mirror that can
+                              // lag behind (still showing the previous voucher's amount) and
+                              // disagree with Final Payment, which was computed from the real value.
                               parseFloat(
                                 expenseVoucherData.data.voucherInfo?.[
                                 "Conveyance Allowance:"

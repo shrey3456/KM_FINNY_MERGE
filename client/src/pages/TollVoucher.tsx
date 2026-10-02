@@ -2,29 +2,43 @@ import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
-import { Printer, Search, Truck, User, Receipt, Lock, RefreshCw } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Calendar as DatePickerCalendar } from '@/components/ui/calendar';
+import { format } from 'date-fns';
+import { Printer, Search, Truck, User, Receipt, Lock, RefreshCw, CalendarIcon, X } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
 import logoPath from '@assets/logo_wo_bg_1757152661130.png';
-import { borderBottomLeftRadius } from 'html2canvas/dist/types/css/property-descriptors/border-radius';
-import { text } from 'stream/consumers';
+import { useSingleDateFilter } from '@/hooks/useSingleDateFilter';
 import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
-interface TollVoucherData {
+interface TollVoucherFields {
   orderNumber: string;
   driver: string;
   vehicle: string;
   tollTax: number;
   party: string;
   order: string;
-  plant: string;
   tollTaxInWords: string;
   orderDate: string;
+}
+
+// One vehicle's voucher when a search turns up several (same driver, different trucks) — those are
+// never blended into one voucher, so the user picks which vehicle to view/print.
+interface TollVehicleOption extends TollVoucherFields {
+  vehicleNumber: string;
+  mergedVoucherCount: number;
+}
+
+interface TollVoucherData extends TollVoucherFields {
+  plant: string;
+  mergedVoucherCount?: number;
+  vehicleOptions?: TollVehicleOption[];
 }
 
 interface TollVoucherResponse {
@@ -93,12 +107,68 @@ export default function TollVoucher() {
   //const [voucherPrefix, setVoucherPrefix] = useState('KM2526-EV-');
   const [voucherNumber, setVoucherNumber] = useState('');
   const [selectedOrder, setSelectedOrder] = useState('');
+  // Whether the current search term is a voucher number or a driver name
+  const [searchMode, setSearchMode] = usePersistentFilter<'voucher' | 'driver'>('tollVoucher:searchMode', 'voucher');
+  // null = not chosen yet; when a search returns multiple vehicles, the voucher stays hidden
+  // behind a "pick a vehicle" prompt until set.
+  const [selectedVehicleIndex, setSelectedVehicleIndex] = useState<number | null>(0);
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchStage, setSearchStage] = useState('');
   const { toast } = useToast();
   const { hasAccess, isLoading: accessLoading } = useAccessControl();
   const [voucherPrefix, setVoucherPrefix] = useState<string>('KM2526-EV-');
   const [isAdminUser, setIsAdminUser] = useState(false);
+
+  // Date filter: which day's vouchers to search. Defaults to today and persists across page
+  // refreshes. Optional — with no date the search spans ALL dates (the server drops its date
+  // filter for an empty voucherDate). The calendar still opens on today when nothing is picked.
+  const [todayMidnight] = useState(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  });
+  const { savedDate: selectedDate, saveDateFilter: setSelectedDate } =
+    useSingleDateFilter('toll-voucher', todayMidnight);
+  const [isDatePickerOpen, setIsDatePickerOpen] = useState(false);
+  const calendarMonth = selectedDate || todayMidnight;
+  const selectedDateStr = selectedDate ? format(selectedDate, 'yyyy-MM-dd') : '';
+
+  // Driver-name autocomplete for the search bar (same endpoint the Expense Voucher page uses).
+  const [driverSuggestions, setDriverSuggestions] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  useEffect(() => {
+    const term = voucherNumber.trim();
+    // Only worth suggesting once there's a letter to match against (a purely numeric term is a
+    // voucher number, not a driver name).
+    if (term.length < 2 || !/[a-zA-Z]/.test(term)) {
+      setDriverSuggestions([]);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiRequest(
+          'GET',
+          `/api/expense-voucher/driver-suggestions?q=${encodeURIComponent(term)}`,
+          undefined,
+          false,
+          true
+        );
+        if (!cancelled && res?.success) {
+          setDriverSuggestions(res.suggestions || []);
+        }
+      } catch (e) {
+        if (!cancelled) setDriverSuggestions([]);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [voucherNumber]);
 
   useEffect(() => {
     (async () => {
@@ -168,12 +238,16 @@ export default function TollVoucher() {
     isError,
     error 
   } = useQuery<TollVoucherResponse>({
-    queryKey: ['/api/toll-voucher', selectedOrder],
+    queryKey: ['/api/toll-voucher', searchMode, selectedOrder, selectedDateStr],
     enabled: !!selectedOrder && hasAccess,
     queryFn: async () => {
       if (!selectedOrder) throw new Error('No order selected');
       try {
-        const response = await apiRequest('POST', '/api/toll-voucher', { orderNumber: selectedOrder }, false, true);
+        const body =
+          searchMode === 'driver'
+            ? { driverName: selectedOrder, voucherDate: selectedDateStr }
+            : { orderNumber: selectedOrder, voucherDate: selectedDateStr };
+        const response = await apiRequest('POST', '/api/toll-voucher', body, false, true);
         return response as TollVoucherResponse;
       } catch (error: any) {
         setSearchProgress(0);
@@ -184,6 +258,25 @@ export default function TollVoucher() {
     },
     retry: false,
   });
+
+  // A search can turn up multiple vehicles (e.g. same driver, different trucks). Whenever a fresh
+  // result comes in, hide the voucher behind a "pick a vehicle" prompt if there's more than one;
+  // otherwise there's nothing to choose, so go straight to the voucher.
+  useEffect(() => {
+    const options = tollVoucherData?.data?.vehicleOptions;
+    setSelectedVehicleIndex(options && options.length > 1 ? null : 0);
+  }, [tollVoucherData]);
+
+  // The voucher being shown/printed: the picked vehicle's own voucher when there are several,
+  // otherwise the single (possibly merged) voucher the search returned.
+  const voucher: TollVoucherFields | null = (() => {
+    const data = tollVoucherData?.data;
+    if (!data) return null;
+    if (data.vehicleOptions && data.vehicleOptions.length > 1) {
+      return selectedVehicleIndex !== null ? data.vehicleOptions[selectedVehicleIndex] ?? null : null;
+    }
+    return data;
+  })();
 
   // ✅ Moved AFTER useQuery so tollVoucherLoading & isFetching are defined
   useEffect(() => {
@@ -206,25 +299,42 @@ export default function TollVoucher() {
     }
   }, [tollVoucherLoading, isFetching]);
 
-  const handleSearch = () => {
-    if (!voucherNumber.trim()) {
+  const handleSearch = (termOverride?: string) => {
+    const term = (termOverride ?? voucherNumber).trim();
+    if (!term) {
       toast({
-        title: "Voucher Number Required",
-        description: "Please enter a voucher number to search",
+        title: "Search Term Required",
+        description: "Please enter a voucher number or driver name to search",
         variant: "destructive",
       });
       return;
     }
 
-    // Combine prefix with voucher number
-    const fullVoucherNumber = `${voucherPrefix}${voucherNumber.trim()}`;
-
-    if (fullVoucherNumber === selectedOrder) {
+    // Auto-detect: a term containing letters is a driver name, UNLESS it starts with a
+    // digit -- voucher numbers always start with a digit (some carry a trailing letter
+    // suffix, e.g. "102547A" / "102547B" for split vouchers), while driver names never
+    // do (same rule as the Expense Voucher page).
+    if (/[a-zA-Z]/.test(term) && !/^\d/.test(term)) {
+      // Driver name is searched as-is; the server merges ALL of that driver's vouchers.
       setSearchProgress(0);
+      if (searchMode === 'driver' && selectedOrder === term) {
+        setSearchStage('Refreshing...');
+        refetch();
+      } else {
+        setSearchMode('driver');
+        setSelectedOrder(term);
+      }
+      return;
+    }
+
+    // Voucher-number search
+    const fullVoucherNumber = `${voucherPrefix}${term}`;
+    setSearchProgress(0);
+    if (searchMode === 'voucher' && fullVoucherNumber === selectedOrder) {
       setSearchStage('Refreshing...');
       refetch();
     } else {
-      setSearchProgress(0);
+      setSearchMode('voucher');
       setSelectedOrder(fullVoucherNumber);
     }
   };
@@ -242,9 +352,9 @@ export default function TollVoucher() {
   };
 
   const handlePrint = async () => {
-    if (!tollVoucherData?.data) return;
+    if (!voucher) return;
 
-    const partyText = tollVoucherData.data.party || "";
+    const partyText = voucher.party || "";
     const length = partyText.length;
     
     // Better calculation based on actual character length
@@ -254,7 +364,6 @@ export default function TollVoucher() {
     else if (length > 400) partyFontPt = 10;
     else if (length > 300) partyFontPt = 11;
     else if (length > 200)   partyFontPt = 12;
-console.log(length, partyFontPt);
     let logoDataUrl = "";
     try {
       const response = await fetch(logoPath);
@@ -268,9 +377,21 @@ console.log(length, partyFontPt);
       logoDataUrl = logoPath;
     }
 
-    const printOrderNumber = tollVoucherData.data.orderNumber
-      ? tollVoucherData.data.orderNumber.replace('EV', 'TV')
+    const printOrderNumber = voucher.orderNumber
+      ? voucher.orderNumber.replace('EV', 'TV')
       : '';
+
+    // Voucher No. cell font sized by length so every number of a merged voucher fits (the print runs
+    // in a hidden iframe, so runtime measurement can't be used here).
+    const voucherNoLength = printOrderNumber.length;
+    let voucherNoFontPt = 16; // default (single voucher)
+    if (voucherNoLength > 110) voucherNoFontPt = 5;
+    else if (voucherNoLength > 90) voucherNoFontPt = 6;
+    else if (voucherNoLength > 72) voucherNoFontPt = 7;
+    else if (voucherNoLength > 55) voucherNoFontPt = 8;
+    else if (voucherNoLength > 42) voucherNoFontPt = 9.5;
+    else if (voucherNoLength > 30) voucherNoFontPt = 11;
+    else if (voucherNoLength > 20) voucherNoFontPt = 13;
 
     const printContent = `
       <!DOCTYPE html>
@@ -339,10 +460,10 @@ console.log(length, partyFontPt);
               </div>
               <div class="col w-2-1-b" style="padding: 0; display: block;">
                 <div style="background-color: #6366f1; color: white; padding: 4px; text-align: center; border-bottom: 1px solid #000;">
-                  <span class="label-text">${tollVoucherData.data.orderDate || new Date().toLocaleDateString('en-GB')}</span>
+                  <span class="label-text">${voucher.orderDate || new Date().toLocaleDateString('en-GB')}</span>
                 </div>
                 <div style="padding: 4px; text-align: center;">
-                  <span class="value-text">${printOrderNumber}</span>
+                  <span class="value-text" style="font-size: ${voucherNoFontPt}pt; overflow-wrap: anywhere;">${printOrderNumber}</span>
                 </div>
               </div>
             </div>
@@ -361,11 +482,11 @@ console.log(length, partyFontPt);
                 <div style="display: flex; flex-direction: column; height: 100%;">
                   <div style="flex: 1; display: flex; flex-direction: column; border-bottom: 1px solid #000;">
                     <div class="bg-orange" style="text-align: center; padding: 2px; font-weight: 600;">Vehicle:</div>
-                    <div style="text-align: center; padding: 2px; font-weight: bold; font-size: 14pt; flex-grow: 1; display: flex; align-items: center; justify-content: center;">${tollVoucherData.data.vehicle || "N/A"}</div>
+                    <div style="text-align: center; padding: 2px; font-weight: bold; font-size: 14pt; flex-grow: 1; display: flex; align-items: center; justify-content: center;">${voucher.vehicle || "N/A"}</div>
                   </div>
                   <div style="flex: 1; display: flex; flex-direction: column;">
                     <div class="bg-yellow" style="text-align: center; padding: 2px; font-weight: 600;">Driver:</div>
-                    <div style="text-align: center; padding: 2px; font-weight: bold; font-size: 14pt; flex-grow: 1; display: flex; align-items: center; justify-content: center;">${tollVoucherData.data.driver || "N/A"}</div>
+                    <div style="text-align: center; padding: 2px; font-weight: bold; font-size: 14pt; flex-grow: 1; display: flex; align-items: center; justify-content: center;">${voucher.driver || "N/A"}</div>
                   </div>
                 </div>
               </div>
@@ -385,10 +506,10 @@ console.log(length, partyFontPt);
                 <span class="label-text">Toll Tax:</span>
               </div>
               <div class="col w-tax-b">
-                <span class="value-text" style="color: #dc2626;">₹${tollVoucherData.data.tollTax.toFixed(2)}</span>
+                <span class="value-text" style="color: #dc2626;">₹${voucher.tollTax.toFixed(2)}</span>
               </div>
               <div class="col w-tax-c">
-                <span class="label-text" style="font-weight: 600;">${tollVoucherData.data.tollTaxInWords}</span>
+                <span class="label-text" style="font-weight: 600;">${voucher.tollTaxInWords}</span>
               </div>
             </div>
           </div>
@@ -517,10 +638,56 @@ console.log(length, partyFontPt);
       {/* Search Section */}
       <div className="mx-auto w-full max-w-[1800px] mb-6">
         <Card className="shadow-lg">
-          <CardContent className="pt-6">
+          <CardHeader>
+            <CardDescription>
+              Enter a voucher number, or a driver name to list all of that driver's vouchers. Data is fetched live from Notion.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
             <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                <span className="text-sm font-medium text-gray-600 whitespace-nowrap">Voucher Date:</span>
+                <Popover open={isDatePickerOpen} onOpenChange={setIsDatePickerOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="w-full sm:w-[220px] justify-start text-left font-normal"
+                      data-testid="button-voucher-date"
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {selectedDate ? format(selectedDate, 'dd/MM/yyyy') : 'All dates'}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <DatePickerCalendar
+                      mode="single"
+                      selected={selectedDate ?? undefined}
+                      defaultMonth={calendarMonth}
+                      onSelect={(date) => {
+                        if (date) {
+                          setSelectedDate(date);
+                          setIsDatePickerOpen(false);
+                        }
+                      }}
+                      initialFocus
+                    />
+                  </PopoverContent>
+                </Popover>
+                {selectedDate && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-gray-500 hover:text-gray-700"
+                    onClick={() => setSelectedDate(null)}
+                    title="Clear date — search across all dates"
+                  >
+                    <X className="h-4 w-4 mr-1" />
+                    Clear
+                  </Button>
+                )}
+              </div>
               <div className="flex gap-4 items-end">
-                <div className="flex-1">
+                <div className="flex-1 relative">
                   <div className="flex items-center">
                     <Input
                       type="text"
@@ -537,16 +704,48 @@ console.log(length, partyFontPt);
                       type="text"
                       value={voucherNumber}
                       onChange={(e) => setVoucherNumber(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                      placeholder="Enter voucher number"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          setShowSuggestions(false);
+                          handleSearch();
+                        } else if (e.key === 'Escape') {
+                          setShowSuggestions(false);
+                        }
+                      }}
+                      onFocus={() => setShowSuggestions(true)}
+                      // Delay so a click on a suggestion registers before the dropdown unmounts.
+                      onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                      placeholder="Voucher number or driver name..."
                       className="rounded-l-none text-lg font-semibold focus-visible:ring-2 focus-visible:ring-green-500"
                       data-testid="input-voucher-number"
                     />
                   </div>
+                  {showSuggestions && driverSuggestions.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full rounded-md border bg-white shadow-lg max-h-56 overflow-y-auto">
+                      {driverSuggestions.map((name) => (
+                        <button
+                          key={name}
+                          type="button"
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-green-50 flex items-center gap-2"
+                          onMouseDown={(e) => {
+                            // onMouseDown (not onClick) fires before the input's onBlur, so the
+                            // click isn't lost to the blur timeout.
+                            e.preventDefault();
+                            setVoucherNumber(name);
+                            setShowSuggestions(false);
+                            handleSearch(name);
+                          }}
+                        >
+                          <User className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                          {name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <Button 
-                  onClick={handleSearch} 
-                  disabled={tollVoucherLoading || isFetching}
+                  onClick={() => handleSearch()} 
+                  disabled={tollVoucherLoading || isFetching || !voucherNumber.trim()}
                   className="px-8 bg-green-600 hover:bg-green-700"
                   data-testid="button-search"
                 >
@@ -597,7 +796,7 @@ console.log(length, partyFontPt);
               </h3>
               
               <p className="text-gray-600 max-w-md mb-8 text-lg">
-                We couldn't locate a toll voucher with number <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span>
+                We couldn't locate {searchMode === 'driver' ? 'any toll vouchers for driver' : 'a toll voucher with number'} <span className="font-mono font-bold text-red-600 bg-red-50 px-2 py-1 rounded">{selectedOrder}</span>{selectedDate ? <> on <span className="font-semibold">{format(selectedDate, 'dd/MM/yyyy')}</span></> : null}
               </p>
               
               <div className="grid gap-4 w-full max-w-lg">
@@ -611,7 +810,7 @@ console.log(length, partyFontPt);
                   </div>
                   <div>
                     <p className="font-semibold text-orange-900">Verify Voucher Number</p>
-                    <p className="text-sm text-orange-700">Ensure the number is correct. Try adding or removing suffixes like 'A' or 'B' if applicable.</p>
+                    <p className="text-sm text-orange-700">Ensure the number is correct and the Voucher Date matches — or clear the date to search across all dates. Try adding or removing suffixes like 'A' or 'B' if applicable.</p>
                   </div>
                 </div>
               </div>
@@ -626,11 +825,55 @@ console.log(length, partyFontPt);
         </div>
       )}
 
+      {/* Multiple vehicles found — pick one before any voucher is shown */}
+      {tollVoucherData?.data?.vehicleOptions &&
+        tollVoucherData.data.vehicleOptions.length > 1 &&
+        selectedVehicleIndex === null && (
+          <div className="mx-auto w-full max-w-[1800px]">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Truck className="h-5 w-5" />
+                  Multiple Vehicles Found
+                </CardTitle>
+                <CardDescription>
+                  This search matched vouchers from more than one vehicle. Pick a vehicle to view its toll voucher.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                  {tollVoucherData.data.vehicleOptions.map((option, idx) => (
+                    <button
+                      key={option.vehicleNumber + idx}
+                      type="button"
+                      onClick={() => setSelectedVehicleIndex(idx)}
+                      className="text-left p-4 rounded-lg border-2 border-green-200 bg-green-50 hover:border-green-500 hover:bg-green-100 transition-colors"
+                    >
+                      <div className="flex items-center gap-2 text-green-900 font-semibold text-base">
+                        <Truck className="h-4 w-4" />
+                        {option.vehicleNumber}
+                      </div>
+                      <div className="text-sm text-gray-600 mt-1">
+                        {option.mergedVoucherCount} voucher{option.mergedVoucherCount === 1 ? '' : 's'}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
       {/* Voucher Display - Landscape */}
-      {tollVoucherData && tollVoucherData.success && tollVoucherData.data && (
+      {voucher && (
         <div className="mx-auto w-full max-w-[1800px]">
           {/* Print Button */}
-          <div className="mb-4 flex justify-end">
+          <div className="mb-4 flex justify-end gap-2">
+            {tollVoucherData?.data?.vehicleOptions && tollVoucherData.data.vehicleOptions.length > 1 && (
+              <Button variant="outline" onClick={() => setSelectedVehicleIndex(null)}>
+                Change Vehicle
+              </Button>
+            )}
             <Button onClick={handlePrint} data-testid="button-print">
               <Printer className="h-4 w-4 mr-2" />
               Print
@@ -652,29 +895,29 @@ console.log(length, partyFontPt);
               <div className="space-y-4">
                 <div>
                   <label className="text-sm font-semibold text-gray-600 uppercase">Voucher No.</label>
-                  <p className="text-xl font-bold text-gray-900 mt-1">{tollVoucherData.data.orderNumber}</p>
+                  <p className="text-xl font-bold text-gray-900 mt-1">{voucher.orderNumber}</p>
                 </div>
                 <div>
                   <label className="text-sm font-semibold text-gray-600 uppercase">Driver</label>
-                  <p className="text-lg font-semibold text-gray-900 mt-1">{tollVoucherData.data.driver || 'N/A'}</p>
+                  <p className="text-lg font-semibold text-gray-900 mt-1">{voucher.driver || 'N/A'}</p>
                 </div>
                 <div>
                   <label className="text-sm font-semibold text-gray-600 uppercase">Vehicle No.</label>
-                  <p className="text-lg font-semibold text-gray-900 mt-1 mb-10">{tollVoucherData.data.vehicle || 'N/A'}</p>
+                  <p className="text-lg font-semibold text-gray-900 mt-1 mb-10">{voucher.vehicle || 'N/A'}</p>
                   <label className="text-sm font-semibold text-gray-600 uppercase">
                     Voucher Date:
                   </label>
-                  <p className="text-lg font-semibold text-gray-900 mt-1">{tollVoucherData.data.orderDate || 'N/A'}</p>
+                  <p className="text-lg font-semibold text-gray-900 mt-1">{voucher.orderDate || 'N/A'}</p>
                 </div>
               </div>
               <div className="space-y-4">
                 <div>
                   <label className="text-sm font-semibold text-gray-600 uppercase">Order Details</label>
-                  <p className="text-lg font-semibold text-gray-900 mt-1">{tollVoucherData.data.party || 'N/A'}</p>
+                  <p className="text-lg font-semibold text-gray-900 mt-1">{voucher.party || 'N/A'}</p>
                 </div>
                 <div className="bg-green-50 p-4 rounded-lg border-2 border-green-200">
                   <label className="text-sm font-semibold text-green-700 uppercase">Toll Tax</label>
-                  <p className="text-3xl font-bold text-green-900 mt-1">₹ {tollVoucherData.data.tollTax.toLocaleString('en-IN')}</p>
+                  <p className="text-3xl font-bold text-green-900 mt-1">₹ {voucher.tollTax.toLocaleString('en-IN')}</p>
                 </div>
               </div>
             </div>
@@ -684,7 +927,7 @@ console.log(length, partyFontPt);
             {/* Amount in Words */}
             <div className="bg-gray-50 p-6 rounded-lg border border-gray-300">
               <label className="text-sm font-semibold text-gray-600 uppercase">Amount in Words</label>
-              <p className="text-lg font-semibold text-gray-900 mt-2">{tollVoucherData.data.tollTaxInWords}</p>
+              <p className="text-lg font-semibold text-gray-900 mt-2">{voucher.tollTaxInWords}</p>
             </div>
           </div>
         </div>

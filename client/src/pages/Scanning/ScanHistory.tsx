@@ -228,6 +228,92 @@ function downloadPdf(filename: string, title: string, rows: Array<Array<string |
   doc.save(filename);
 }
 
+// ─── Loading "Total Summary" / "Activity" — every proforma slip loaded on one plant+order date,
+// mirroring Unloading's own per-vehicle date report (ReportsDialog.tsx's "Order Date — All
+// Vehicles" section) but slip-wise instead of vehicle-wise, since Loading has no vehicle/FIFO
+// grouping at all. Lives here (the Load Event view of this shared history page) rather than a
+// per-order modal, since there's no single "session row" to open it from the way Unloading's
+// landing list has. See server/lib/loadDateReport.ts for the read-time computation. ────────────
+type LoadDateReportItem = {
+  barcode: string; itemName: string; itemsPerPallet: number;
+  expectedQty: number; receivedQty: number; extraQty: number; missingQty: number;
+};
+type LoadDateReportSlip = {
+  slipId: number; orderNumber: string; partyName: string; vehicleNumber: string | null;
+  startTime: string | null; endTime: string | null; allComplete: boolean;
+  items: LoadDateReportItem[];
+  summary: { totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number };
+};
+type LoadDateReport = {
+  plant: string; orderDate: string; slips: LoadDateReportSlip[];
+  grand: { totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number };
+};
+type LoadDateActivityEvent = {
+  orderNumber: string; barcode: string | null; itemName: string | null; sapCode: string | null;
+  pallets: number | null; looseQty: number | null; totalQty: number | null;
+  isExtra: boolean | null; isAdjust: boolean | null; stv: string | null;
+  scannedByCode: string | null; scannedByName: string | null; scannedAt: string | null;
+  voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+};
+type LoadDateActivitySlip = {
+  slipId: number; orderNumber: string; partyName: string; vehicleNumber: string | null;
+  startTime: string | null; endTime: string | null; events: LoadDateActivityEvent[];
+};
+type LoadDateActivity = { plant: string; orderDate: string; slips: LoadDateActivitySlip[] };
+
+function fmtSlipTime(iso: string | null): string {
+  return iso ? format(new Date(iso), "MMM d, h:mm a") : "—";
+}
+function fmtSlipDuration(startIso: string | null, endIso: string | null): string {
+  if (!startIso || !endIso) return "—";
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  if (isNaN(start) || isNaN(end) || end < start) return "—";
+  const totalMinutes = Math.round((end - start) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+function slipHeaderNote(startIso: string | null, endIso: string | null): string {
+  if (!startIso) return "Not started yet";
+  const started = `Started ${fmtSlipTime(startIso)}`;
+  if (!endIso) return `${started} · still in progress`;
+  return `${started} · Ended ${fmtSlipTime(endIso)} · Active for ${fmtSlipDuration(startIso, endIso)}`;
+}
+// A qty cell that also carries its pallet count on a second line ("40\n1.00 plt"), same
+// convention Unloading's report dialog uses — plain qty when the pallet size is unknown (ipp <= 0).
+function qtyWithPlt(qty: number, ipp: number): string {
+  return ipp > 0 ? `${qty}\n${(qty / ipp).toFixed(2)} plt` : String(qty);
+}
+function buildSlipSummaryRows(slip: LoadDateReportSlip): Array<Array<string | number>> {
+  const rows: Array<Array<string | number>> = [["Barcode", "Item Name", "Expected", "Received", "Extra", "Missing"]];
+  const pltSum = { exp: 0, rec: 0, ext: 0, mis: 0 };
+  let anyPlt = false;
+  slip.items.forEach((i) => {
+    const ipp = i.itemsPerPallet ?? 0;
+    if (ipp > 0) {
+      anyPlt = true;
+      pltSum.exp += i.expectedQty / ipp; pltSum.rec += i.receivedQty / ipp;
+      pltSum.ext += i.extraQty / ipp; pltSum.mis += i.missingQty / ipp;
+    }
+    rows.push([i.barcode, i.itemName, qtyWithPlt(i.expectedQty, ipp), qtyWithPlt(i.receivedQty, ipp), qtyWithPlt(i.extraQty, ipp), qtyWithPlt(i.missingQty, ipp)]);
+  });
+  const totalCell = (qty: number, plt: number) => (anyPlt ? `${qty}\n${plt.toFixed(2)} plt` : String(qty));
+  rows.push(["TOTAL", "", totalCell(slip.summary.totalExpected, pltSum.exp), totalCell(slip.summary.totalReceived, pltSum.rec), totalCell(slip.summary.totalExtra, pltSum.ext), totalCell(slip.summary.totalMissing, pltSum.mis)]);
+  return rows;
+}
+function buildSlipActivityRows(slip: LoadDateActivitySlip): Array<Array<string | number>> {
+  const rows: Array<Array<string | number>> = [["#", "Scanned By", "Barcode", "Item Name", "Pallets", "Loose", "Total Qty", "Type", "Dispatch Directory", "Time", "Void"]];
+  slip.events.forEach((e, idx) => rows.push([
+    idx + 1, e.scannedByName ?? "", e.barcode ?? "", e.itemName ?? "",
+    e.pallets ?? 0, e.looseQty ?? 0, e.totalQty ?? 0,
+    e.isAdjust ? "Adjust" : e.isExtra ? "Extra" : "Regular", e.stv ?? "", fmtSlipTime(e.scannedAt),
+    e.voided ? `Voided${e.voidedAt ? ` (${fmtSlipTime(e.voidedAt)})` : ""}${e.voidReason ? ` — ${e.voidReason}` : ""}` : "",
+  ]));
+  if (slip.events.length === 0) rows.push(["No scans recorded"]);
+  return rows;
+}
+
 // A header filter icon for the "special" single-value filters (Type, Scanner) — mirrors
 // ColumnHeaderFilterButton's look/behavior (amber+filled when active, stops propagation so it
 // never also triggers the header's click-to-sort) but picks from a small fixed option list
@@ -581,7 +667,7 @@ const ScanHistory = () => {
     { id: "barcode", label: "Barcode", filterType: "text", options: filterValues.barcode ?? [], accessor: (r) => r.barcode },
     { id: "qty", label: "Qty", filterType: "number", options: [], disableValues: true, accessor: (r) => r.totalQty },
     { id: "pallets", label: "Pallets", filterType: "number", options: [], disableValues: true, accessor: (r) => r.pallets },
-    { id: "stv", label: "STV", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
+    { id: "stv", label: "Dispatch Directory", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
     { id: "orderDate", label: "Order Date", filterType: "date", options: filterValues.orderDate ?? [], accessor: (r) => r.orderDate },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
@@ -910,7 +996,7 @@ const ScanHistory = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Order Date", "Plant", "Qty", "Pallets", "STV", "Type", "Time"],
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
     ...src.map((h) => [
       h.srNo ?? "",
       h.scannedByName ?? "",
@@ -1074,7 +1160,7 @@ const ScanHistory = () => {
     },
     {
       id: "stv",
-      header: columnHeader("stv", "STV"),
+      header: columnHeader("stv", "Dispatch Directory"),
       width: 90,
       accessor: (row) => row.stv,
       totalable: false,
@@ -1754,7 +1840,7 @@ const ScanHistory = () => {
                     )}
                     {row.stv && (
                       <span>
-                        <span className="text-gray-400">STV </span>
+                        <span className="text-gray-400">Dispatch Directory </span>
                         <span className="font-medium text-gray-700">{row.stv}</span>
                       </span>
                     )}
@@ -2015,7 +2101,7 @@ const ScanHistory = () => {
         </div>
         {editStvSupported && (
           <div className="space-y-1.5">
-            <Label className="text-sm">STV</Label>
+            <Label className="text-sm">Dispatch Directory</Label>
             <Input value={editStv} onChange={(e) => setEditStv(e.target.value)} placeholder="e.g. PLT-08" />
           </div>
         )}

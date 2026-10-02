@@ -874,12 +874,12 @@ export default function SortSlips() {
                   loadingStv. */}
               <div className="space-y-1.5">
                 <label className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                  STV / Platform <span className="text-red-600">*</span>
+                  Dispatch Directory <span className="text-red-600">*</span>
                 </label>
                 {stvs.length > 0 ? (
                   <Select value={pickedStv} onValueChange={setPickedStv}>
                     <SelectTrigger>
-                      <SelectValue placeholder="Select STV…" />
+                      <SelectValue placeholder="Select Dispatch Directory…" />
                     </SelectTrigger>
                     <SelectContent>
                       {stvs.map((st) => (
@@ -889,7 +889,7 @@ export default function SortSlips() {
                   </Select>
                 ) : !stvsQuery.isLoading && (
                   <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                    No STV configured for {pickedOrder.plant || "this plant"} — add one in Plant Settings before creating this sort slip.
+                    No Dispatch Directory configured for {pickedOrder.plant || "this plant"} — add one in Plant Settings before creating this sort slip.
                   </div>
                 )}
               </div>
@@ -1775,8 +1775,8 @@ function SortSlipDetail({
               </Badge>
               {slip.plant && <PlantBadge plant={slip.plant} className="text-[10px]" />}
               {slip.platformStv && (
-                <Badge variant="outline" className="text-[10px]" title="The STV/platform this slip was created for — set once at creation">
-                  STV: {slip.platformStv}
+                <Badge variant="outline" className="text-[10px]" title="The Dispatch Directory this slip was created for — set once at creation">
+                  Dispatch Directory: {slip.platformStv}
                 </Badge>
               )}
             </div>
