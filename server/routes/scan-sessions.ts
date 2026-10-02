@@ -825,6 +825,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ose.voided,
       ose.voided_at        AS "voidedAt",
       ose.void_reason      AS "voidReason",
+      vun.name             AS "voidedByName",
       -- Inventory Sr. No for this item (products.new_sr, matched by barcode) so the same item
       -- always carries the same Sr. No here as on the Inventory page. One row per barcode, so a
       -- barcode sitting on more than one product row can never duplicate the event.
@@ -835,6 +836,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
     FROM order_scan_events ose
     JOIN order_import_sessions ois ON ois.id = ose.session_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ose.barcode))
+    LEFT JOIN user_name vun ON vun.user_code = ose.voided_by_code
     WHERE NOT COALESCE(ose.hidden_in_history, false)
 
     UNION ALL
@@ -866,6 +868,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
+      NULL::text AS "voidedByName",
       COALESCE(pid.new_sr, pb.new_sr) AS "srNo",
       sm.reason AS "orderName",
       NULL::text AS "orderDate",
@@ -909,6 +912,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       COALESCE(lse.voided, false) AS voided,
       lse.voided_at         AS "voidedAt",
       lse.void_reason       AS "voidReason",
+      vun.name              AS "voidedByName",
       pb.new_sr AS "srNo",
       lse.order_number AS "orderName",
       sod.order_date::text AS "orderDate",
@@ -916,6 +920,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
     FROM loading_scan_events lse
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(lse.barcode))
     LEFT JOIN slip_order_date sod ON sod.order_number = lse.order_number
+    LEFT JOIN user_name vun ON vun.user_code = lse.voided_by_code
     WHERE NOT COALESCE(lse.hidden_in_history, false)
 
     UNION ALL
@@ -949,6 +954,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       COALESCE(use.voided, false) AS voided,
       use.voided_at         AS "voidedAt",
       use.void_reason       AS "voidReason",
+      vun.name              AS "voidedByName",
       pb.new_sr AS "srNo",
       use.vehicle_number AS "orderName",
       uis.order_date AS "orderDate",
@@ -956,6 +962,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
     FROM unload_scan_events use
     JOIN unload_import_sessions uis ON uis.id = use.session_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(use.barcode))
+    LEFT JOIN user_name vun ON vun.user_code = use.voided_by_code
     WHERE NOT COALESCE(use.hidden_in_history, false)
 
     UNION ALL
@@ -993,6 +1000,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
+      NULL::text AS "voidedByName",
       COALESCE(pid.new_sr, pb.new_sr) AS "srNo",
       sm.reason AS "orderName",
       NULL::text AS "orderDate",
@@ -1045,6 +1053,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
+      NULL::text AS "voidedByName",
       COALESCE(pid.new_sr, pb.new_sr) AS "srNo",
       sm.reason AS "orderName",
       NULL::text AS "orderDate",
@@ -1097,6 +1106,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       COALESCE(ssp.voided, false) AS voided,
       ssp.voided_at      AS "voidedAt",
       NULL::text AS "voidReason",
+      vun.name           AS "voidedByName",
       COALESCE(ssp.sr_no, pb.new_sr) AS "srNo",
       ssp.order_number   AS "orderName",
       ss.order_date::text AS "orderDate",
@@ -1105,6 +1115,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
     JOIN sort_slips ss ON ss.id = ssp.sort_slip_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ssp.barcode))
     LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(ss.plant)
+    LEFT JOIN user_name vun ON vun.user_code = ssp.voided_by_code
     -- The product row this barcode means at THIS plant — a barcode can sit on more than one row
     -- (one per plant), and they can carry different pack sizes.
     LEFT JOIN LATERAL (

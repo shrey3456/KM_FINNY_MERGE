@@ -1279,6 +1279,12 @@ const Settings = () => {
                       </div>
                     </div>
 
+                    {/* Recalculate Stock + Recalculate Stock (from events only) — hidden from the
+                        UI for everyone, including admin/super-admin, same treatment as Clear
+                        Stock/Backup above (not removed: runStockCheck/runStockCheckFromEvents,
+                        their state, and the backend routes are all still here). Fill Stock
+                        Ledger below is the one recalculation tool left reachable from here. */}
+                    {false && (<>
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Recalculate Stock</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
@@ -1313,7 +1319,14 @@ const Settings = () => {
                         {recalcEventsChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check stock (events only)'}
                       </Button>
                     </div>
+                    </>)}
 
+                    {/* Fill Stock Ledger, Clear Stock History and Notion Webhook Status — hidden
+                        from the UI for everyone, including admin/super-admin, same treatment as
+                        everything else above (not removed: runLedgerBackfillCheck,
+                        loadClearStockEntries, webhookStatusLinkQuery, their state, and the
+                        backend routes are all still here). */}
+                    {false && (<>
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Fill Stock Ledger (from Scan + Unload + Load events)</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
@@ -1366,12 +1379,18 @@ const Settings = () => {
                       </Button>
                       {isAdminUser && webhookStatusLinkQuery.data && (
                         <p className="mt-2 break-all text-xs text-gray-400">
-                          Opens {webhookStatusLinkQuery.data.url}
-                          {!webhookStatusLinkQuery.data.fromEnv && ' (set NOTION_WEBHOOK_STATUS_URL in .env to change it)'}
+                          Opens {webhookStatusLinkQuery.data?.url}
+                          {!webhookStatusLinkQuery.data?.fromEnv && ' (set NOTION_WEBHOOK_STATUS_URL in .env to change it)'}
                         </p>
                       )}
                     </div>
+                    </>)}
 
+                    {/* Backup CSV + Backup Operational Data — hidden from the UI for everyone,
+                        including admin/super-admin (not removed: runCsvBackup/runScopedCsvBackup,
+                        their state, and the backend routes are all still here; re-add these two
+                        Button blocks to bring them back). */}
+                    {false && (<>
                     <div className="p-4 border rounded-lg">
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Backup CSV</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
@@ -1391,8 +1410,8 @@ const Settings = () => {
                       </Button>
                       {csvBackupResult && (
                         <p className="mt-2 break-all text-xs text-gray-500">
-                          Last backup: {csvBackupResult.tables} table(s), {csvBackupResult.rows.toLocaleString()} row(s),
-                          {' '}{csvBackupResult.megabytes.toFixed(1)} MB → <span className="font-mono">{csvBackupResult.folder}</span>
+                          Last backup: {csvBackupResult?.tables} table(s), {csvBackupResult?.rows.toLocaleString()} row(s),
+                          {' '}{csvBackupResult?.megabytes.toFixed(1)} MB → <span className="font-mono">{csvBackupResult?.folder}</span>
                         </p>
                       )}
                     </div>
@@ -1416,25 +1435,22 @@ const Settings = () => {
                       </Button>
                       {scopedBackupResult && (
                         <p className="mt-2 break-all text-xs text-gray-500">
-                          Last backup: {scopedBackupResult.tables} table(s), {scopedBackupResult.rows.toLocaleString()} row(s),
-                          {' '}{scopedBackupResult.megabytes.toFixed(1)} MB → <span className="font-mono">{scopedBackupResult.folder}</span>
+                          Last backup: {scopedBackupResult?.tables} table(s), {scopedBackupResult?.rows.toLocaleString()} row(s),
+                          {' '}{scopedBackupResult?.megabytes.toFixed(1)} MB → <span className="font-mono">{scopedBackupResult?.folder}</span>
                         </p>
                       )}
                     </div>
+                    </>)}
 
                     <div className="p-4 border border-red-200 rounded-lg bg-red-50">
                       <h4 className="font-medium text-[#001d6e] flex items-center"><Shield className="h-4 w-4 mr-2" /> Danger Zone</h4>
                       <p className="text-sm text-[#001d6e] mt-1 mb-3">These actions are irreversible</p>
                       <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={() => setShowClearStockDialog(true)}
-                          disabled={!isAdminUser}
-                          title={!isAdminUser ? "Admin access required" : undefined}
-                        >
-                          Clear Stock
-                        </Button>
+                        {/* Clear Stock — hidden from the UI entirely (even from admin/super-admin),
+                            not removed: the dialog, mutation and backend route all still exist,
+                            just unreachable from here after the ledger confusion it kept causing
+                            this session (negative Opening, mismatched reports). Re-add this
+                            Button to bring it back. */}
                         <Button
                           variant="destructive"
                           size="sm"

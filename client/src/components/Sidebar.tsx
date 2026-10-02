@@ -37,6 +37,7 @@ import {
   PackageOpen,
   ClipboardList,
   ArrowLeftRight,
+  CalendarClock,
 } from "lucide-react";
 import MessageIcon from "../assets/message-icon";
 import QuicklineIcon from "../assets/quickline-icon";
@@ -310,6 +311,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: <Truck className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/vehicle-master",
           pageKey: "vehicle-master",
+        },
+        {
+          label: "Vehicle Planning",
+          icon: <CalendarClock className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/vehicle-planning",
+          pageKey: "vehicle-planning",
         },
       ],
     },

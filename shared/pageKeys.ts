@@ -26,6 +26,7 @@ export const CONTROLLABLE_PAGES = [
   { key: "notion-inventory", label: "Product Master" },
   { key: "plant-management", label: "Plant Master" },
   { key: "vehicle-master", label: "Vehicle Master" },
+  { key: "vehicle-planning", label: "Vehicle Planning" },
   { key: "purchases", label: "Purchases" },
   // STEER
   { key: "expense-voucher", label: "Expense Voucher" },

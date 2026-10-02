@@ -127,6 +127,7 @@ type ScanHistoryItem = {
   voided: boolean | null;
   voidedAt: string | null;
   voidReason: string | null;
+  voidedByName: string | null;
 };
 
 // The row's own "pallets" column is floor(totalQty / itemsPerPallet) — a real, separate fact
@@ -1066,7 +1067,7 @@ const ScanHistory = () => {
           </p>
           {row.voided && (
             <p className="text-[10px] font-semibold text-red-500" title={row.voidReason ?? undefined}>
-              Voided{row.voidedAt ? ` · ${format(new Date(row.voidedAt), "MMM d, h:mm a")}` : ""}
+              Voided{row.voidedByName ? ` by ${row.voidedByName}` : ""}{row.voidedAt ? ` · ${format(new Date(row.voidedAt), "MMM d, h:mm a")}` : ""}
             </p>
           )}
         </>
@@ -1207,7 +1208,7 @@ const ScanHistory = () => {
           )}
           {row.voided && row.voidedAt && (
             <span className="block text-[11px] text-red-500">
-              voided {format(new Date(row.voidedAt), "MMM d, h:mm a")}
+              voided{row.voidedByName ? ` by ${row.voidedByName}` : ""} {format(new Date(row.voidedAt), "MMM d, h:mm a")}
             </span>
           )}
         </>
@@ -1850,7 +1851,7 @@ const ScanHistory = () => {
                   </p>
                   {row.voided && (
                     <p className="mt-1 text-[11px] font-semibold uppercase text-red-500">
-                      Voided{row.voidReason ? ` · ${row.voidReason}` : ""}
+                      Voided{row.voidedByName ? ` by ${row.voidedByName}` : ""}{row.voidReason ? ` · ${row.voidReason}` : ""}
                     </p>
                   )}
                 </div>

@@ -108,6 +108,7 @@ import scanSessionRoutes from "./routes/scan-sessions";
 import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import vehicleInfoRoutes from "./routes/vehicle-info";
 import loadingRoutes from "./routes/loading";
+import vehiclePlanningRoutes from "./routes/vehicle-planning";
 import sortSlipRoutes from "./routes/sort-slips";
 import dailyReportsRoutes from "./routes/daily-reports";
 import orderImportRoutes from "./routes/order-import";
@@ -8165,6 +8166,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount Loading routes (link a Vehicle Master vehicle onto a Proforma Slip) — new feature,
   // own file, no dependency on the legacy Load Operations routes.
   apiRouter.use(loadingRoutes);
+
+  // Vehicle Planning — Gantt-style fleet scheduling view, own file. Test-mode restricted on its
+  // own write action (see TEST_MODE_ORDER_NUMBERS in that file) — remove that guard once trusted.
+  apiRouter.use(vehiclePlanningRoutes);
 
   // Sort Slip — godown picking. Deliberately separate from Loading above: it shares only the
   // order number, writes only its own tables, and moves no stock (see server/routes/sort-slips.ts).
