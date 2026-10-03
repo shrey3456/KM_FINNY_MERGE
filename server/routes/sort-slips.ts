@@ -79,9 +79,9 @@ async function loaderCanAccessPlant(userCode: string, plant: string | null | und
 // Whether this person is a LOADER: view access to Sort Slip, no write access, not an admin —
 // the same definition the list above uses, so the server and the picker can never disagree.
 // Returns why they are not, for the message the page shows.
-async function loaderCheck(userCode: string): Promise<'ok' | 'access' | 'supervisor'> {
+async function loaderCheck(userCode: string): Promise<'ok' | 'access' | 'supervisor' | 'designation'> {
   const { rows } = await pool.query(
-    `SELECT role, allowed_pages, page_write_access FROM users WHERE user_code = $1`, [userCode]);
+    `SELECT role, designation, allowed_pages, page_write_access FROM users WHERE user_code = $1`, [userCode]);
   if (!rows[0]) return 'access';
   if (WRITE_ADMIN_ROLES.includes(String(rows[0].role ?? '').toLowerCase())) return 'supervisor';
   const parse = (value: string | null) => {
@@ -90,6 +90,8 @@ async function loaderCheck(userCode: string): Promise<'ok' | 'access' | 'supervi
   if (!parse(rows[0].allowed_pages).includes('sort-slip')) return 'access';
   // Write access is what makes someone a supervisor. They assign the work; they are not given it.
   if (parse(rows[0].page_write_access).includes('sort-slip')) return 'supervisor';
+  // Only people whose designation is "Loader" can be given a sort slip.
+  if (String(rows[0].designation ?? '').trim().toLowerCase() !== 'loader') return 'designation';
   return 'ok';
 }
 
@@ -298,8 +300,8 @@ router.get('/sort-slips', requirePageAccess('sort-slip'), async (req: Request, r
 // A LOADER is someone with VIEW access to Sort Slip and no write access: view access is exactly
 // what lets a person open a slip assigned to them and record picks. Write access makes someone a
 // SUPERVISOR — the person doing the assigning — and admins are supervisors everywhere, so neither
-// appears in this list. Department and designation are not consulted at all: who picks is decided
-// by the grant on User Management, not by how a record happens to be labelled.
+// appears in this list. Only people with the designation "Loader" are listed — the designation on
+// User Management must be exactly "Loader" (case and extra spaces ignored).
 //
 // They must also hold the order's plant, which is applied below — so every name here is a name
 // that can actually be assigned.
@@ -318,6 +320,7 @@ router.get('/sort-slips/loaders', requirePageWrite('sort-slip'), async (req: Req
         WHERE COALESCE(u.allowed_pages, '') LIKE '%sort-slip%'
           AND COALESCE(u.page_write_access, '') NOT LIKE '%sort-slip%'
           AND NOT (LOWER(COALESCE(u.role, '')) = ANY($1))
+          AND LOWER(TRIM(COALESCE(u.designation, ''))) = 'loader'
         ORDER BY u.name NULLS LAST, u.username`,
       [WRITE_ADMIN_ROLES],
     );
@@ -694,6 +697,9 @@ router.post('/sort-slips', requirePageWrite('sort-slip'), async (req: Request, r
     }
     if (check === 'supervisor') {
       return res.status(400).json({ message: 'That person has write access to Sort Slip — supervisors assign the work, they are not given it' });
+    }
+    if (check === 'designation') {
+      return res.status(400).json({ message: 'Only a person with the designation "Loader" can be given a sort slip' });
     }
     if (!(await loaderCanAccessPlant(loaderCode, order.plant))) {
       return res.status(400).json({ message: `That loader has no access to ${order.plant ?? 'this plant'} — give them the plant on User Management first` });
@@ -1085,7 +1091,9 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
       return res.status(409).json({
         message: toCheck === 'supervisor'
           ? 'That person has write access to Sort Slip — supervisors assign the work, they are not given it'
-          : 'That person has not been given the Sort Slip page — grant it on User Management first',
+          : toCheck === 'designation'
+            ? 'Only a person with the designation "Loader" can be given a sort slip'
+            : 'That person has not been given the Sort Slip page — grant it on User Management first',
       });
     }
     if (!(await loaderCanAccessPlant(toUserCode, slip.plant))) {
