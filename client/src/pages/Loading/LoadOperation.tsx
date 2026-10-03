@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronLeft, ChevronRight, Download, FileText,
-  Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
+  ChevronDown, Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
@@ -702,6 +702,10 @@ export default function LoadOperation() {
   // and Scan History's Load Event tab use) and filtered client-side per barcode when a row opens,
   // rather than one request per item.
   const [expandedItemBarcode, setExpandedItemBarcode] = useState<string | null>(null);
+  // The Scan Items block opens and closes when its header is clicked.
+  const [scannerOpen, setScannerOpen] = useState(true);
+  // The Load Totals block (tiles and progress bar) opens and closes from its header.
+  const [totalsOpen, setTotalsOpen] = useState(true);
   // Same click-to-filter tiles as Order Scan's own Order Totals card (Total/Loaded/Remaining/
   // Extra) — narrows the items table below to just that bucket; clicking the active one clears it.
   const [itemStatusFilter, setItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
@@ -3650,21 +3654,6 @@ export default function LoadOperation() {
                     </span>
                   </button>
                 )}
-                {/* Moved here (next to Total/Scanner, not buried inside the Scanner-only panel)
-                    so it stays reachable from the Total tab too, not just Scanner — deliberately
-                    loud/solid, not an outline pill like the others, since it opens the dedicated
-                    Add Extra popup, the ONLY way to log an item not on this slip or more than
-                    what's remaining. */}
-                {canScanThisLoad && (
-                  <button
-                    type="button"
-                    onClick={() => setExtraDialogOpen(true)}
-                    title="Add an item not on this slip, or more than what's remaining"
-                    className="ml-auto flex shrink-0 items-center gap-1 rounded-full bg-amber-500 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
-                  >
-                    <PackagePlus className="h-3.5 w-3.5" /> Add Extra
-                  </button>
-                )}
               </div>
             )}
 
@@ -3687,8 +3676,18 @@ export default function LoadOperation() {
                 ? "" : "hidden"
             }>
               <div className="flex min-w-0 flex-col gap-1 rounded-xl border bg-white p-1.5 shadow-sm">
-                <div className="flex items-baseline justify-between">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Load Totals</p>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={totalsOpen}
+                  onClick={() => setTotalsOpen((o) => !o)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setTotalsOpen((o) => !o); } }}
+                  className="flex cursor-pointer items-baseline justify-between gap-2 rounded-md px-1 hover:bg-gray-50"
+                >
+                  <p className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
+                    Load Totals
+                    <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${totalsOpen ? "rotate-180" : ""}`} />
+                  </p>
                   {itemTotals.expected <= 0 ? (
                     <p className="text-sm font-medium text-gray-400">—</p>
                   ) : itemPct >= 100 ? (
@@ -3702,7 +3701,7 @@ export default function LoadOperation() {
                 {/* Always 4 columns, even on the narrowest phone — was grid-cols-2 below sm
                     (wrapping to 2 rows); text/padding/gap now scale down with a sm: step
                     instead of the column count changing, so all four stay in one row. */}
-                <div className="grid grid-cols-4 gap-1">
+                <div className={`grid grid-cols-4 gap-1 ${totalsOpen ? "" : "hidden"}`}>
                   {([
                     { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
                     { key: "done" as const, label: "Loaded", value: itemTotals.loaded, plt: itemTotals.pltLoaded, dot: "bg-emerald-500", text: "text-emerald-600" },
@@ -3731,7 +3730,7 @@ export default function LoadOperation() {
                     );
                   })}
                 </div>
-                <div className="space-y-1">
+                <div className={`space-y-1 ${totalsOpen ? "" : "hidden"}`}>
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
                     <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${itemPct}%` }} />
                   </div>
@@ -3749,13 +3748,17 @@ export default function LoadOperation() {
             {canScanThisLoad && (
               <div className={activeTab !== "scanner" ? "hidden" : ""}>
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-                  <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
+                  <button
+                    type="button"
+                    onClick={() => setScannerOpen((o) => !o)}
+                    aria-expanded={scannerOpen}
+                    className={`flex w-full items-center gap-2 px-4 sm:px-5 py-3.5 text-left transition-colors hover:bg-gray-50 ${scannerOpen ? "border-b border-gray-100" : ""}`}
+                  >
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
                     <span className="text-sm font-semibold text-gray-900">Scan Items</span>
-                    {/* Add Extra moved up to the Total/Scanner tab row (above), so it's visible
-                        from both tabs instead of only here. */}
-                  </div>
-                  <div className="px-4 sm:px-5 py-4 space-y-3">
+                    <ChevronDown className={`ml-auto h-4 w-4 text-gray-400 transition-transform ${scannerOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  <div className={`px-4 sm:px-5 py-4 space-y-3 ${scannerOpen ? "" : "hidden"}`}>
                     <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
                       <button
                         onClick={() => setItemScanMode("camera")}
@@ -3858,6 +3861,16 @@ export default function LoadOperation() {
                 </div>
                 <div className="ml-auto flex items-center gap-2">
                   {allComplete && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">ALL LOADED</span>}
+                  {canScanThisLoad && (
+                    <button
+                      type="button"
+                      onClick={() => setExtraDialogOpen(true)}
+                      title="Add an item not on this slip, or more than what's remaining"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-2.5 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
+                    >
+                      <PackagePlus className="h-3.5 w-3.5" /> Add Extra
+                    </button>
+                  )}
                   {items.length > 0 && (
                     <button
                       onClick={downloadLoadingItemsCsv}
@@ -3883,74 +3896,57 @@ export default function LoadOperation() {
                   {filteredItems.length === 0 ? (
                     <p className="py-8 text-center text-sm text-gray-400">{itemStatusFilter || itemSearchText ? "No items match this filter." : "No items on this slip."}</p>
                   ) : (
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-2">
                       {filteredItems.map((row) => {
                         const extra = Math.max(0, row.loaded - row.expected);
-                        const pct = row.expected > 0 ? Math.min(100, Math.round((Math.min(row.loaded, row.expected) / row.expected) * 100)) : (row.loaded > 0 ? 100 : 0);
                         const noStock = (row.stockAvailable ?? 0) <= 0;
                         const tone = row.isComplete
                           ? { bar: "bg-emerald-500", edge: "border-l-emerald-500", badge: "bg-emerald-50 text-emerald-700 ring-emerald-200", label: "Loaded" }
                           : row.loaded > 0
                             ? { bar: "bg-amber-500", edge: "border-l-amber-400", badge: "bg-amber-50 text-amber-700 ring-amber-200", label: "Partial" }
                             : { bar: "bg-gray-300", edge: "border-l-gray-300", badge: "bg-gray-50 text-gray-500 ring-gray-200", label: "Pending" };
-                        const stat = (label: string, value: number, valueClass: string) => (
-                          <div className="rounded-lg bg-gray-50 px-1.5 py-1.5 text-center">
-                            <p className="text-[10px] font-medium uppercase tracking-wide text-gray-500">{label}</p>
-                            <p className={`text-base font-bold tabular-nums leading-tight ${valueClass}`}>{value}</p>
-                          </div>
-                        );
                         const expanded = !!row.barcode && expandedItemBarcode === row.barcode;
                         return (
                           <div key={row.barcode ?? `row-${row.id}`} className={expanded ? "col-span-2" : undefined}>
                             <div
                               role={row.barcode ? "button" : undefined}
                               onClick={() => row.barcode && setExpandedItemBarcode((cur) => (cur === row.barcode ? null : row.barcode!))}
-                              className={`flex h-full flex-col rounded-xl border border-l-4 border-gray-200 bg-white p-3 text-left shadow-sm transition hover:shadow-md ${tone.edge}`}
+                              className={`flex items-center gap-2.5 rounded-lg border border-l-4 border-gray-200 bg-white px-2.5 py-2 text-left shadow-sm transition hover:shadow ${tone.edge}`}
                             >
-                              <div className="flex min-w-0 items-start gap-2.5">
-                                {/* Tap the picture to enlarge it (zoomable); the card itself toggles the history. */}
-                                <ItemRowThumb name={row.itemName} className="h-16 w-16" />
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex min-w-0 items-start justify-between gap-2">
-                                    <p className="min-w-0 break-words text-sm font-semibold leading-snug text-gray-900">{row.itemName ?? "—"}</p>
-                                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${tone.badge}`}>{tone.label}</span>
-                                  </div>
-                                  <p className="mt-0.5 break-all font-mono text-[11px] text-gray-400">{row.barcode || "—"}{row.sapCode ? ` · SAP ${row.sapCode}` : ""}</p>
-                                  {noStock && <span className="mt-1 inline-block rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
-                                </div>
+                              {/* Tap the picture to enlarge it (zoomable); the row itself toggles the history. */}
+                              <ItemRowThumb name={row.itemName} className="h-10 w-10 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-semibold text-gray-900">{row.itemName ?? "—"}</p>
+                                <p className="truncate font-mono text-[11px] text-gray-400">
+                                  {row.barcode || "—"}{row.sapCode ? ` · SAP ${row.sapCode}` : ""}{(row.itemsPerPallet ?? 0) > 0 ? ` · ${row.itemsPerPallet}/plt` : ""}
+                                </p>
+                                <p className="mt-0.5 text-sm tabular-nums text-gray-600">
+                                  Expected <span className="font-bold text-gray-900">{row.expected}</span>
+                                  <span className="text-gray-300"> · </span>
+                                  Loaded <span className="font-bold text-emerald-600">{row.loaded}</span>
+                                  <span className="text-gray-300"> · </span>
+                                  Remaining <span className="font-bold text-[#001d6e]">{row.remaining}</span>
+                                  <span className="text-gray-300"> · </span>
+                                  Stock <span className={`font-bold ${noStock ? "text-red-600" : "text-gray-700"}`}>{row.stockAvailable ?? 0}</span>
+                                  {extra > 0 && <span className="ml-1.5 font-bold text-amber-600">+{extra} extra</span>}
+                                  {noStock && <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
+                                </p>
                               </div>
-
-                              <div className="mt-3 grid grid-cols-4 gap-1.5">
-                                {stat("Expected", row.expected, "text-gray-900")}
-                                {stat("Loaded", row.loaded, "text-emerald-600")}
-                                {stat("Remaining", row.remaining, "text-[#001d6e]")}
-                                {stat("Stock", row.stockAvailable ?? 0, noStock ? "text-red-600" : "text-gray-600")}
-                              </div>
-                              {extra > 0 && <p className="mt-1.5 text-xs font-bold text-amber-600">+{extra} extra</p>}
+                              <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${tone.badge}`}>{tone.label}</span>
 
                               {canScanThisLoad && row.barcode && (
-                                <div className="mt-3 flex items-center justify-center gap-3">
+                                <div className="flex shrink-0 items-center gap-1">
                                   <Button size="sm" variant="ghost" disabled={row.loaded <= 0}
-                                    className="h-8 w-8 rounded-full bg-red-100 p-0 text-base font-bold text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+                                    className="h-7 w-7 rounded-full bg-red-100 p-0 text-sm font-bold text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
                                     title="Remove from loaded quantity"
                                     onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}>−</Button>
-                                  <span className="text-xs font-medium text-gray-500">Adjust loaded</span>
+                                  <span className="min-w-[2.25rem] text-center text-sm font-bold tabular-nums text-gray-900" title="Current loaded quantity">{row.loaded}</span>
                                   <Button size="sm" variant="ghost"
-                                    className="h-8 w-8 rounded-full bg-emerald-100 p-0 text-base font-bold text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
+                                    className="h-7 w-7 rounded-full bg-emerald-100 p-0 text-sm font-bold text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
                                     title="Add to loaded quantity"
                                     onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
                                 </div>
                               )}
-
-                              <div className="mt-auto pt-3">
-                                <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
-                                  <div className={`h-full rounded-full ${tone.bar}`} style={{ width: `${pct}%` }} />
-                                </div>
-                                <div className="mt-1.5 flex items-center justify-between text-[11px] text-gray-500">
-                                  <span className="font-semibold">{pct}%</span>
-                                  {(row.itemsPerPallet ?? 0) > 0 && <span className="font-medium">{row.itemsPerPallet} per pallet</span>}
-                                </div>
-                              </div>
                             </div>
                             {expanded && <div className="mt-1 rounded-xl border border-gray-200 bg-white">{renderLoadingItemHistoryPanel(row)}</div>}
                           </div>
