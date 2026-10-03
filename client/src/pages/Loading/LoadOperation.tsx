@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
+import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronLeft, ChevronRight, Download, FileText,
@@ -504,7 +505,7 @@ export default function LoadOperation() {
   // a filter icon on each column header, and removable chips. Options come from the records on
   // this page, so a checklist never offers a value that would filter everything away.
   const recordDistinct = (values: (string | null | undefined)[]): FilterOption[] =>
-    Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean))).sort().map((v) => ({ value: v, label: v }));
+    Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })).map((v) => ({ value: v, label: v }));
   // Bucketed to a day exactly as the matcher buckets the cell (lib/columnFilters dayBucket).
   const recordDayOptions = (values: (string | null | undefined)[]) =>
     recordDistinct(values.map((v) => (v ? formatDay(new Date(v), "yyyy-MM-dd") : null)));
@@ -1339,7 +1340,7 @@ export default function LoadOperation() {
   const stvPlant = pendingSlip?.slip?.plant ?? slip?.plant ?? "";
   const stvsQuery = useQuery<string[]>({
     queryKey: ["/api/order-scan/stvs", stvPlant],
-    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(stvPlant)}`).then((r) => r.json()),
+    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(stvPlant)}`).then((r) => r.json()).then((l: string[]) => sortNatural(l)),
     enabled: !!stvPlant,
   });
   const stvs = stvsQuery.data ?? [];

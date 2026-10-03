@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { sortNatural } from "@/lib/utils";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Card } from "@/components/ui/card";
@@ -390,7 +391,7 @@ export default function SortSlips() {
     enabled: createOpen && !!pickedOrder?.plant,
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(pickedOrder?.plant ?? "")}`);
-      return res.json() as Promise<string[]>;
+      return sortNatural((await res.json()) as string[]);
     },
   });
   const stvs = stvsQuery.data ?? [];

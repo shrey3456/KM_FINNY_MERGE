@@ -545,7 +545,13 @@ export default function ExpenseVoucher() {
     // this guard, "102547A" was misread as a driver search (found nothing),
     // while the unsuffixed "102547" matched *both* 102547A and 102547B via
     // a `contains` filter and silently returned whichever came back first.
-    const isDriverSearch = /[a-zA-Z]/.test(term) && !/^\d/.test(term);
+    //
+    // A complete voucher number typed or pasted whole ("KM2627-AEV-RV2609") starts with a letter
+    // too, so it needs its own check ahead of the driver rule: letters+digits, then one or more
+    // hyphenated parts. Driver names never contain a digit, so this can't swallow one. It is sent
+    // as-is — the prefix box must NOT be prepended to a number that already carries its own.
+    const isFullVoucherNumber = /^[a-zA-Z]+\d+(-[a-zA-Z0-9]+)+$/.test(term);
+    const isDriverSearch = !isFullVoucherNumber && /[a-zA-Z]/.test(term) && !/^\d/.test(term);
 
     if (isDriverSearch) {
       // Driver name is searched as-is; the server merges ALL of that driver's
@@ -562,7 +568,7 @@ export default function ExpenseVoucher() {
     }
 
     // Voucher-number search
-    const fullVoucherNumber = `${voucherPrefix}${term}`;
+    const fullVoucherNumber = isFullVoucherNumber ? term.toUpperCase() : `${voucherPrefix}${term}`;
     setSearchProgress(0);
     if (searchMode === "voucher" && fullVoucherNumber === selectedOrder) {
       setSearchStage("Refreshing...");

@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { sortNatural } from "@/lib/utils";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -963,7 +964,7 @@ export default function ScanOrderPage() {
   const osStvsQuery = useQuery<string[]>({
     queryKey: ["/api/order-scan/stvs", activeOrderScanSession?.plant],
     queryFn: () =>
-      apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(activeOrderScanSession!.plant)}`).then((r) => r.json()),
+      apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(activeOrderScanSession!.plant)}`).then((r) => r.json()).then((l: string[]) => sortNatural(l)),
     enabled: !!activeOrderScanSession?.plant,
   });
 

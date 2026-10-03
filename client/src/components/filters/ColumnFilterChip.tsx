@@ -112,7 +112,12 @@ export function ColumnFilterPopoverContent({
     initial && initial.operator !== "in" ? initial.value : "",
   );
 
-  const filteredOptions = column.options.filter((o) => o.label.toLowerCase().includes(search.toLowerCase()));
+  // The Dispatch Directory column lists PLT1, PLT2 … PLT10 in natural order — a plain text sort
+  // (what the option lists arrive in) would put PLT10 right after PLT1.
+  const orderedOptions = column.id === "stv"
+    ? [...column.options].sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" }))
+    : column.options;
+  const filteredOptions = orderedOptions.filter((o) => o.label.toLowerCase().includes(search.toLowerCase()));
 
   const changeOperator = (id: string) => {
     setOperator(id);

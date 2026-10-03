@@ -793,7 +793,11 @@ router.get('/order-scan/stvs', async (req: Request, res: Response) => {
       .from(plantStvs)
       .where(eq(plantStvs.plantId, plant.id));
 
-    res.json(stvRows.map((r) => r.stv));
+    // Natural order — PLT1, PLT2, … PLT10 — rather than the database's arbitrary row order (or a
+    // plain text sort, which would put PLT10 before PLT2). Every Dispatch Directory dropdown in
+    // the app (Loading, Unloading, Scan, Sort Slip) reads this endpoint, so sorting here fixes
+    // them all at once.
+    res.json(stvRows.map((r) => r.stv).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })));
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to fetch Dispatch Directories' });
   }
