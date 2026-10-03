@@ -707,6 +707,8 @@ export default function LoadOperation() {
   const [scannerOpen, setScannerOpen] = useState(true);
   // The Load Totals block (tiles and progress bar) opens and closes from its header.
   const [totalsOpen, setTotalsOpen] = useState(true);
+  // The panel under the Total / Scanner / Owner History row opens and closes with the arrow on that row.
+  const [panelsOpen, setPanelsOpen] = useState(true);
   // Same click-to-filter tiles as Order Scan's own Order Totals card (Total/Loaded/Remaining/
   // Extra) — narrows the items table below to just that bucket; clicking the active one clears it.
   const [itemStatusFilter, setItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
@@ -3655,15 +3657,24 @@ export default function LoadOperation() {
                     </span>
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setPanelsOpen((o) => !o)}
+                  aria-expanded={panelsOpen}
+                  title={panelsOpen ? "Hide this panel" : "Show this panel"}
+                  className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                >
+                  <ChevronDown className={`h-4 w-4 transition-transform ${panelsOpen ? "rotate-180" : ""}`} />
+                </button>
               </div>
             )}
 
-            {activeTab === "owner" && (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
+            {panelsOpen && activeTab === "owner" && (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
               <div className="border rounded-md overflow-hidden bg-white">
                 <OwnerTimelineSummary timeline={loadHandoffsQuery.data!.timeline} />
               </div>
             )}
-            {activeTab === "sort" && (
+            {panelsOpen && activeTab === "sort" && (
               <div className="border rounded-md overflow-hidden bg-white">
                 <SortLoaderTimelineSummary timeline={sortLoaderHistoryQuery.data?.timeline ?? []} />
               </div>
@@ -3673,7 +3684,7 @@ export default function LoadOperation() {
                 false), so Totals is their default view too — shown unless they've switched to
                 Owner/Sort History, which they CAN still reach. */}
             <div className={
-              activeTab === "total" || (!canScanThisLoad && activeTab !== "owner" && activeTab !== "sort")
+              panelsOpen && (activeTab === "total" || (!canScanThisLoad && activeTab !== "owner" && activeTab !== "sort"))
                 ? "" : "hidden"
             }>
               <div className="flex min-w-0 flex-col gap-1 rounded-xl border bg-white p-1.5 shadow-sm">
@@ -3747,7 +3758,7 @@ export default function LoadOperation() {
                 ever mounts (see Stage B(pre) above), so there's no "not linked yet" case to
                 guard here anymore. Same Camera/Manual pattern as order search. */}
             {canScanThisLoad && (
-              <div className={activeTab !== "scanner" ? "hidden" : ""}>
+              <div className={!panelsOpen || activeTab !== "scanner" ? "hidden" : ""}>
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                   <button
                     type="button"
@@ -3893,7 +3904,7 @@ export default function LoadOperation() {
                   to a row, since the 5-column table leaves a tablet cramped. Phones keep the
                   table above, desktop keeps it too, and so does the rotated kiosk view. */}
               {!rotated && (
-                <div className={`hidden min-h-0 flex-1 overflow-y-auto p-3 ${itemCardsShow}`} style={{ maxHeight: openSlipTableMaxHeight }}>
+                <div className={`hidden min-h-0 overflow-y-auto p-3 ${itemCardsShow}`} style={scannerOpen ? { maxHeight: openSlipTableMaxHeight } : undefined}>
                   {filteredItems.length === 0 ? (
                     <p className="py-8 text-center text-sm text-gray-400">{itemStatusFilter || itemSearchText ? "No items match this filter." : "No items on this slip."}</p>
                   ) : (
@@ -4956,7 +4967,9 @@ export default function LoadOperation() {
               <Input
                 type="number" min={1}
                 value={adjustQty === 0 ? "" : adjustQty}
-                onChange={(e) => setAdjustQty(Math.max(1, parseInt(e.target.value, 10) || 0))}
+                onFocus={() => setAdjustQty(0)}
+                onChange={(e) => setAdjustQty(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                onBlur={() => setAdjustQty((q) => Math.max(1, q))}
                 className="h-11 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-lg font-bold focus-visible:ring-0 focus-visible:ring-offset-0"
               />
               <Button
