@@ -1066,6 +1066,51 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
 
     UNION ALL
 
+    -- Adjust Exchange Extra's own ledger rows (server/routes/order-scan.ts's
+    -- /order-scan/exchange/credit) — moving Purchase from the Extra's own day to the shortfall's
+    -- day it was credited to. Two rows per credit: a negative one on the Extra's session (removed
+    -- from there) and a positive one on the target's session (added there) — each shows up here,
+    -- in ITS OWN order's Scan History, with reason text naming the other side so either one can
+    -- be traced back to its pair without already knowing about it. id offset 8000000000+ keeps it
+    -- out of every other branch's id space. Never a real scan, so pallets/qty breakdown fields are
+    -- blank the same way events-backfill's own rows are.
+    SELECT
+      (8000000000 + sm.id) AS id,
+      sm.barcode,
+      COALESCE(pid.name, pb.name) AS "itemName",
+      NULL::integer AS pallets,
+      ABS(sm.qty) AS "totalQty",
+      NULL::integer AS "itemsPerPallet",
+      NULL::integer AS "looseQty",
+      false AS "isExtra",
+      false AS "isEmptyBox",
+      false AS "isExchange",
+      false AS "isDispatch",
+      false AS "isUnload",
+      false AS "isAdjust",
+      'scan' AS "sourceKind",
+      NULL::text AS "emptyBoxNote",
+      NULL::text AS stv,
+      sm.created_by_code AS "scannedByCode",
+      un.name AS "scannedByName",
+      sm.created_at AS "scannedAt",
+      NULL::timestamp AS "adjustedAt",
+      false AS voided,
+      NULL::timestamp AS "voidedAt",
+      NULL::text AS "voidReason",
+      NULL::text AS "voidedByName",
+      COALESCE(pid.new_sr, pb.new_sr) AS "srNo",
+      sm.reason AS "orderName",
+      NULL::text AS "orderDate",
+      sm.plant AS "plant"
+    FROM stock_movements sm
+    LEFT JOIN products pid ON pid.id = sm.product_id
+    LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(sm.barcode))
+    LEFT JOIN user_name un ON un.user_code = sm.created_by_code
+    WHERE sm.origin = 'credit'
+
+    UNION ALL
+
     -- Sort Slip picks (server/routes/sort-slips.ts) — "this much has been brought to the
     -- platform", typed in by a loader rather than scanned. They move no stock and are NOT a load:
     -- they carry their own sourceKind so they read as "Sort Pick" here and stay out of the

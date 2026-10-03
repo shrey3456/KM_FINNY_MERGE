@@ -327,7 +327,8 @@ export async function checkStockFromEvents(q: Queryable): Promise<{ plantRows: P
 // group's EARLIEST real event (so it lands in the correct Opening-vs-Purchase period bucket in
 // the common case, rather than always "today"), tagged origin='events-backfill' so it's always
 // identifiable later — never silently indistinguishable from a real scan's own ledger row.
-type LedgerGapRow = { barcode: string; plant: string; earliestAt: string; gap: number; productId: number | null; sessionId: number | null };
+// extraGap is the Extra part of the gap (optional — only Order Scan sets it, see findScanLedgerGaps).
+type LedgerGapRow = { barcode: string; plant: string; earliestAt: string; gap: number; extraGap?: number; productId: number | null; sessionId: number | null };
 
 // Order Scan and Unloading gaps are found PER SESSION (order_import_sessions.id /
 // unload_import_sessions.id) — the exact same unit a real scan/unload completion writes its own
@@ -350,34 +351,43 @@ const LOAD_BACKFILL_REASON = 'Backfilled from Loading events (ledger reconciliat
 // (see applyLiveScanStock/applySessionStock in orderGroupReport.ts).
 async function findScanLedgerGaps(q: Queryable): Promise<LedgerGapRow[]> {
   const { rows } = await q.query(`
+    -- extra_qty: the Extra part of the scanned qty (is_extra events). Without it the backfill
+    -- booked a whole Extra as plain Purchase with extra_qty 0, so Overall Stock's Extra column
+    -- never showed it.
     WITH raw AS (
       SELECT e.session_id, LOWER(TRIM(e.barcode)) AS bkey,
-             MIN(e.barcode) AS barcode, MIN(s.plant) AS plant, SUM(e.total_qty)::int AS qty, MIN(e.scanned_at) AS earliest_at
+             MIN(e.barcode) AS barcode, MIN(s.plant) AS plant, SUM(e.total_qty)::int AS qty,
+             SUM(CASE WHEN e.is_extra THEN e.total_qty ELSE 0 END)::int AS extra_qty,
+             MIN(e.scanned_at) AS earliest_at
       FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
       WHERE e.voided IS NOT TRUE AND COALESCE(e.is_credit, false) = false AND s.plant IS NOT NULL
       GROUP BY 1, 2
     ),
     ledger AS (
-      SELECT session_id, LOWER(TRIM(barcode)) AS bkey, SUM(qty)::int AS qty
+      SELECT session_id, LOWER(TRIM(barcode)) AS bkey, SUM(qty)::int AS qty, SUM(extra_qty)::int AS extra_qty
       FROM stock_movements
       WHERE type = 'receive' AND COALESCE(source, '') <> 'unloading' AND session_id IS NOT NULL
         AND NOT (origin = 'events-backfill' AND reason = '${SCAN_BACKFILL_REASON}')
+        -- Adjust Exchange Extra's Purchase-move rows (origin 'credit') are not scan receipts, so the
+        -- gap must not count them — otherwise a reconciliation would undo the move.
+        AND COALESCE(origin, '') <> 'credit'
       GROUP BY 1, 2
     )
     SELECT raw.barcode, raw.plant, raw.earliest_at AS "earliestAt", raw.session_id AS "sessionId",
            (raw.qty - COALESCE(ledger.qty, 0)) AS gap,
+           (raw.extra_qty - COALESCE(ledger.extra_qty, 0)) AS "extraGap",
            (SELECT id FROM products WHERE LOWER(TRIM(barcode)) = LOWER(TRIM(raw.barcode)) LIMIT 1) AS "productId"
     FROM raw LEFT JOIN ledger ON ledger.session_id = raw.session_id AND ledger.bkey = raw.bkey
-    WHERE (raw.qty - COALESCE(ledger.qty, 0)) <> 0
+    WHERE (raw.qty - COALESCE(ledger.qty, 0)) <> 0 OR (raw.extra_qty - COALESCE(ledger.extra_qty, 0)) <> 0
   `);
-  return rows.map((r: any) => ({ barcode: r.barcode, plant: r.plant, earliestAt: r.earliestAt, gap: Number(r.gap), productId: r.productId != null ? Number(r.productId) : null, sessionId: r.sessionId != null ? Number(r.sessionId) : null }));
+  return rows.map((r: any) => ({ barcode: r.barcode, plant: r.plant, earliestAt: r.earliestAt, gap: Number(r.gap), extraGap: Number(r.extraGap), productId: r.productId != null ? Number(r.productId) : null, sessionId: r.sessionId != null ? Number(r.sessionId) : null }));
 }
 
 async function insertScanLedgerGap(client: Queryable, g: LedgerGapRow): Promise<void> {
   await client.query(
     `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at, origin)
-     VALUES ($1, $2, $3, $4, 0, 'receive', $5, $6, $7, 'events-backfill')`,
-    [g.barcode, g.productId, g.plant, g.gap, SCAN_BACKFILL_REASON, g.sessionId, g.earliestAt],
+     VALUES ($1, $2, $3, $4, $5, 'receive', $6, $7, $8, 'events-backfill')`,
+    [g.barcode, g.productId, g.plant, g.gap, g.extraGap ?? 0, SCAN_BACKFILL_REASON, g.sessionId, g.earliestAt],
   );
 }
 

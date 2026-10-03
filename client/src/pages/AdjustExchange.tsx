@@ -59,6 +59,8 @@ type ExtraRow = {
   scannedAt: string; scannedByName: string | null;
   voided: boolean; voidReason: string | null;
   plant: string; csvFileName: string; orderDate: string;
+  srNo: string | null;
+  itemsPerPallet: number | null;
 };
 type ShortfallRow = {
   itemId: number; sessionId: number; barcode: string; itemName: string | null;
@@ -70,9 +72,15 @@ type ShortfallRow = {
 // product scanned as Extra several times that day (different STVs, different moments) used to
 // list every single entry separately. Clicking a product's row expands it to that full history.
 type GroupedExtra = {
-  key: string; barcode: string; itemName: string | null; plant: string;
+  key: string; barcode: string; itemName: string | null; srNo: string | null; plant: string;
   totalQty: number; totalAvailable: number; entryCount: number; anyVoided: boolean;
+  extraPallets: number; availablePallets: number; creditedQty: number;
 };
+
+// Pallets for a quantity of one product: qty ÷ items per pallet (0 when the pallet size is unknown).
+const palletsOf = (qty: number, itemsPerPallet: number | null | undefined) =>
+  itemsPerPallet && itemsPerPallet > 0 ? qty / itemsPerPallet : 0;
+const fmtPallets = (n: number) => (Math.round(n * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
 export default function AdjustExchange() {
   const [rootRef, pageWidth] = usePageWidth();
@@ -84,15 +92,21 @@ export default function AdjustExchange() {
   const isAdmin = ["admin", "super-admin"].includes(role);
   const canWrite = isAdmin || hasPageWriteAccess("adjust-exchange");
 
-  const [date, setDate] = useState(todayIST());
+  // Persisted like the plant filter below, so a refresh or a page change keeps the chosen date.
+  const [date, setDate] = usePersistentFilter("adjustExchange:date", todayIST());
   const [selectedPlant, setSelectedPlant] = usePersistentFilter("adjustExchange:plant", "");
 
-  const { data: allPlants = [] } = useQuery<Array<{ name: string }>>({
+  const { data: allPlants = [] } = useQuery<Array<{ name: string; bgColor: string; textColor: string; borderColor: string }>>({
     queryKey: ["/api/plants", "adjust-exchange"],
     queryFn: () => apiRequest("GET", "/api/plants").then((r) => r.json()),
     staleTime: 60000,
   });
   const plantOptions = allPlants.map((p) => p.name).sort((a, b) => a.localeCompare(b));
+  // Same colors Plant Management sets, so the picker matches the plant badges in the table.
+  const plantChipStyle = (name: string) => {
+    const cfg = allPlants.find((p) => p.name.toUpperCase() === name.toUpperCase());
+    return cfg ? { backgroundColor: cfg.bgColor, color: cfg.textColor, borderColor: cfg.borderColor } : undefined;
+  };
 
   // ── The product/Extra item list ────────────────────────────────────────────────────────────
   const extrasQuery = useQuery<ExtraRow[]>({
@@ -110,9 +124,12 @@ export default function AdjustExchange() {
     const map = new Map<string, GroupedExtra>();
     for (const r of extrasQuery.data ?? []) {
       const key = `${r.plant}::${r.barcode}`;
-      const g = map.get(key) ?? { key, barcode: r.barcode, itemName: r.itemName, plant: r.plant, totalQty: 0, totalAvailable: 0, entryCount: 0, anyVoided: false };
+      const g = map.get(key) ?? { key, barcode: r.barcode, itemName: r.itemName, srNo: r.srNo, plant: r.plant, totalQty: 0, totalAvailable: 0, entryCount: 0, anyVoided: false, extraPallets: 0, availablePallets: 0, creditedQty: 0 };
       g.totalQty += r.totalQty;
       g.totalAvailable += r.available;
+      g.extraPallets += palletsOf(r.totalQty, r.itemsPerPallet);
+      g.availablePallets += palletsOf(r.available, r.itemsPerPallet);
+      g.creditedQty += r.creditedQty;
       g.entryCount += 1;
       if (r.voided) g.anyVoided = true;
       if (!g.itemName && r.itemName) g.itemName = r.itemName;
@@ -120,6 +137,21 @@ export default function AdjustExchange() {
     }
     return Array.from(map.values()).sort((a, b) => (a.itemName ?? a.barcode).localeCompare(b.itemName ?? b.barcode));
   }, [extrasQuery.data]);
+  // Search narrows the product list (table and cards) by Sr No, item name, or barcode. The
+  // status card above keeps the full date/plant totals.
+  const [search, setSearch] = usePersistentFilter("adjustExchange:search", "");
+  const visibleGroups = useMemo(() => {
+    // A product with nothing left to give (all of it closed to earlier shortfalls, or moved to
+    // another product) drops off the list. One with a voided scan stays, so its history is reachable.
+    const open = groupedExtras.filter((g) => g.totalAvailable > 0 || g.anyVoided);
+    const q = search.trim().toLowerCase();
+    if (!q) return open;
+    return open.filter((g) =>
+      (g.srNo ?? "").toLowerCase().includes(q) ||
+      (g.itemName ?? "").toLowerCase().includes(q) ||
+      g.barcode.toLowerCase().includes(q),
+    );
+  }, [groupedExtras, search]);
   const [expandedGroupKey, setExpandedGroupKey] = useState<string | null>(null);
 
   // ── The side panel — appears next to the list once an Extra's Adjust is clicked ────────────
@@ -199,6 +231,8 @@ export default function AdjustExchange() {
       invalidateExchangeQueries();
       setExchangeTarget(null);
       setExchangeSearch("");
+      // Collapse whatever product was open, so the move does not leave another one expanded.
+      setExpandedGroupKey(null);
     },
     onError: (err: any) => toast({ title: "Could not exchange this product", description: err?.message ?? String(err), variant: "destructive" }),
   });
@@ -229,6 +263,8 @@ export default function AdjustExchange() {
       toast({ title: "Exchange recorded", description: "The shortfall dropped and a Credited via Extra entry now shows in its history." });
       invalidateExchangeQueries();
       closePanel();
+      // Collapse whatever product was open, so the move does not leave another one expanded.
+      setExpandedGroupKey(null);
     },
     onError: (err: any) => toast({ title: "Could not record this exchange", description: err?.message ?? String(err), variant: "destructive" }),
   });
@@ -269,12 +305,15 @@ export default function AdjustExchange() {
   // same product once the first is fully claimed).
   const bestEntryFor = (key: string) =>
     (extrasQuery.data ?? [])
-      .filter((e) => `${e.plant}::${e.barcode}` === key && !e.voided && e.available > 0)
+      .filter((e) => `${e.plant}::${e.barcode}` === key && !e.voided && e.available > 0 && e.creditedQty === 0)
       .sort((a, b) => a.scannedAt.localeCompare(b.scannedAt))[0];
 
   const groupColumns: DataTableColumn<GroupedExtra>[] = [
+    // Numeric accessor so Sort goes by number (10 after 9), not as text. A non-numeric Sr No
+    // sorts to the end.
+    { id: "srNo", header: "Sr No", align: "center", width: 31, sortable: true, totalable: false, accessor: (r) => (r.srNo && Number.isFinite(Number(r.srNo)) ? Number(r.srNo) : null), cellClassName: "tabular-nums text-gray-700", render: (r) => r.srNo ?? "—" },
     {
-      id: "item", header: "Item / Barcode", accessor: (r) => `${r.itemName ?? ""} ${r.barcode}`, totalable: false,
+      id: "item", header: "Item / Barcode", sortable: true, accessor: (r) => `${r.itemName ?? ""} ${r.barcode}`, totalable: false,
       cellClassName: "text-gray-900",
       render: (r) => (
         <div className="flex items-center gap-2">
@@ -286,10 +325,12 @@ export default function AdjustExchange() {
         </div>
       ),
     },
-    { id: "plant", header: "Plant", width: 110, totalable: false, accessor: (r) => r.plant, render: (r) => <PlantBadge plant={r.plant} className="px-2 py-0 text-[11px]" /> },
-    { id: "entries", header: "Entries", align: "right", width: 80, accessor: (r) => r.entryCount, cellClassName: "tabular-nums text-gray-700" },
-    { id: "extraQty", header: "Extra Qty", align: "right", width: 90, accessor: (r) => r.totalQty, cellClassName: "tabular-nums text-amber-600 font-medium" },
-    { id: "available", header: "Available", align: "right", width: 90, accessor: (r) => r.totalAvailable, cellClassName: "tabular-nums text-[#001d6e] font-semibold" },
+    { id: "plant", header: "Plant", align: "center", width: 110, sortable: true, totalable: false, accessor: (r) => r.plant, render: (r) => <PlantBadge plant={r.plant} className="px-2 py-0 text-[11px]" /> },
+    { id: "entries", header: "Entries", align: "center", width: 80, sortable: true, accessor: (r) => r.entryCount, cellClassName: "tabular-nums text-gray-700" },
+    // Extra Qty is what is still left to give here — qty already closed to an earlier shortfall (or
+    // moved to another product) comes off it straight away. Full history stays in the expanded rows.
+    { id: "extraQty", header: "Extra Qty", align: "center", width: 90, sortable: true, accessor: (r) => r.totalAvailable, cellClassName: "tabular-nums text-amber-600 font-medium" },
+    { id: "extraPallets", header: "Extra Plt", align: "right", width: 90, sortable: true, accessor: (r) => Math.round(r.availablePallets * 100) / 100, render: (r) => fmtPallets(r.availablePallets), cellClassName: "tabular-nums text-amber-600" },
     {
       // "Status": whether every scan of this product on this date is still a normal, active
       // Extra ("Active"), or whether at least one of them has been Voided ("Includes voided") —
@@ -299,24 +340,6 @@ export default function AdjustExchange() {
         ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">Includes voided</span>
         : <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">Active</span>,
     },
-    {
-      id: "actions", header: "", width: 210, fixedWidth: true, sortable: false, totalable: false, preventRowClick: true,
-      render: (r) => {
-        if (!canWrite) return null;
-        const entry = bestEntryFor(r.key);
-        if (!entry) return <span className="text-xs text-gray-300">Nothing to give</span>;
-        return (
-          <div className="flex flex-wrap gap-1.5">
-            <Button size="sm" className="h-7 gap-1 bg-[#001d6e] px-2 text-xs hover:bg-[#001552]" onClick={() => openPanel(entry)}>
-              <ArrowLeftRight className="h-3.5 w-3.5" /> Adjust
-            </Button>
-            <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs text-[#001d6e] hover:bg-[#001d6e]/5" onClick={() => openExchangeDialog(entry)}>
-              <Repeat className="h-3.5 w-3.5" /> Exchange
-            </Button>
-          </div>
-        );
-      },
-    },
   ];
 
   // Card form of one Extra entry's own action row — same buttons entryColumns' actions column
@@ -325,18 +348,18 @@ export default function AdjustExchange() {
     if (!canWrite) return null;
     return (
       <div className="mt-2 flex flex-wrap gap-1.5">
-        {!e.voided && e.available > 0 && (
+        {!e.voided && e.available > 0 && e.creditedQty === 0 && (
           <Button
             size="sm"
             className={`h-7 gap-1 px-2 text-xs ${selectedExtra?.id === e.id ? "bg-[#00154b] ring-2 ring-[#001d6e]/40" : "bg-[#001d6e] hover:bg-[#001552]"}`}
             onClick={() => openPanel(e)}
           >
-            <ArrowLeftRight className="h-3.5 w-3.5" /> Adjust
+            <ArrowLeftRight className="h-3.5 w-3.5" /> Close earlier shortfall
           </Button>
         )}
-        {!e.voided && (
+        {!e.voided && e.creditedQty === 0 && (
           <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs text-[#001d6e] hover:bg-[#001d6e]/5" onClick={() => openExchangeDialog(e)}>
-            <Repeat className="h-3.5 w-3.5" /> Exchange
+            <Repeat className="h-3.5 w-3.5" /> Change product
           </Button>
         )}
         {!e.voided && (
@@ -385,14 +408,14 @@ export default function AdjustExchange() {
   // The whole page as cards — a product per card, its own history expanding underneath, same
   // data and actions the table gives on a wider screen.
   function GroupedExtraCards() {
-    if (groupedExtras.length === 0) {
+    if (visibleGroups.length === 0) {
       return <p className="py-10 text-center text-sm text-gray-400">{extrasQuery.isLoading ? "Loading…" : extrasQuery.isError ? (extrasQuery.error as Error).message : `No Extra scans on ${fmtDate(date)}.`}</p>;
     }
     return (
       // 2 columns once there's room for them (a phone stays 1) — an open card spans both so its
       // history has full width to lay out in, instead of being squeezed into half the row.
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {groupedExtras.map((g) => {
+        {visibleGroups.map((g) => {
           const isOpen = expandedGroupKey === g.key;
           const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}` === g.key);
           const entry = bestEntryFor(g.key);
@@ -422,10 +445,10 @@ export default function AdjustExchange() {
               {canWrite && entry && (
                 <div className="flex flex-wrap gap-1.5 border-t border-gray-100 px-3 py-2">
                   <Button size="sm" className="h-7 gap-1 bg-[#001d6e] px-2 text-xs hover:bg-[#001552]" onClick={() => openPanel(entry)}>
-                    <ArrowLeftRight className="h-3.5 w-3.5" /> Adjust
+                    <ArrowLeftRight className="h-3.5 w-3.5" /> Close earlier shortfall
                   </Button>
                   <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs text-[#001d6e] hover:bg-[#001d6e]/5" onClick={() => openExchangeDialog(entry)}>
-                    <Repeat className="h-3.5 w-3.5" /> Exchange
+                    <Repeat className="h-3.5 w-3.5" /> Change product
                   </Button>
                 </div>
               )}
@@ -445,7 +468,8 @@ export default function AdjustExchange() {
   }
 
   const entryColumns: DataTableColumn<ExtraRow>[] = [
-    { id: "csv", header: "CSV / Date", width: 190, totalable: false, accessor: (r) => r.orderDate, cellClassName: "text-xs text-gray-600", render: (r) => <>{r.csvFileName}<br /><span className="text-gray-400">{fmtDate(r.orderDate)}</span></> },
+    { id: "csv", header: "CSV", width: 190, totalable: false, accessor: (r) => r.csvFileName, cellClassName: "text-xs text-gray-600", render: (r) => r.csvFileName },
+    { id: "orderDate", header: "Date", width: 100, totalable: false, accessor: (r) => r.orderDate, cellClassName: "text-xs text-gray-600", render: (r) => fmtDate(r.orderDate) },
     { id: "extraQty", header: "Extra Qty", align: "right", width: 90, accessor: (r) => r.totalQty, cellClassName: "tabular-nums text-amber-600 font-medium" },
     { id: "available", header: "Available", align: "right", width: 90, accessor: (r) => r.available, cellClassName: "tabular-nums text-[#001d6e] font-semibold" },
     { id: "scannedBy", header: "Scanned By / At", width: 170, totalable: false, accessor: (r) => r.scannedByName, cellClassName: "text-xs text-gray-600", render: (r) => <>{r.scannedByName || "—"}<br /><span className="text-gray-400">{fmtIST(r.scannedAt)}</span></> },
@@ -459,18 +483,18 @@ export default function AdjustExchange() {
       id: "actions", header: "", width: 260, fixedWidth: true, sortable: false, totalable: false,
       render: (r) => !canWrite ? null : (
         <div className="flex flex-wrap gap-1.5">
-          {!r.voided && r.available > 0 && (
+          {!r.voided && r.available > 0 && r.creditedQty === 0 && (
             <Button
               size="sm"
               className={`h-7 gap-1 px-2 text-xs ${selectedExtra?.id === r.id ? "bg-[#00154b] ring-2 ring-[#001d6e]/40" : "bg-[#001d6e] hover:bg-[#001552]"}`}
               onClick={() => openPanel(r)}
             >
-              <ArrowLeftRight className="h-3.5 w-3.5" /> Adjust
+              <ArrowLeftRight className="h-3.5 w-3.5" /> Close earlier shortfall
             </Button>
           )}
-          {!r.voided && (
+          {!r.voided && r.creditedQty === 0 && (
             <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs text-[#001d6e] hover:bg-[#001d6e]/5" onClick={() => openExchangeDialog(r)}>
-              <Repeat className="h-3.5 w-3.5" /> Exchange
+              <Repeat className="h-3.5 w-3.5" /> Change product
             </Button>
           )}
           {!r.voided && (
@@ -503,10 +527,40 @@ export default function AdjustExchange() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__all__">All plants</SelectItem>
-            {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+            {plantOptions.map((p) => (
+              <SelectItem key={p} value={p}>
+                <span className="inline-flex items-center rounded-full border px-2 py-0 text-xs font-medium" style={plantChipStyle(p)}>{p}</span>
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <DateInput value={date} onChange={setDate} clearable={false} />
+        <div className="relative min-w-[12rem] flex-1 sm:max-w-xs">
+          <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-gray-400" />
+          <Input
+            value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search Sr No, item name or barcode…" className="h-9 pl-8 text-sm"
+          />
+        </div>
+      </div>
+
+      {/* Status card — what this date/plant selection holds at a glance. Counts come from the
+          same list the table shows, so they always match it. */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        {[
+          { label: "Products with Extra", value: groupedExtras.length.toLocaleString(), sub: null, tone: "text-gray-900" },
+          { label: "Extra scans", value: (extrasQuery.data?.length ?? 0).toLocaleString(), sub: null, tone: "text-gray-900" },
+          { label: "Extra qty", value: groupedExtras.reduce((n, g) => n + g.totalQty, 0).toLocaleString(), sub: `${fmtPallets(groupedExtras.reduce((n, g) => n + g.extraPallets, 0))} plt`, tone: "text-amber-600" },
+          { label: "Still available", value: groupedExtras.reduce((n, g) => n + g.totalAvailable, 0).toLocaleString(), sub: `${fmtPallets(groupedExtras.reduce((n, g) => n + g.availablePallets, 0))} plt`, tone: "text-[#001d6e]" },
+          { label: "Adjusted to previous date", value: groupedExtras.reduce((n, g) => n + g.creditedQty, 0).toLocaleString(), sub: `${fmtPallets((extrasQuery.data ?? []).reduce((n, e) => n + palletsOf(e.creditedQty, e.itemsPerPallet), 0))} plt`, tone: "text-emerald-700" },
+          { label: "Voided scans", value: (extrasQuery.data ?? []).filter((e) => e.voided).length.toLocaleString(), sub: null, tone: "text-red-600" },
+        ].map((t) => (
+          <div key={t.label} className="rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-sm">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">{t.label}</p>
+            <p className={`text-lg font-semibold tabular-nums ${t.tone}`}>{t.value}</p>
+            {t.sub && <p className="text-[11px] tabular-nums text-gray-500">{t.sub}</p>}
+          </div>
+        ))}
       </div>
 
       {/* Below TABLE_MIN_PAGE_WIDTH (tablets included, e.g. a Realme Pad 2 in portrait) this is
@@ -517,7 +571,8 @@ export default function AdjustExchange() {
       ) : (
         <DataTable<GroupedExtra>
           columns={groupColumns}
-          data={groupedExtras}
+          sortMode="client"
+          data={visibleGroups}
           getRowId={(r) => r.key}
           emptyState={extrasQuery.isLoading ? "Loading…" : extrasQuery.isError ? (extrasQuery.error as Error).message : `No Extra scans on ${fmtDate(date)}.`}
           enableZebraStripes

@@ -19,6 +19,7 @@ import Purchases from "@/pages/Purchases";
 import PrintOperations from "./pages/PrintOperationsFinal12";
 import Login from "./pages/Login";
 import ProformaSlips from "./pages/ProformaSlips";
+import LoadCsvUpload from "./pages/LoadCsvUpload";
 import Activities from "./pages/Activities";
 import Dispatch from "./pages/Dispatch";
 import ExpenseVoucher from "./pages/ExpenseVoucher";
@@ -271,6 +272,7 @@ function Router() {
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
         <ProtectedRoute path="/proforma-slips" component={ProformaSlips} requiredPage="proforma" />
+        <ProtectedRoute path="/load-csv-upload" component={LoadCsvUpload} requiredPage="proforma" />
         <ProtectedRoute path="/dispatch" component={Dispatch} requiredPage="dispatch" />
         <ProtectedRoute path="/expense-voucher" component={ExpenseVoucher} requiredPage="expense-voucher" />
         <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />

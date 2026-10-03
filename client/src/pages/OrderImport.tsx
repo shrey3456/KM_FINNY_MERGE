@@ -391,10 +391,10 @@ export default function OrderImport() {
 
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
-  // A brand-new order's date can be up to 2 days in the past (yesterday, day-before-yesterday)
+  // A brand-new order's date can be up to 5 days in the past (the last 5 days)
   // — matches the server's own allowance in POST /order-import/sessions. Used as both the date
   // picker's min= and the threshold below for when the past-date existing-order check kicks in.
-  const earliestOrderDateStr = getLocalISODate(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000));
+  const earliestOrderDateStr = getLocalISODate(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
   // Browse/lookup filters below are persisted for the sitting. The CSV UPLOAD form's own plant
   // and Order Date (above) deliberately are NOT — pre-filling the destination of an import from
   // a previous sitting invites importing a file against the wrong plant/date.
@@ -461,7 +461,7 @@ export default function OrderImport() {
     placeholderData: (previousData) => previousData,
   });
 
-  // Warns before a brand-new order gets an Order Date more than 2 days in the past (the server
+  // Warns before a brand-new order gets an Order Date more than 5 days in the past (the server
   // only accepts one that far back when it's a late part joining/reclaiming an existing group
   // for that exact plant+date — never for a genuinely new one). Only runs once both fields are
   // filled and the date is actually past the allowance, so it never fires for today, yesterday,
@@ -623,6 +623,9 @@ export default function OrderImport() {
   const refetchAllSessionQueries = () => {
     qc.refetchQueries({ queryKey: ["/api/order-import/sessions"], type: "all" });
     qc.refetchQueries({ queryKey: ["/api/order-scan/sessions"],   type: "all" });
+    // Recent Complete has its own key (not under "/api/order-scan/sessions"), so it must be
+    // refreshed explicitly — otherwise a reopened session stays listed there until a page reload.
+    qc.refetchQueries({ queryKey: ["/api/order-scan/sessions/recent-complete"], type: "all" });
     qc.refetchQueries({ queryKey: ["/api/order-scan/active"],     type: "all" });
     qc.refetchQueries({ queryKey: ["/api/order-scan/notification"], type: "all" });
     qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
@@ -917,7 +920,12 @@ export default function OrderImport() {
   const reopenMutation = useMutation({
     mutationFn: async (id: number) =>
       (await apiRequest("POST", `/api/order-scan/sessions/${id}/reopen`)).json(),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
+      // Drop the reopened row from Recent Complete straight away, so it does not wait on a
+      // background refetch (the row was staying visible until a page refresh).
+      qc.setQueryData<ScanSession[]>(["/api/order-scan/sessions/recent-complete"], (old) =>
+        (old ?? []).filter((s) => s.id !== id),
+      );
       toast({ title: "Session reopened", description: "Scanning can continue on it now.", className: "bg-green-50 border-green-200 text-green-900" });
     },
     onError: (err: any) => {
@@ -1072,7 +1080,7 @@ export default function OrderImport() {
     if (isPastDateBlocked) {
       toast({
         title: "This Order Date is in the past",
-        description: `No existing order for ${plant} on ${orderDate} — a brand-new order can't use a past date. Pick today or later, or the correct existing date for a late part.`,
+        description: `No existing order for ${plant} on ${orderDate} — a brand-new order can't use a date more than 5 days back. Pick a date within the last 5 days, or the correct existing date for a late part.`,
         variant: "destructive",
       });
       return;
@@ -1534,7 +1542,7 @@ export default function OrderImport() {
                     defense against a manually typed-in past date slipping past the picker. */}
                 <Input type="date" min={earliestOrderDateStr} className={`h-10 text-sm w-full rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 {isPastDateBlocked && (
-                  <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
+                  <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick a date within the last 5 days.</p>
                 )}
               </div>
               {/* File */}
@@ -1554,7 +1562,7 @@ export default function OrderImport() {
                 </Button>
                 <Button className="h-10 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-full" onClick={handleImportClick}
                   disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick a date within the last 5 days" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>
@@ -1595,7 +1603,7 @@ export default function OrderImport() {
                   <Input type="date" min={earliestOrderDateStr} className={`h-11 w-full text-sm px-2 rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
                 </div>
                 {isPastDateBlocked && (
-                  <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick today or later.</p>
+                  <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick a date within the last 5 days.</p>
                 )}
               </div>
               <div className="flex gap-2">
@@ -1605,7 +1613,7 @@ export default function OrderImport() {
                 </Button>
                 <Button className="h-11 flex-1 bg-[#001d6e] hover:bg-[#00154b] text-white rounded-full" onClick={handleImportClick}
                   disabled={selectedFiles.length === 0 || !plant.trim() || importMutation.isPending || isBatchImporting || !canWriteOrderImport || isPastDateBlocked}
-                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick today or later" : undefined}>
+                  title={!canWriteOrderImport ? "You have read-only access to Order Import" : isPastDateBlocked ? "No existing order for this plant/date — pick a date within the last 5 days" : undefined}>
                   {(importMutation.isPending || isBatchImporting) ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
                   {selectedFiles.length > 1 ? `Import ${selectedFiles.length} Files` : "Map & Import"}
                 </Button>

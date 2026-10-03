@@ -2390,9 +2390,15 @@ router.get('/order-scan/exchange/extras', requirePageAccess('adjust-exchange'), 
               e.total_qty AS "totalQty", COALESCE(e.credited_qty, 0) AS "creditedQty",
               e.scanned_at AS "scannedAt", e.scanned_by_name AS "scannedByName",
               COALESCE(e.voided, false) AS voided, e.void_reason AS "voidReason",
-              s.plant, s.csv_file_name AS "csvFileName", s.order_date AS "orderDate"
+              s.plant, s.csv_file_name AS "csvFileName", s.order_date AS "orderDate",
+              pb.new_sr AS "srNo",
+              COALESCE(NULLIF(e.items_per_pallet, 0), pb.items_per_pallet, 0) AS "itemsPerPallet"
          FROM order_scan_events e
          JOIN order_import_sessions s ON s.id = e.session_id
+         LEFT JOIN (
+           SELECT LOWER(TRIM(barcode)) AS bkey, MIN(new_sr) AS new_sr, MAX(items_per_pallet) AS items_per_pallet
+             FROM products WHERE barcode IS NOT NULL GROUP BY LOWER(TRIM(barcode))
+         ) pb ON pb.bkey = LOWER(TRIM(e.barcode))
         WHERE e.is_extra = true AND NOT COALESCE(e.hidden_in_history, false)
           AND ${dateClause}${plantClause}
         ORDER BY e.scanned_at ASC`,
@@ -2546,6 +2552,45 @@ router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), 
     );
 
     await client.query(`UPDATE order_scan_events SET credited_qty = COALESCE(credited_qty, 0) + $1 WHERE id = $2`, [qty, extra.id]);
+
+    // Moves Purchase itself from the Extra's own day to the shortfall's day it was credited to —
+    // plan discussed with the user: this is a deliberate choice to have the ledger reflect which
+    // order the stock was ultimately used for, not just the day it physically arrived. Both rows
+    // are tagged type='receive' (not 'adjust') so they fold straight into Purchase with no change
+    // needed to the Purchase/Adjust bucketing SQL — a negative receive subtracts, a positive one
+    // adds, same as any other receive row. origin='credit' is purely for traceability (and so
+    // Scan History's own combined query — see its 'credit' branch — can find and label them).
+    // Scoped to ONLY this manual page; the automatic same-group FIFO credit (reconcileCredits)
+    // deliberately keeps working the old way, per the user's explicit choice to not mix them.
+    const { rows: extraSessionRows } = await client.query(
+      `SELECT csv_file_name AS "csvFileName" FROM order_import_sessions WHERE id = $1`,
+      [extra.session_id],
+    );
+    const extraCsvName = extraSessionRows[0]?.csvFileName ?? 'its own CSV';
+    const { rows: productRows } = await client.query(
+      `SELECT id FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
+      [extra.barcode],
+    );
+    const productId = productRows[0]?.id ?? null;
+
+    await client.query(
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, origin, created_by_code, created_at)
+       VALUES ($1, $2, $3, $4, 0, 'receive', $5, $6, 'credit', $7, NOW())`,
+      [
+        extra.barcode, productId, extra.session_plant, -qty,
+        `Purchase moved to ${target.csv_file_name} (${String(target.session_order_date).slice(0, 10)}) via Adjust Exchange Extra`,
+        extra.session_id, userCode,
+      ],
+    );
+    await client.query(
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, origin, created_by_code, created_at)
+       VALUES ($1, $2, $3, $4, 0, 'receive', $5, $6, 'credit', $7, NOW())`,
+      [
+        target.barcode, productId, target.session_plant, qty,
+        `Purchase moved from ${extraCsvName}'s Extra (${String(extra.session_order_date).slice(0, 10)}) via Adjust Exchange Extra`,
+        target.session_id, userCode,
+      ],
+    );
 
     await client.query('COMMIT');
     broadcastOrderImportUpdate();

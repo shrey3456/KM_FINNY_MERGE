@@ -2369,21 +2369,45 @@ export default function LoadOperation() {
                 create/scan view (an open order, often with many items to scroll through) skips
                 it entirely instead; that view's only collapsible header now is the global
                 "Welcome" bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
-            {/* Same name and icon as this page's sidebar entry ("Load Operations", the factory). */}
+            {/* Same name and icon as this page's sidebar entry ("Load Operations", the factory).
+                Sticky: the header stays at the top while the list scrolls underneath it. */}
+            <div className="sticky top-0 z-20 -mx-2 bg-[#f4f5f7] px-2 pt-1 pb-2">
             <PageHeader
               icon={Factory}
               iconClassName="h-5 w-5 fill-[#4d7eff]"
               title="Load Operations"
               description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
-              actions={canWrite && (
-                <Button
-                  className="h-10 shrink-0 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
-                  onClick={openOrderSearch}
-                >
-                  <Plus className="mr-1.5 h-4 w-4" /> Load Operation
-                </Button>
-              )}
+              actions={
+                <div className="flex items-center gap-2">
+                  {/* Reloads the records list and the open order's data now. The open order already
+                      refreshes every 15 seconds on its own; the records list does not, so use this. */}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-10 w-10 shrink-0 rounded-lg"
+                    title="Refresh now"
+                    onClick={() => queryClient.invalidateQueries({
+                      predicate: (q) => {
+                        const key = String(q.queryKey[0] ?? "");
+                        return key.startsWith("/api/loading") || key.startsWith("/api/sort-slips") || key.startsWith("/api/scan-sessions/reports/scan-history") || key.startsWith("/api/order-scan/stvs");
+                      },
+                    })}
+                  >
+                    <RotateCw className={`h-4 w-4 ${recordsQuery.isFetching ? "animate-spin" : ""}`} />
+                  </Button>
+                  {canWrite && (
+                    <Button
+                      className="h-10 shrink-0 rounded-lg bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b]"
+                      onClick={openOrderSearch}
+                    >
+                      <Plus className="mr-1.5 h-4 w-4" /> Load Operation
+                    </Button>
+                  )}
+                </div>
+              }
             />
+            </div>
             {canWrite && (
               // A popup, not an inline card — this page is opened for the records table, and the
               // order search is something you deliberately start (the toolbar button below, or a
@@ -2894,7 +2918,7 @@ export default function LoadOperation() {
                 </div>
 
                 {/* Mobile View - card list */}
-                <div className={`space-y-2 ${bigView ? "" : "xl:hidden"}`}>
+                <div className={`grid grid-cols-1 gap-2 md:grid-cols-2 2xl:grid-cols-3 ${bigView ? "" : "xl:hidden"}`}>
                   {filteredRecords.map((r) => {
                     return (
                       <Card key={r.id} className={`overflow-hidden ${recordAccentBorderClass(r)}`}>

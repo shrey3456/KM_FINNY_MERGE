@@ -1361,6 +1361,25 @@ export default function Unloading() {
             icon={PackageOpen}
             title="Unload Operations"
             description="Import a vehicle-wise CSV, then pick a vehicle + date to scan its items and receive stock."
+            actions={
+              // Reloads this page's session list now. The list does not refresh on its own, so use this
+              // to see changes made elsewhere right away.
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-10 w-10 shrink-0 rounded-lg"
+                title="Refresh now"
+                onClick={() => queryClient.invalidateQueries({
+                  predicate: (q) => {
+                    const key = String(q.queryKey[0] ?? "");
+                    return key.startsWith("/api/unloading") || key.startsWith("/api/order-scan/stvs");
+                  },
+                })}
+              >
+                <RotateCw className={`h-4 w-4 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} />
+              </Button>
+            }
           />
         )}
 
@@ -1594,7 +1613,7 @@ export default function Unloading() {
               </div>
             ) : (
               <>
-              <div className="space-y-3 p-3 xl:hidden">
+              <div className="grid grid-cols-1 gap-3 p-3 md:grid-cols-2 2xl:grid-cols-3 xl:hidden">
                 {sessions.map((s) => {
                   const isLockedSession = s.scanStatus === "available" && !s.canActivate;
                   const openLabel = s.scanStatus === "completed"

@@ -48,6 +48,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Link } from "wouter";
 import { Textarea } from "@/components/ui/textarea";
 import { 
   Select,
@@ -1345,25 +1346,12 @@ export default function ProformaSlips() {
     }
   }
 
-  function isOrderDateToday(orderDate: any): boolean {
-    const d = parseSlipDate(orderDate);
-    if (!d) return false;
-    const today = new Date();
-    return d.getFullYear() === today.getFullYear() &&
-           d.getMonth() === today.getMonth() &&
-           d.getDate() === today.getDate();
-  }
-
   const getSortedSlips = () => {
     const filteredSlips = getFilteredSlips();
 
-    // Sort the slips
+    // Sort only by the column the user chose. A previously hidden "today first" rule made the
+    // first pagination page look date-filtered even after the Date filter was cleared.
     const sortedSlips = [...filteredSlips].sort((a, b) => {
-      // PRIORITIZE today's orders first
-      const todayA = isOrderDateToday(a.orderDate) ? 0 : 1;
-      const todayB = isOrderDateToday(b.orderDate) ? 0 : 1;
-      if (todayA !== todayB) return todayA - todayB;
-
       const getValueByColumn = (slip: ProformaSlip, column: string) => {
         switch (column) {
           case 'orderNumber':
@@ -2218,6 +2206,15 @@ export default function ProformaSlips() {
                 Recalc Volumes
               </Button>
             </>
+          )}
+
+          {/* Upload CSV: admin only — record loads that already left the warehouse (preview page) */}
+          {isAdminOrSuper && (
+            <Link href="/load-csv-upload">
+              <Button variant="outline" size="sm">
+                <Upload className="mr-2 h-4 w-4" /> Upload CSV
+              </Button>
+            </Link>
           )}
 
           {/* New Slips: available to admins and read-write users */}

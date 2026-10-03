@@ -110,6 +110,7 @@ import vehicleInfoRoutes from "./routes/vehicle-info";
 import loadingRoutes from "./routes/loading";
 import vehiclePlanningRoutes from "./routes/vehicle-planning";
 import sortSlipRoutes from "./routes/sort-slips";
+import loadingCsvUploadRoutes from "./routes/loading-csv-upload";
 import dailyReportsRoutes from "./routes/daily-reports";
 import orderImportRoutes from "./routes/order-import";
 import orderImportEditRoutes from "./routes/order-import-edit";
@@ -8187,6 +8188,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Sort Slip — godown picking. Deliberately separate from Loading above: it shares only the
   // order number, writes only its own tables, and moves no stock (see server/routes/sort-slips.ts).
   apiRouter.use(sortSlipRoutes);
+  apiRouter.use(loadingCsvUploadRoutes);
   apiRouter.use(dailyReportsRoutes);
 
   // Mount order import routes

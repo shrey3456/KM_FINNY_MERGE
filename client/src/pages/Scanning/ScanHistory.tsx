@@ -66,9 +66,15 @@ function scanTypeLabel(row: {
   // its own reason text in stockRecalc.ts. Same text this page's "Remove entry" option already
   // sniffs for the Remove-Operations-Data rows, just a different prefix.
   const isBackfill = !!row.orderName?.startsWith("Backfilled from");
+  // A ledger-only row Adjust Exchange Extra wrote when moving Purchase from the Extra's own day
+  // to whichever order it was credited to (see the 'credit' branch of the Scan History combined
+  // query, and the two new stock_movements inserts in order-scan.ts's own /exchange/credit) —
+  // same text-sniffing idea isBackfill uses just above, different prefix.
+  const isCreditMove = !!row.orderName?.startsWith("Purchase moved");
   const kind = row.isExchange ? "Exchange"
     : row.isAdjust ? "Adjust"
     : isBackfill ? "Backfill"
+    : isCreditMove ? "Purchase Moved"
     : row.isEmptyBox ? "Empty Box"
     : row.isExtra ? "Extra"
     : source === "sorting" ? "Pick"

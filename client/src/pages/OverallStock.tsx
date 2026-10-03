@@ -1207,6 +1207,8 @@ export default function OverallStock() {
       if (!search) return true;
       const q = normalizedText(search);
       return (
+        // Sr No is an exact match, so "1" finds Sr No 1 and not 10–19 as well.
+        normalizedText(r.srNo) === q ||
         normalizedText(r.itemName).includes(q) ||
         normalizedText(r.barcode).includes(q) ||
         normalizedText(r.sapCode).includes(q) ||
@@ -2462,9 +2464,18 @@ export default function OverallStock() {
                 type="button"
                 variant="outline"
                 size="icon"
-                onClick={() => refetchStock()}
+                onClick={() => {
+                  // Reloads the stock list AND every stock history/detail query, not just the table.
+                  refetchStock();
+                  queryClient.invalidateQueries({
+                    predicate: (q) => {
+                      const key = String(q.queryKey[0] ?? "");
+                      return key.startsWith("/api/scan-sessions/reports") || key.startsWith("/api/plant-stock");
+                    },
+                  });
+                }}
                 disabled={isStockFetching}
-                title="Refresh"
+                title="Refresh stock now (the page also refreshes itself every 30 seconds)"
                 className="h-8 w-8 rounded-md border-gray-300 text-gray-600 hover:bg-gray-50"
               >
                 <RotateCw className={`h-3.5 w-3.5 ${isStockFetching ? "animate-spin" : ""}`} />
@@ -2473,7 +2484,7 @@ export default function OverallStock() {
               <CollapsibleSearch
                 value={search}
                 onChange={(v) => setSearch(v)}
-                placeholder="Item, barcode, SAP, category…"
+                placeholder="Sr No, item, barcode, SAP, category…"
               />
 
 
