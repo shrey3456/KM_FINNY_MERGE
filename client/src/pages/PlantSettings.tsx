@@ -1,4 +1,5 @@
 import React, { useState, type ReactNode } from "react";
+import { sortNatural } from "@/lib/utils";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -157,7 +158,7 @@ export default function PlantSettings() {
     queryFn: async () => {
       if (!expandedPlantId) return [];
       const res = await apiRequest("GET", `/api/plants/${expandedPlantId}/stvs?_t=${Date.now()}`);
-      return res.json();
+      return sortNatural((await res.json()) as any[], (s) => String(s.stv));
     },
     enabled: !!expandedPlantId,
   });

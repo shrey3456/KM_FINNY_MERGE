@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
@@ -254,7 +255,7 @@ export default function Unloading() {
     s.scannedQty <= 0 ? "Not started" : s.receivedQty >= s.expectedQty ? "Complete" : "Partial";
   const sessionBatchLabel = (s: SessionListItem) => (s.partsCount > 1 ? `Batch ${s.partIndex} of ${s.partsCount}` : "Single");
   const distinctOptions = (values: (string | null | undefined)[]): FilterOption[] =>
-    Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean))).sort().map((v) => ({ value: v, label: v }));
+    Array.from(new Set(values.map((v) => (v ?? "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })).map((v) => ({ value: v, label: v }));
   const sessionFilterColumns: FilterableColumn<SessionListItem>[] = [
     { id: "vehicle", label: "Vehicle", filterType: "text", options: distinctOptions(allSessions.map((s) => s.vehicleNumber)), accessor: (s) => s.vehicleNumber },
     // Options bucketed to a day exactly as the matcher buckets the cell (lib/columnFilters dayBucket).
@@ -753,7 +754,7 @@ export default function Unloading() {
   }, [selectedStv]);
   const stvsQuery = useQuery<string[]>({
     queryKey: ["/api/order-scan/stvs", detail?.session?.plant],
-    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(detail!.session.plant)}`).then((r) => r.json()),
+    queryFn: () => apiRequest("GET", `/api/order-scan/stvs?plant=${encodeURIComponent(detail!.session.plant)}`).then((r) => r.json()).then((l: string[]) => sortNatural(l)),
     enabled: !!detail?.session?.plant,
   });
   const stvs = stvsQuery.data ?? [];

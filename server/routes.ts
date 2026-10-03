@@ -7909,6 +7909,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Invalid plant id" });
       }
       const stvs = await storage.listPlantStvs(plantId);
+      // Natural order (PLT1, PLT2, … PLT10) — same as the dropdowns that read these.
+      stvs.sort((a: any, b: any) => String(a.stv).localeCompare(String(b.stv), undefined, { numeric: true, sensitivity: "base" }));
       res.json(stvs);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch Dispatch Directories" });
