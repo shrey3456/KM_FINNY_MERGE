@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
@@ -62,12 +62,12 @@ type HistoryEntry = {
 // keeps most of the width instead of the labels eating into it. Party Name is NOT here — it's
 // shown as a label on the busy bar itself now, not its own column (explicit request).
 const LABEL_COLS: { key: string; label: string; width: number }[] = [
-  { key: "vehicleNumber", label: "Vehicle", width: 56 },
+  { key: "vehicleNumber", label: "Vehicle", width: 64 },
   { key: "rtoNumber", label: "RTO No.", width: 104 },
   { key: "orderNumber", label: "Order No.", width: 78 },
   { key: "state", label: "Plant / State", width: 92 },
   { key: "driver", label: "Driver", width: 108 },
-  { key: "tripDays", label: "Trip Days", width: 62 },
+  { key: "tripDays", label: "Trip Days", width: 68 },
 ];
 const ROW_LABEL_WIDTH = LABEL_COLS.reduce((sum, c) => sum + c.width, 0);
 const DAY_COL_MIN_WIDTH = 42; // px per day, so the whole thing scrolls horizontally at 30 days on a phone instead of squeezing unreadable
@@ -136,6 +136,34 @@ export default function VehiclePlanning() {
   // while this is true, so idly scrolling the page with the mouse over the table doesn't hijack
   // that scroll into a date change.
   const [ganttActive, setGanttActive] = useState(false);
+  const ganttActiveRef = useRef(false);
+  ganttActiveRef.current = ganttActive;
+  const ganttRef = useRef<HTMLDivElement>(null);
+  // Trackpad / magic-mouse two-finger sideways swipe slides the calendar directly — no click or
+  // focus needed, since a sideways gesture can't be mistaken for scrolling the page. Deltas are
+  // accumulated and converted at one day per DAY_COL_MIN_WIDTH of finger travel, so a slow drag
+  // moves smoothly day by day and a fast flick covers many days. Registered natively (non-
+  // passive): React's onWheel is passive and can't preventDefault, which is what stops the
+  // browser's own back/forward swipe navigation from firing on a sideways gesture.
+  const wheelAccum = useRef(0);
+  useEffect(() => {
+    const el = ganttRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
+      if (!horizontal && !ganttActiveRef.current) return; // plain vertical scroll stays the page's
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (delta === 0) return;
+      e.preventDefault();
+      wheelAccum.current += delta;
+      const days = Math.trunc(wheelAccum.current / DAY_COL_MIN_WIDTH);
+      if (days === 0) return;
+      wheelAccum.current -= days * DAY_COL_MIN_WIDTH;
+      setWindowStart((d) => addDays(d, days));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  });
 
   // Calendar date picker — single date or a from/to range, same single/range toggle pattern
   // Scan History's own date filter uses. A single date just moves the window's start (the
@@ -556,7 +584,8 @@ export default function VehiclePlanning() {
         <SectionSkeleton lines={6} />
       ) : (
         <div
-          className={`overflow-x-auto border bg-white shadow-sm focus:outline-none ${ganttActive ? "border-[#001d6e]/40 ring-2 ring-[#001d6e]/30" : "border-gray-200"}`}
+          ref={ganttRef}
+          className={`overflow-x-auto overscroll-x-contain border bg-white shadow-sm focus:outline-none ${ganttActive ? "border-[#001d6e]/40 ring-2 ring-[#001d6e]/30" : "border-gray-200"}`}
           tabIndex={0}
           title={ganttActive ? "Scroll or use the arrow keys to move the date range" : "Click, then scroll or use the arrow keys to move the date range"}
           onFocus={() => setGanttActive(true)}
@@ -566,17 +595,6 @@ export default function VehiclePlanning() {
           // a plain click on a non-focusable child div doesn't bubble FOCUS the way it bubbles
           // the click event itself.
           onClick={(e) => e.currentTarget.focus()}
-          // Wheel/arrow-key nudging the date window only kicks in once this box is actually
-          // focused (clicked into first) — otherwise just hovering the mouse over the table
-          // while scrolling the PAGE normally would hijack that scroll into a date change
-          // instead, which is what this was doing before.
-          onWheel={(e) => {
-            if (!ganttActive) return;
-            e.preventDefault();
-            const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-            if (delta === 0) return;
-            setWindowStart((d) => addDays(d, delta > 0 ? SCROLL_STEP_DAYS : -SCROLL_STEP_DAYS));
-          }}
           onKeyDown={(e) => {
             if (!ganttActive) return;
             if (e.key === "ArrowLeft") { e.preventDefault(); setWindowStart((d) => addDays(d, -SCROLL_STEP_DAYS)); }
@@ -587,13 +605,15 @@ export default function VehiclePlanning() {
             {/* Day header — one continuous bar with date ticks, not a row of separately
                 bordered boxes (that read as "many small columns" rather than one timeline). */}
             <div className="flex border-b border-gray-200 bg-[#001d6e] text-white">
+              {/* Vehicle … Trip Days stay pinned to the left while the calendar scrolls under them. */}
+              <div className="sticky left-0 z-20 flex shrink-0 bg-[#001d6e] shadow-[2px_0_4px_-1px_rgba(0,0,0,0.25)]">
               {LABEL_COLS.map((c) => {
                 const sortKey = c.key === "vehicleNumber" || c.key === "orderNumber" ? c.key : null;
                 return (
                   <div
                     key={c.key}
                     style={{ width: c.width }}
-                    className={`shrink-0 truncate px-1.5 py-2 text-[10px] font-semibold uppercase tracking-wide ${sortKey ? "cursor-pointer select-none" : ""}`}
+                    className={`shrink-0 truncate border-r border-white/10 px-2 py-2.5 text-[10px] font-semibold uppercase tracking-wide ${sortKey ? "cursor-pointer select-none" : ""}`}
                     onClick={sortKey ? () => toggleVpSort(sortKey) : undefined}
                   >
                     {c.label}
@@ -603,12 +623,13 @@ export default function VehiclePlanning() {
                   </div>
                 );
               })}
+              </div>
               <div className="flex flex-1">
                 {days.map((d, i) => (
                   <div
                     key={i}
                     style={{ width: `${100 / windowDays}%`, minWidth: DAY_COL_MIN_WIDTH }}
-                    className={`shrink-0 py-1.5 text-center text-[11px] ${isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
+                    className={`shrink-0 border-l border-white/10 py-1.5 text-center text-[11px] ${isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
                   >
                     <div className="opacity-70">{format(d, "EEE")}</div>
                     <div>{format(d, "d/M")}</div>
@@ -618,11 +639,13 @@ export default function VehiclePlanning() {
             </div>
 
             {/* Vehicle rows */}
-            {vehicles.map((v) => {
+            {vehicles.map((v, rowIdx) => {
               const bar = barRange(v);
               const canAssign = canWrite; // now shown on a busy row too, not just a free one
+              const stripe = rowIdx % 2 === 1;
               return (
-                <div key={v.id} className="flex border-b border-gray-100 last:border-0">
+                <div key={v.id} className={`flex border-b border-gray-100 last:border-0 ${stripe ? "bg-slate-50/70" : "bg-white"}`}>
+                  <div className={`sticky left-0 z-10 flex shrink-0 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${stripe ? "bg-slate-50" : "bg-white"}`}>
                   {([
                     { key: "vehicleNumber", value: v.vehicleNumber, bold: true },
                     { key: "rtoNumber", value: v.rtoNumber, bold: false },
@@ -643,7 +666,7 @@ export default function VehiclePlanning() {
                     <div
                       key={c.key}
                       style={{ width: LABEL_COLS.find((l) => l.key === c.key)!.width }}
-                      className={`shrink-0 cursor-pointer px-1.5 py-2 text-[11px] hover:bg-[#001d6e]/5 ${c.key === "driver" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1" : ""}`}
+                      className={`shrink-0 cursor-pointer border-r border-gray-100 px-2 py-2.5 text-[11px] hover:bg-[#001d6e]/5 ${c.key === "driver" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1" : ""}`}
                       title={c.key === "orderNumber" ? "Click for this vehicle's order history" : (c.value ?? undefined)}
                       onClick={() => setHistoryTarget(v)}
                     >
@@ -662,6 +685,7 @@ export default function VehiclePlanning() {
                       <span className={c.key === "driver" ? "line-clamp-2 break-words leading-tight" : "truncate"}>{c.value ?? "—"}</span>
                     </div>
                   ))}
+                  </div>
                   <div className="relative flex-1" style={{ minHeight: 52 }}>
                     {/* One continuous area — no per-day cell borders (that read as a boxed
                         grid); just a faint tint marking today, for date alignment. */}
@@ -749,6 +773,33 @@ export default function VehiclePlanning() {
               <div className="px-4 py-10 text-center text-sm text-gray-400">No Krupa fleet vehicles found.</div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Scroll bar for the date range — drag the slider (or tap the arrows) to slide the calendar
+          left/right without needing the keyboard or a focused chart. Spans 90 days back to 270
+          ahead of today; the arrows nudge a day at a time and hold-click repeats via the browser. */}
+      {!fleetQuery.isLoading && (
+        <div className="sticky bottom-2 z-30 mt-2 flex items-center gap-2 rounded-full border border-gray-300 bg-white/95 px-2 py-1.5 shadow-md backdrop-blur">
+          <Button size="sm" variant="outline" className="h-7 w-7 shrink-0 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -SCROLL_STEP_DAYS))} aria-label="Scroll calendar left" title="Scroll left">
+            <ChevronLeft className="h-4 w-4" />
+          </Button>
+          <input
+            type="range"
+            min={-90}
+            max={270}
+            step={1}
+            value={Math.max(-90, Math.min(270, differenceInCalendarDays(windowStart, today)))}
+            onChange={(e) => setWindowStart(addDays(today, Number(e.target.value)))}
+            aria-label="Scroll calendar left or right"
+            className="h-2 min-w-0 flex-1 cursor-pointer accent-[#001d6e]"
+          />
+          <span className="hidden shrink-0 text-[11px] font-medium text-gray-600 sm:inline">
+            {format(windowStart, "d MMM")} – {format(addDays(windowStart, windowDays - 1), "d MMM yyyy")}
+          </span>
+          <Button size="sm" variant="outline" className="h-7 w-7 shrink-0 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, SCROLL_STEP_DAYS))} aria-label="Scroll calendar right" title="Scroll right">
+            <ChevronRight className="h-4 w-4" />
+          </Button>
         </div>
       )}
 
