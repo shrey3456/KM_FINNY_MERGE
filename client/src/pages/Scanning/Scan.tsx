@@ -4501,8 +4501,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
         </div>
 
         {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
-      <div className={bigView ? "hidden" : "hidden lg:block"}>        
+      <div className={bigView ? "hidden" : "hidden lg:block"}>
           <div className="mx-auto w-full max-w-[1800px] space-y-3">
+
+            {/* Session info + tabs + Order Totals pinned to the top of the page's own scroll
+                container while the items table below scrolls underneath — same "sticky top-0
+                bg-... shadow-sm" treatment the mobile/bigView layout already has above (its own
+                "Sticky header + scanner" block), just not previously applied to this desktop one.
+                z-30, not z-20: the DataTable below passes isStickyHeader (its own sticky thead,
+                scoped to its own bounded scroll box) at z-20 — kept higher here so this outer
+                header always wins if the two ever visually coincide, same reasoning as the
+                Stock Overview page's identical fix.
+                lg:-mt-3, not just -mx-: top-0 only occupies space from the scroll container's own
+                padding edge downward, never retroactively covering that container's OWN top
+                padding (lg:pt-3 on the root below, this block only ever shows at lg+) — that strip
+                was never opaque, so the table scrolling behind it could peek through right above
+                this header (same bug, same fix, as the Stock Overview page). */}
+            <div className="sticky top-0 z-30 -mx-4 lg:-mx-6 lg:-mt-3 space-y-3 bg-gray-50 px-4 pb-3 pt-2 shadow-sm lg:px-6 lg:pt-3">
 
             {/* Header row */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -4882,6 +4897,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               </div>
             </div>
             )}
+
+            </div>
 
             <div className="space-y-4">
               {osTab === "scan" && (

@@ -2112,34 +2112,54 @@ export default function Unloading() {
                     maxHeight={bigView ? (quarterTurn ? "62vw" : "62vh") : undefined}
                   />
                   </div>
-                  <div className={bigView ? "space-y-2 p-3" : "space-y-2 p-3 xl:hidden"}>
+                  {/* Two cards per row from sm (tablet) up — a single full-width card per row left most of
+                      a tablet's width empty. Phones stay one per row. */}
+                  <div className={bigView ? "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2" : "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 xl:hidden"}>
                     {filteredItems.length === 0 ? (
-                      <p className="py-8 text-center text-sm text-gray-400">{itemSearchText || itemStatusFilter ? "No items match your filters." : "No items on this batch."}</p>
+                      <p className="col-span-full py-8 text-center text-sm text-gray-400">{itemSearchText || itemStatusFilter ? "No items match your filters." : "No items on this batch."}</p>
                     ) : filteredItems.map((item) => {
                       const extra = Math.max(0, item.scanned - item.expected);
+                      const pct = item.expected > 0 ? Math.min(100, Math.round((Math.min(item.scanned, item.expected) / item.expected) * 100)) : (item.scanned > 0 ? 100 : 0);
+                      const tone = item.isComplete
+                        ? { bar: "bg-emerald-500", edge: "border-l-emerald-500", badge: "bg-emerald-50 text-emerald-700 ring-emerald-200", label: "Received" }
+                        : item.scanned > 0
+                          ? { bar: "bg-amber-500", edge: "border-l-amber-400", badge: "bg-amber-50 text-amber-700 ring-amber-200", label: "Partial" }
+                          : { bar: "bg-gray-300", edge: "border-l-gray-300", badge: "bg-gray-50 text-gray-500 ring-gray-200", label: "Pending" };
+                      const stat = (label: string, value: number, valueClass: string) => (
+                        <div className="rounded-lg bg-gray-50 px-2 py-1.5 text-center">
+                          <p className="text-[10px] font-medium uppercase tracking-wide text-gray-500">{label}</p>
+                          <p className={`text-base font-bold tabular-nums leading-tight ${valueClass}`}>{value}</p>
+                        </div>
+                      );
                       return (
                         <button
                           key={item.id}
                           type="button"
                           onClick={() => setExpandedItemId((cur) => (cur === item.id ? null : item.id))}
-                          className="block w-full rounded-lg border border-gray-200 bg-white p-3 text-left shadow-sm"
+                          className={`flex h-full w-full flex-col rounded-xl border border-l-4 border-gray-200 bg-white p-3 text-left shadow-sm transition hover:shadow-md active:scale-[0.99] ${tone.edge}`}
                         >
-                          <div className="flex min-w-0 items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="break-words text-sm font-semibold text-gray-900">{item.itemName ?? "—"}</p>
-                              <p className="mt-1 break-all font-mono text-[11px] text-gray-400">{item.barcode ?? "—"}{item.sapCode ? ` · SAP ${item.sapCode}` : ""}</p>
+                          <div className="flex min-w-0 items-start justify-between gap-2">
+                            <p className="min-w-0 break-words text-sm font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
+                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${tone.badge}`}>{tone.label}</span>
+                          </div>
+                          <p className="mt-0.5 break-all font-mono text-[11px] text-gray-400">{item.barcode ?? "—"}{item.sapCode ? ` · SAP ${item.sapCode}` : ""}</p>
+
+                          <div className="mt-3 grid grid-cols-4 gap-1.5">
+                            {stat("Expected", item.expected, "text-gray-900")}
+                            {stat("Received", item.scanned, "text-emerald-600")}
+                            {stat("Remaining", item.remaining, "text-[#001d6e]")}
+                            {stat("Extra", extra, extra > 0 ? "text-amber-600" : "text-gray-300")}
+                          </div>
+
+                          <div className="mt-auto pt-3">
+                            <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
+                              <div className={`h-full rounded-full ${tone.bar}`} style={{ width: `${pct}%` }} />
                             </div>
-                            <span className={`shrink-0 rounded px-2 py-1 text-[11px] font-semibold ${item.isComplete ? "bg-emerald-100 text-emerald-700" : item.scanned > 0 ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                              {item.isComplete ? "Received" : item.scanned > 0 ? "Partial" : "Pending"}
-                            </span>
+                            <div className="mt-1.5 flex items-center justify-between text-[11px] text-gray-500">
+                              <span className="font-semibold">{pct}%</span>
+                              {(item.itemsPerPallet ?? 0) > 0 && <span className="font-medium">{item.itemsPerPallet} per pallet</span>}
+                            </div>
                           </div>
-                          <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-600">
-                            <span>Expected <strong className="text-gray-900">{item.expected}</strong></span>
-                            <span>Received <strong className="text-emerald-600">{item.scanned}</strong></span>
-                            <span>Remaining <strong className="text-[#001d6e]">{item.remaining}</strong></span>
-                            <span>Extra <strong className="text-amber-600">{extra}</strong></span>
-                          </div>
-                          {(item.itemsPerPallet ?? 0) > 0 && <p className="mt-2 text-[11px] font-semibold text-gray-500">{item.itemsPerPallet} per pallet</p>}
                         </button>
                       );
                     })}

@@ -78,6 +78,8 @@ async function withExpectedPallets<T extends { barcode: string; expectedQty: num
 type Row = {
   key: string;
   label: string;
+  // Loading only — the slip's party (dealer / customer).
+  partyName?: string | null;
   plant: string | null;
   orderCount: number;
   expectedQty: number;
@@ -185,6 +187,7 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
       return {
         key: o.orderNumber,
         label: o.orderNumber,
+        partyName: o.partyName ?? null,
         plant: o.plant,
         orderCount: 1,
         expectedQty: o.expectedQty,

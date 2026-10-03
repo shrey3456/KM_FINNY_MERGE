@@ -7,6 +7,7 @@
 
 import { Client } from '@notionhq/client';
 import { storage } from '../storage';
+import { pool } from '../db';
 import { extractText } from '../lib/notionProperties';
 import type { InsertProformaSlip } from '@shared/schema';
 
@@ -557,4 +558,23 @@ export async function applyPendingProformaChanges(
 export function clearPendingProformaChanges(): void {
   pendingOrders = null;
   pendingReport = null;
+}
+
+// ─── Auto-apply toggle (server-persisted, shared across everyone) ─────────────
+// Gates whether the 5-hour scheduled sync (server/routes.ts) is allowed to apply detected
+// changes on its own, and (same as Product/Vehicle Master) whether a manual "Check for Changes"
+// from the UI auto-applies too. Off by default — until turned on, every detect just leaves
+// changes pending for an admin to review.
+export async function getAutoApplyEnabled(): Promise<boolean> {
+  const { rows } = await pool.query(`SELECT auto_apply_enabled AS "autoApplyEnabled" FROM proforma_sync_config WHERE id = 1`);
+  return rows[0]?.autoApplyEnabled === true;
+}
+
+export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO proforma_sync_config (id, auto_apply_enabled, updated_by, updated_at)
+     VALUES (1, $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET auto_apply_enabled = EXCLUDED.auto_apply_enabled, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+    [enabled, updatedBy],
+  );
 }

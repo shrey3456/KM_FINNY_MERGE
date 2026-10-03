@@ -1,9 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
-import * as XLSX from "xlsx";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
+import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
 import {
   History, X, RefreshCw, FileDown, ChevronDown, ChevronLeft, ChevronRight,
   Loader2, Upload, Trash2, Plus, ListFilter, Filter, CalendarDays, Pencil,
@@ -121,6 +119,8 @@ type ScanHistoryItem = {
   // correction made today to a scan from the 16th read as if it had been scanned today.
   adjustedAt?: string | null;
   orderName: string;
+  // The proforma order's party (Loading / Sort Slip rows only) — null for every other source.
+  partyName?: string | null;
   orderDate: string | null;
   srNo: string | null;
   plant: string;
@@ -195,38 +195,6 @@ function buildQueryUrl(base: string, params: Record<string, string | number | un
   });
   const q = sp.toString();
   return q ? `${base}?${q}` : base;
-}
-
-function downloadCsv(filename: string, rows: Array<Array<string | number>>) {
-  const csv = rows
-    .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
-    .join("\n");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-  a.download = filename;
-  a.click();
-}
-
-function downloadExcel(filename: string, rows: Array<Array<string | number>>) {
-  const sheet = XLSX.utils.aoa_to_sheet(rows);
-  const book  = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(book, sheet, "Report");
-  XLSX.writeFile(book, filename);
-}
-
-function downloadPdf(filename: string, title: string, rows: Array<Array<string | number>>) {
-  const doc = new jsPDF({ orientation: "landscape" });
-  doc.setFontSize(12);
-  doc.text(title, 14, 12);
-  const [header, ...body] = rows;
-  autoTable(doc, {
-    head: [header as string[]],
-    body: body as string[][],
-    startY: 18,
-    styles: { fontSize: 8 },
-    headStyles: { fillColor: [0, 29, 110] },
-  });
-  doc.save(filename);
 }
 
 // ─── Loading "Total Summary" / "Activity" — every proforma slip loaded on one plant+order date,
@@ -997,7 +965,7 @@ const ScanHistory = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Party Name", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
     ...src.map((h) => [
       h.srNo ?? "",
       h.scannedByName ?? "",
@@ -1005,6 +973,7 @@ const ScanHistory = () => {
       h.itemName ?? "",
       h.barcode ?? "",
       h.orderName ?? "",
+      h.partyName ?? "",
       h.orderDate ?? "",
       h.plant,
       h.totalQty,

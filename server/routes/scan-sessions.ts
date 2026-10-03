@@ -1326,8 +1326,27 @@ router.get('/reports/scan-history', async (_req: Request, res: Response) => {
       scanHistoryScannerNames(),
     ]);
 
+    // Party name for the rows that belong to a proforma order (Loading, Sort Slip picks) — looked
+    // up for just this page's order numbers rather than joined into every UNION branch above.
+    // Other sources have no party, so theirs stays null.
+    const slipOrderNumbers = Array.from(new Set(
+      dataRes.rows
+        .filter((r: any) => (r.sourceKind === 'loading' || r.sourceKind === 'sorting') && r.orderName)
+        .map((r: any) => String(r.orderName)),
+    ));
+    const partyByOrder = new Map<string, string>();
+    if (slipOrderNumbers.length > 0) {
+      const partyRes = await pool.query(
+        `SELECT order_number, MIN(party_name) AS party_name FROM proforma_slips
+         WHERE order_number = ANY($1::text[]) GROUP BY order_number`,
+        [slipOrderNumbers],
+      );
+      for (const r of partyRes.rows) partyByOrder.set(r.order_number, r.party_name);
+    }
+    const itemsWithParty = dataRes.rows.map((r: any) => ({ ...r, partyName: partyByOrder.get(String(r.orderName)) ?? null }));
+
     return res.json({
-      items:        dataRes.rows,
+      items:        itemsWithParty,
       total:        parseInt(aggRes.rows[0].total, 10),
       totalBoxes:   parseInt(aggRes.rows[0].totalBoxes, 10),
       totalPallets: parseFloat(aggRes.rows[0].totalPallets),

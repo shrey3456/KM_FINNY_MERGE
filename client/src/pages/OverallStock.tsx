@@ -2267,6 +2267,22 @@ export default function OverallStock() {
   return (
     <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
+        {/* Title, summary tiles and the View/State/Plant tabs stay pinned to the top of the
+            page's own scroll container while the table below scrolls underneath — same
+            "sticky top-0 bg-... " treatment applied to the Scan Operations page's desktop
+            header (client/src/pages/Scanning/Scan.tsx), so this context is never lost while
+            scrolling a long/paginated table. bg-white matches the page shell (Layout.tsx's
+            <main>), not this div's own (unset) background. */}
+        {/* z-30, not z-20: the DataTable's own pinned-column header cells (stickyColumnIds
+            below) are also `position: sticky` at z-20 — tied z-index + later-in-DOM meant the
+            table won the stacking order and painted over this header as it scrolled past.
+            -mt-4 lg:-mt-6, not just -mx-: top-0 only occupies space from the scroll container's
+            own padding edge downward — it does NOT retroactively cover that container's OWN top
+            padding (p-4 lg:p-6 on the root below). That strip was never opaque, so the table
+            scrolling behind it peeked through right above this header. Pulling the sticky div up
+            by the same amount (then re-adding it as this div's own pt-4/lg:pt-6, already below)
+            puts the opaque bg-white flush with the true scrollport top instead. */}
+        <div className="sticky top-0 z-30 -mx-5 -mt-4 lg:-mx-7 lg:-mt-6 space-y-4 bg-white px-4 pb-3 pt-4 lg:px-6 lg:pt-6">
         <PageHeader
           icon={LayoutList}
           title="Stock Overview"
@@ -2424,6 +2440,8 @@ export default function OverallStock() {
             })}
           </div>
         )}
+
+        </div>
 
         {/* Table card — search, sort, every filter (Plant/Date + column filters), column
             visibility, and export all live in this one row now, right under the table title. */}
@@ -2765,8 +2783,13 @@ export default function OverallStock() {
             enableTotalsRow
             enableZebraStripes
             sortMode="client"
-            // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box of
-            // its own — matching develop.
+            // The table scrolls inside its own box (isStickyHeader + maxHeight) so its column
+            // header stays pinned to the table itself, directly under the page header above,
+            // instead of the whole page scrolling rows up behind that header. 560px ≈ page
+            // header + tabs + card title row + pagination bar; the floor keeps it usable on
+            // short screens (the page then scrolls as before).
+            isStickyHeader
+            maxHeight="max(320px, calc(100dvh - 560px))"
             paginationMode="client"
             // Sr No + Item Name + Barcode stay put while the figure columns scroll underneath —
             // all three are marked fixedWidth above so their pinned offsets line up exactly.

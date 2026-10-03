@@ -279,8 +279,29 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
         {/* overflow-x-hidden is deliberate: with only overflow-y set, the x axis computes to
             `auto` and the entire page pans sideways into empty space past the widest element.
             Tables scroll horizontally inside their own containers, so nothing is lost here. */}
-        <main className="flex-1 overflow-y-auto overflow-x-hidden bg-white">
-          <div className="min-w-0 px-4 sm:px-6">
+        {/* min-h-0: <main> is ITSELF a flex item (flex-1, of the flex-col at line 136) and had
+            the exact same min-height:auto problem one level up — without overriding it here too,
+            <main> still computed its own height from its (now properly int-clipped, but still
+            reported) content rather than shrinking to its allotted share, leaving a sliver of
+            the previous scroll position visible above a page's sticky header. */}
+        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-white">
+          {/* flex h-full flex-col: every page's own root is `flex-1 overflow-y-auto ...` (dozens
+              of pages share that exact pattern), which only works as a real, bounded scroll
+              container when ITS parent is a sized flex column. Without this, that div had no
+              definite height, so its own overflow-y-auto was inert and <main> above did the
+              actual scrolling instead — which silently broke `position: sticky` for any header a
+              page tried to pin while its own table scrolled, since sticky only latches onto the
+              nearest ancestor that's genuinely a scroll container, not a grandparent's. With this,
+              each page scrolls within itself as its className already implied, and <main>'s own
+              overflow-y-auto simply never needs to engage (its child now exactly fills it).
+              [&>*]:min-h-0 — flex items default to min-height:auto, which means "never shrink
+              below your content's natural height" even with flex-1 set. Without overriding that
+              to 0 on the page's own root div, h-full above alone wasn't enough: the page's root
+              still grew to its full (long) content height instead of clipping to this box and
+              scrolling internally, which pushed <main> itself past its bounds and made IT start
+              scrolling too — two scroll contexts moving at once, which is what let page content
+              visibly bleed past/above a page's own sticky header while scrolling. */}
+          <div className="flex h-full min-w-0 flex-col px-4 sm:px-6 [&>*]:min-h-0">
             <PortalRotationProvider rotation={portalRotation}>{children}</PortalRotationProvider>
           </div>
         </main>

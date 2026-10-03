@@ -4,6 +4,8 @@ import {
   getPendingProformaReport,
   applyPendingProformaChanges,
   clearPendingProformaChanges,
+  getAutoApplyEnabled,
+  setAutoApplyEnabled,
 } from '../services/proformaNotionSync';
 import { requirePageWrite } from '../lib/pageAccess';
 
@@ -68,6 +70,28 @@ router.post('/proforma-notion-sync/apply', async (req: Request, res: Response) =
 router.post('/proforma-notion-sync/discard', (_req: Request, res: Response) => {
   clearPendingProformaChanges();
   res.json({ success: true });
+});
+
+// GET /api/proforma-notion-sync/auto-apply-config
+// Whether the 5-hour scheduled sync (and a manual "Check for Changes") is allowed to apply
+// detected changes on its own. Shared across everyone (single server-side setting) — readable by
+// anyone with Proforma access, changeable only with write access (see the router gate above).
+router.get('/proforma-notion-sync/auto-apply-config', async (_req: Request, res: Response) => {
+  try {
+    res.json({ enabled: await getAutoApplyEnabled() });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to read auto-apply setting' });
+  }
+});
+
+router.post('/proforma-notion-sync/auto-apply-config', async (req: Request, res: Response) => {
+  try {
+    const enabled = req.body?.enabled === true;
+    await setAutoApplyEnabled(enabled, callerName(req));
+    res.json({ enabled });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to save auto-apply setting' });
+  }
 });
 
 export default router;

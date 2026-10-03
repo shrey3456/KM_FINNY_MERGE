@@ -182,6 +182,16 @@ app.use((req, res, next) => {
         updated_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    // Same role again, for the Proforma Slips Notion sync (server/services/proformaNotionSync.ts)
+    // — gates the 5-hour scheduled sync's auto-apply, same as the two above.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS proforma_sync_config (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        auto_apply_enabled BOOLEAN NOT NULL DEFAULT false,
+        updated_by TEXT,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
     // History log for the Loading page (server/routes/loading.ts) — one row per completed
     // vehicle-link action, scoped per-user unless admin/super-admin (see requirePageAccess
     // ('loading') + the createdByCode filter in listLoadingRecords).

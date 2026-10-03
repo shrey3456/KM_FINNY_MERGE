@@ -72,7 +72,7 @@ function compareSrNo(a: string | null | undefined, b: string | null | undefined)
 }
 
 // Small product picture beside an item name; renders nothing (no gap) when the product has none.
-function ItemRowThumb({ name }: { name: string | null }) {
+function ItemRowThumb({ name, className = "h-10 w-10" }: { name: string | null; className?: string }) {
   const [failed, setFailed] = useState(false);
   if (!name || failed) return null;
   return (
@@ -80,7 +80,7 @@ function ItemRowThumb({ name }: { name: string | null }) {
       name={name}
       zoomable
       onLoadState={setFailed}
-      className="h-10 w-10 shrink-0 rounded border border-gray-200 bg-white object-contain"
+      className={`${className} shrink-0 rounded border border-gray-200 bg-white object-contain`}
     />
   );
 }
@@ -741,6 +741,11 @@ export default function LoadOperation() {
   // Bounded, self-scrolling frame for the items table in rotated mode — the %-of-viewport cap
   // flips units on a quarter turn, since that turns the subtree 90° (content-space height then
   // runs along the viewport's WIDTH, not its height).
+  // Item cards (two per row) replace the items table on tablets: from sm up in natural portrait
+  // (an upright tablet is bigView here, at any width), and sm..xl in landscape where xl+ is
+  // desktop. A manually rotated kiosk keeps the table.
+  const itemCardsShow = isPortrait ? "sm:block" : "sm:max-xl:block";
+  const itemTableHide = isPortrait ? "sm:hidden" : "sm:max-xl:hidden";
   const kioskTableMaxHeight = bigView ? (quarterTurn ? "62vw" : "62vh") : "65vh";
   // With an order open, the summary is fixed and the items grid owns the remaining viewport.
   // This keeps a long item list from scrolling the summary out of view.
@@ -3860,8 +3865,93 @@ export default function LoadOperation() {
                   "swipe to see more" affordance on any screen too narrow for all 5 columns at
                   once, since its own overflow-x-auto keeps that contained to the table, never
                   the page. */}
+              {/* Tablet widths only (sm up to, not including, xl): the item rows become cards, two
+                  to a row, since the 5-column table leaves a tablet cramped. Phones keep the
+                  table above, desktop keeps it too, and so does the rotated kiosk view. */}
+              {!rotated && (
+                <div className={`hidden min-h-0 flex-1 overflow-y-auto p-3 ${itemCardsShow}`} style={{ maxHeight: openSlipTableMaxHeight }}>
+                  {filteredItems.length === 0 ? (
+                    <p className="py-8 text-center text-sm text-gray-400">{itemStatusFilter || itemSearchText ? "No items match this filter." : "No items on this slip."}</p>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2">
+                      {filteredItems.map((row) => {
+                        const extra = Math.max(0, row.loaded - row.expected);
+                        const pct = row.expected > 0 ? Math.min(100, Math.round((Math.min(row.loaded, row.expected) / row.expected) * 100)) : (row.loaded > 0 ? 100 : 0);
+                        const noStock = (row.stockAvailable ?? 0) <= 0;
+                        const tone = row.isComplete
+                          ? { bar: "bg-emerald-500", edge: "border-l-emerald-500", badge: "bg-emerald-50 text-emerald-700 ring-emerald-200", label: "Loaded" }
+                          : row.loaded > 0
+                            ? { bar: "bg-amber-500", edge: "border-l-amber-400", badge: "bg-amber-50 text-amber-700 ring-amber-200", label: "Partial" }
+                            : { bar: "bg-gray-300", edge: "border-l-gray-300", badge: "bg-gray-50 text-gray-500 ring-gray-200", label: "Pending" };
+                        const stat = (label: string, value: number, valueClass: string) => (
+                          <div className="rounded-lg bg-gray-50 px-1.5 py-1.5 text-center">
+                            <p className="text-[10px] font-medium uppercase tracking-wide text-gray-500">{label}</p>
+                            <p className={`text-base font-bold tabular-nums leading-tight ${valueClass}`}>{value}</p>
+                          </div>
+                        );
+                        const expanded = !!row.barcode && expandedItemBarcode === row.barcode;
+                        return (
+                          <div key={row.barcode ?? `row-${row.id}`} className={expanded ? "col-span-2" : undefined}>
+                            <div
+                              role={row.barcode ? "button" : undefined}
+                              onClick={() => row.barcode && setExpandedItemBarcode((cur) => (cur === row.barcode ? null : row.barcode!))}
+                              className={`flex h-full flex-col rounded-xl border border-l-4 border-gray-200 bg-white p-3 text-left shadow-sm transition hover:shadow-md ${tone.edge}`}
+                            >
+                              <div className="flex min-w-0 items-start gap-2.5">
+                                {/* Tap the picture to enlarge it (zoomable); the card itself toggles the history. */}
+                                <ItemRowThumb name={row.itemName} className="h-16 w-16" />
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex min-w-0 items-start justify-between gap-2">
+                                    <p className="min-w-0 break-words text-sm font-semibold leading-snug text-gray-900">{row.itemName ?? "—"}</p>
+                                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${tone.badge}`}>{tone.label}</span>
+                                  </div>
+                                  <p className="mt-0.5 break-all font-mono text-[11px] text-gray-400">{row.barcode || "—"}{row.sapCode ? ` · SAP ${row.sapCode}` : ""}</p>
+                                  {noStock && <span className="mt-1 inline-block rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
+                                </div>
+                              </div>
+
+                              <div className="mt-3 grid grid-cols-4 gap-1.5">
+                                {stat("Expected", row.expected, "text-gray-900")}
+                                {stat("Loaded", row.loaded, "text-emerald-600")}
+                                {stat("Remaining", row.remaining, "text-[#001d6e]")}
+                                {stat("Stock", row.stockAvailable ?? 0, noStock ? "text-red-600" : "text-gray-600")}
+                              </div>
+                              {extra > 0 && <p className="mt-1.5 text-xs font-bold text-amber-600">+{extra} extra</p>}
+
+                              {canScanThisLoad && row.barcode && (
+                                <div className="mt-3 flex items-center justify-center gap-3">
+                                  <Button size="sm" variant="ghost" disabled={row.loaded <= 0}
+                                    className="h-8 w-8 rounded-full bg-red-100 p-0 text-base font-bold text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+                                    title="Remove from loaded quantity"
+                                    onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}>−</Button>
+                                  <span className="text-xs font-medium text-gray-500">Adjust loaded</span>
+                                  <Button size="sm" variant="ghost"
+                                    className="h-8 w-8 rounded-full bg-emerald-100 p-0 text-base font-bold text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
+                                    title="Add to loaded quantity"
+                                    onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
+                                </div>
+                              )}
+
+                              <div className="mt-auto pt-3">
+                                <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
+                                  <div className={`h-full rounded-full ${tone.bar}`} style={{ width: `${pct}%` }} />
+                                </div>
+                                <div className="mt-1.5 flex items-center justify-between text-[11px] text-gray-500">
+                                  <span className="font-semibold">{pct}%</span>
+                                  {(row.itemsPerPallet ?? 0) > 0 && <span className="font-medium">{row.itemsPerPallet} per pallet</span>}
+                                </div>
+                              </div>
+                            </div>
+                            {expanded && <div className="mt-1 rounded-xl border border-gray-200 bg-white">{renderLoadingItemHistoryPanel(row)}</div>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
               <DataTable<ProformaItem>
-                className="min-h-0 flex-1"
+                className={`min-h-0 flex-1 ${rotated ? "" : itemTableHide}`}
                 containerClassName="rounded-none border-0"
                 headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-xs"
                 columns={loadingItemColumns}

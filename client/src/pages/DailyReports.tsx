@@ -39,6 +39,7 @@ const barcodeCell = (barcode: string): Cell => ({ text: barcode });
 type ReportRow = {
   key: string;
   label: string;
+  partyName?: string | null;
   plant: string | null;
   orderCount: number;
   expectedQty: number;
@@ -180,9 +181,9 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: ExportRow[]
     const header = plain[headerIndex] ?? [];
     const body = plain.slice(headerIndex + 1);
 
-    doc.setFillColor(0, 29, 110);
+    doc.setFillColor(226, 232, 244);
     doc.rect(0, 0, pageWidth, 24, "F");
-    doc.setTextColor(255, 255, 255);
+    doc.setTextColor(0, 29, 110);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(15);
     doc.text(title, margin, 14);
@@ -209,8 +210,8 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: ExportRow[]
       startY: 30,
       theme: "grid",
       styles: { fontSize: 7, cellPadding: 2.2, lineColor: [210, 210, 210], lineWidth: 0.15 },
-      headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold", halign: "left" },
-      alternateRowStyles: { fillColor: [245, 247, 251] },
+      headStyles: { fillColor: [226, 232, 244], textColor: [0, 29, 110], fontStyle: "bold", halign: "left" },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
       columnStyles,
       margin: { left: margin, right: margin },
     });
@@ -426,6 +427,9 @@ export default function DailyReports() {
       id: "label", header: activeTab.breakdownLabel, accessor: (r) => r.label, totalable: false,
       cellClassName: "font-medium text-gray-900",
     },
+    ...(tab === "loading"
+      ? [{ id: "partyName", header: "Party Name", width: 220, accessor: (r: ReportRow) => r.partyName ?? "", totalable: false, cellClassName: "text-gray-800", render: (r: ReportRow) => r.partyName || "—" } as DataTableColumn<ReportRow>]
+      : []),
     { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => (r.plant ? <PlantBadge plant={r.plant} /> : "—") },
     { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
@@ -1189,6 +1193,7 @@ function ReportRowCards({ rows, tab, onOpen }: { rows: ReportRow[]; tab: Tab; on
           <div className="flex min-w-0 items-center justify-between gap-3">
             <div className="min-w-0">
               <span className="block truncate text-sm font-bold text-[#001d6e]">{row.label}</span>
+              {row.partyName && <span className="block truncate text-xs font-medium text-gray-800">{row.partyName}</span>}
               <span className="text-[11px] leading-none text-gray-500">{identityLabel}</span>
             </div>
             {row.key !== "—" && (

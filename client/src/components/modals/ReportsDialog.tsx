@@ -138,7 +138,7 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: Row[]) {
     doc.setFontSize(12);
     doc.text(title, 14, 12);
     const [header, ...body] = rows;
-    autoTable(doc, { head: [header as string[]], body: body as string[][], startY: 18, styles: { fontSize: 8 }, headStyles: { fillColor: [0, 29, 110] } });
+    autoTable(doc, { head: [header as string[]], body: body as string[][], startY: 18, styles: { fontSize: 8 }, headStyles: { fillColor: [226, 232, 244], textColor: [0, 29, 110], fontStyle: "bold" }, alternateRowStyles: { fillColor: [248, 250, 252] } });
     doc.save(`${baseName}.pdf`);
   }
 }

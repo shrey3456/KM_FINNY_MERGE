@@ -39,13 +39,33 @@ function valueSizeClass(value: ReactNode): string {
 }
 
 // Static classes only — Tailwind can't see dynamically built class names at build time.
+//
+// Two steps, not one: going straight from the 2-column mobile grid to the full column count at
+// `md` (768px) meant a tablet — iPad portrait IS 768px wide — landed on the same cramped layout
+// as a phone would if it jumped straight to desktop: icon + value + label + hint all squeezed
+// into a sliver of a column.
+//
+// The full count only kicks in at `xl` (1280px viewport), not `lg` (1024px) — this app has a
+// persistent ~245px sidebar, so Tailwind's viewport-width breakpoints don't match the actual
+// content width: confirmed live on an iPad Pro 13" portrait (1032px viewport, so past `lg`'s
+// 1024px line) that the real content area was only ~740px once the sidebar and page padding are
+// subtracted, nowhere near enough for 6 columns at that content width — hence still capping at 3
+// there. At `xl` (1280px) the content area is ~985px, which is actually enough room.
 const MD_COLS: Record<number, string> = {
   1: "md:grid-cols-1",
   2: "md:grid-cols-2",
   3: "md:grid-cols-3",
-  4: "md:grid-cols-4",
-  5: "md:grid-cols-5",
-  6: "md:grid-cols-6",
+  4: "md:grid-cols-2",
+  5: "md:grid-cols-3",
+  6: "md:grid-cols-3",
+};
+const XL_COLS: Record<number, string> = {
+  1: "xl:grid-cols-1",
+  2: "xl:grid-cols-2",
+  3: "xl:grid-cols-3",
+  4: "xl:grid-cols-4",
+  5: "xl:grid-cols-5",
+  6: "xl:grid-cols-6",
 };
 
 interface StatsBarProps {
@@ -72,7 +92,8 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
       <div
         className={cn(
           "grid grid-cols-2 divide-x divide-gray-100",
-          MD_COLS[cols] ?? "md:grid-cols-4",
+          MD_COLS[cols] ?? "md:grid-cols-3",
+          XL_COLS[cols] ?? "xl:grid-cols-4",
           actions && "border-b border-gray-100",
         )}
       >
