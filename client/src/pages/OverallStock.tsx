@@ -231,7 +231,7 @@ const ALL_COLUMNS = [
   { key: "sapCode",     label: "SAP Code" },
   { key: "category",    label: "Category" },
   { key: "brand",       label: "Brand" },
-  { key: "expected",    label: "Expected" },
+  { key: "expected",    label: "Expected Purchase" },
   { key: "opening",      label: "Opening" },
   { key: "purchase",     label: "Purchase (includes Extra)" },
   { key: "extra",        label: "Extra" },
@@ -937,7 +937,7 @@ export default function OverallStock() {
       { id: "sapCode", label: "SAP Code", filterType: "text", options: textOptions((r) => r.sapCode), accessor: (r) => r.sapCode },
       { id: "category", label: "Category", filterType: "enum", options: textOptions((r) => r.category), accessor: (r) => r.category },
       { id: "brand", label: "Brand", filterType: "enum", options: textOptions((r) => r.brand), accessor: (r) => r.brand },
-      { id: "expected", label: "Expected", filterType: "number", options: numberOptions((r) => r.expectedQty), accessor: (r) => r.expectedQty ?? null },
+      { id: "expected", label: "Expected Purchase", filterType: "number", options: numberOptions((r) => r.expectedQty), accessor: (r) => r.expectedQty ?? null },
       { id: "opening", label: "Opening", filterType: "number", options: numberOptions((r) => r.openingStock), accessor: (r) => r.openingStock ?? null },
       { id: "purchase", label: "Purchase", filterType: "number", options: numberOptions((r) => r.inStock), accessor: (r) => r.inStock },
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
@@ -1559,7 +1559,7 @@ export default function OverallStock() {
     } as DataTableColumn<PlantStockRow>] : []),
     {
       id: "expected",
-      header: columnHeader("expected", "Expected"),
+      header: columnHeader("expected", "Expected Purchase"),
       width: 110,
       align: "right",
       sortable: true,
@@ -2837,7 +2837,7 @@ export default function OverallStock() {
                 // inStock alone — extras are already inside it, so they're never added on top.
                 const closing = row.closingStock ?? 0;
                 const figures: { label: string; value: string; tone?: string }[] = [
-                  { label: "Expected", value: (row.expectedQty ?? 0).toLocaleString() },
+                  { label: "Expected Purchase", value: (row.expectedQty ?? 0).toLocaleString() },
                   { label: "Opening", value: (row.openingStock ?? 0).toLocaleString() },
                   { label: "Purchase", value: row.inStock.toLocaleString() },
                   ...(row.extraQty > 0 ? [{ label: "Extra", value: `+${row.extraQty.toLocaleString()}`, tone: "text-amber-600" }] : []),

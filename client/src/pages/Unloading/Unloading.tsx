@@ -1402,13 +1402,6 @@ export default function Unloading() {
                 <ScrollNudgeButtons targetRef={vehiclesTableScrollRef} amount={360} />
               </div>
             )}
-            <button
-              onClick={rotateNext}
-              className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-              title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
-            >
-              <RotateCw className="h-5 w-5" />
-            </button>
             {rotated && (
               <div className="mb-3">
                 <PageHeader
@@ -1881,13 +1874,6 @@ export default function Unloading() {
 
         {view === "scan" && (
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
-            <button
-              onClick={rotateNext}
-              className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-              title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
-            >
-              <RotateCw className="h-5 w-5" />
-            </button>
             {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's own
                 compact scan-header row above; rotated, the fixed rotate overlay covers that, so
                 the same pieces fold into a card here instead — same single merged row, so the

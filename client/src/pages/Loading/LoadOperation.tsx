@@ -2358,13 +2358,6 @@ export default function LoadOperation() {
         {view === "list" && (
           <div className={`space-y-6 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
             <PageScrollButtons />
-            <button
-              onClick={rotateNext}
-              className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-              title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
-            >
-              <RotateCw className="h-5 w-5" />
-            </button>
             {/* Page header only on the list — nothing there competes with it for room. The
                 create/scan view (an open order, often with many items to scroll through) skips
                 it entirely instead; that view's only collapsible header now is the global
@@ -3286,13 +3279,6 @@ export default function LoadOperation() {
                   inside the (transform:rotate) wrapper above keeps it pinned to a natural
                   on-screen corner from the viewer's rotated perspective. */}
               <PageScrollButtons />
-              <button
-                onClick={rotateNext}
-                className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
-                title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
-              >
-                <RotateCw className="h-5 w-5" />
-              </button>
               {/* No overflow-hidden here — the vehicle-search dropdown below is absolutely
                   positioned and needs to be able to render past this card's edge; clipping it
                   made the suggestions invisible even though the search itself worked fine.
