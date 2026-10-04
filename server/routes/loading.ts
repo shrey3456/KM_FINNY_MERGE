@@ -801,13 +801,13 @@ router.get('/loading/proforma/:orderNumber/handoffs', requirePageAccess('loading
   }
 });
 
-// Loading only ever suggests Krupa's own fleet (or the "DUMMY" test vehicle) — Vehicle Master
-// also carries plenty of other companies' vehicles (TRANSPORT, SCRAP, ...) that are real data
+// Loading suggests Krupa's own fleet, hired TRANSPORT vehicles, and the "DUMMY" test vehicle —
+// Vehicle Master also carries other companies' vehicles (SCRAP, ...) that are real data
 // but never relevant to assign onto a Krupa load. Applied to BOTH the local search and the
 // Notion fallback below, so neither path can surface one.
 export function qualifiesForLoadingVehiclePicker(company: string | null | undefined): boolean {
   const c = (company ?? '').toLowerCase();
-  return c.includes('krupa') || c.includes('dummy');
+  return c.includes('krupa') || c.includes('transport') || c.includes('dummy');
 }
 
 // GET /api/loading/vehicles/search?q=  — suggestions dropdown for the vehicle picker. Matches
@@ -1129,27 +1129,40 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requireLoadingWrite, 
     // (a double-click on the same vehicle, or picking a different one afterwards) updates this
     // same row in place rather than inserting another one — it used to insert unconditionally,
     // which duplicated the order in the landing list every time link-vehicle ran more than once.
-    const { rows: existingRecordRows } = await pool.query(
-      `SELECT id FROM loading_records WHERE order_number = $1 LIMIT 1`,
-      [updated.orderNumber],
-    );
-    if (existingRecordRows[0]) {
-      await pool.query(
-        `UPDATE loading_records SET proforma_slip_id = $1, party_name = $2, plant = $3,
-                vehicle_number = $4, rto_number = $5, volume = $6,
-                created_by_code = $7, created_by_name = $8, created_at = now()
-         WHERE id = $9`,
-        [updated.id, updated.partyName, updated.plant, vehicle.vehicleNumber, vehicle.rtoNumber ?? null,
-         vehicle.volume != null ? String(vehicle.volume) : null, userCode ?? null, userName ?? null, existingRecordRows[0].id],
+    // The check-then-write below runs under a per-order advisory lock in one transaction, so two
+    // link-vehicle requests arriving together (a double tap, a retry) can't both find "no row yet"
+    // and each insert one.
+    const recClient = await pool.connect();
+    try {
+      await recClient.query('BEGIN');
+      await recClient.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`loading_record:${updated.orderNumber}`]);
+      const { rows: existingRecordRows } = await recClient.query(
+        `SELECT id FROM loading_records WHERE order_number = $1 ORDER BY id LIMIT 1`,
+        [updated.orderNumber],
       );
-    } else {
-      await storage.createLoadingRecord({
-        orderNumber: updated.orderNumber, proformaSlipId: updated.id,
-        partyName: updated.partyName, plant: updated.plant,
-        vehicleNumber: vehicle.vehicleNumber, rtoNumber: vehicle.rtoNumber ?? null,
-        volume: vehicle.volume != null ? String(vehicle.volume) : null,
-        createdByCode: userCode ?? null, createdByName: userName ?? null,
-      });
+      if (existingRecordRows[0]) {
+        await recClient.query(
+          `UPDATE loading_records SET proforma_slip_id = $1, party_name = $2, plant = $3,
+                  vehicle_number = $4, rto_number = $5, volume = $6,
+                  created_by_code = $7, created_by_name = $8, created_at = now()
+           WHERE id = $9`,
+          [updated.id, updated.partyName, updated.plant, vehicle.vehicleNumber, vehicle.rtoNumber ?? null,
+           vehicle.volume != null ? String(vehicle.volume) : null, userCode ?? null, userName ?? null, existingRecordRows[0].id],
+        );
+      } else {
+        await recClient.query(
+          `INSERT INTO loading_records (order_number, proforma_slip_id, party_name, plant, vehicle_number, rto_number, volume, created_by_code, created_by_name)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [updated.orderNumber, updated.id, updated.partyName, updated.plant, vehicle.vehicleNumber, vehicle.rtoNumber ?? null,
+           vehicle.volume != null ? String(vehicle.volume) : null, userCode ?? null, userName ?? null],
+        );
+      }
+      await recClient.query('COMMIT');
+    } catch (e) {
+      await recClient.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      recClient.release();
     }
 
     res.json({ slip: await withRto(updated), vehicle, capacityWarning });
