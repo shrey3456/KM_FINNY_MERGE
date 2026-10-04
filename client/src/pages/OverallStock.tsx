@@ -366,7 +366,7 @@ function readSavedStockFilters(): SavedStockFilters {
 
 // Solid navy fill, matching the Product Master action buttons. Squared off (rounded-xl)
 // for the business-report look — no soft/pill-shaped filter controls.
-const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
+const FILTER_BTN_CLASS = "h-7 rounded-full border-0 bg-[#001d6e] px-2.5 text-[11px] text-white hover:bg-[#001552] hover:text-white sm:h-8 sm:px-3 sm:text-xs";
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -1804,23 +1804,16 @@ export default function OverallStock() {
         );
       },
     },
-    ...(canExchange || isAdminOrSuper ? [{
+    ...(isAdminOrSuper ? [{
       id: "actions",
       header: "",
       hideable: false,
       totalable: false,
-      width: isAdminOrSuper ? 96 : 48,
+      width: 96,
       align: "center" as const,
       render: (row: PlantStockRow) =>
         !row.isEmptyBox && row.barcode ? (
           <div className="flex items-center justify-center gap-0.5" onClick={(e) => e.stopPropagation()}>
-            {canExchange && plantScopedAction(
-              row, <ArrowLeftRight className="h-3.5 w-3.5" />, "Exchange this product for another", "hover:text-[#001d6e]",
-              (target) => setExchangeSource({
-                barcode: target.barcode!, itemName: target.itemName, plant: target.plant,
-                availableStock: target.liveStock ?? target.inStock, itemsPerPallet: target.itemsPerPallet,
-              }),
-            )}
             {/* One button on every row — the plant is picked inside the dialog (see editPlantOptions),
                 so merged All/State rows no longer need the small per-plant menu. */}
             {isAdminOrSuper && (
@@ -2284,7 +2277,7 @@ export default function OverallStock() {
             scrolling behind it peeked through right above this header. Pulling the sticky div up
             by the same amount (then re-adding it as this div's own pt-4/lg:pt-6, already below)
             puts the opaque bg-white flush with the true scrollport top instead. */}
-        <div className="sticky top-0 z-30 -mx-5 -mt-4 lg:-mx-7 lg:-mt-6 space-y-4 bg-white px-4 pb-3 pt-4 lg:px-6 lg:pt-6">
+        <div className="-mx-5 -mt-4 space-y-3 bg-white px-4 pb-2 pt-4 lg:-mx-7 lg:-mt-6 lg:space-y-2 lg:px-6 lg:pt-3">
         <PageHeader
           icon={LayoutList}
           title="Stock Overview"
@@ -2297,6 +2290,7 @@ export default function OverallStock() {
         <StatsBar
           className="rounded-xl shadow-none border-gray-300 [&_.divide-x]:divide-gray-300"
           wrapLabels
+          singleRow
           stats={[
             {
               icon: CalendarDays,
@@ -2743,7 +2737,7 @@ export default function OverallStock() {
               />
 
               {/* One Export control instead of three buttons; the format is picked from the menu. */}
-              <div className="ml-auto">
+              <div >
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="outline" size="sm" className={FILTER_BTN_CLASS} disabled={filtered.length === 0}>
@@ -2800,7 +2794,7 @@ export default function OverallStock() {
             // header + tabs + card title row + pagination bar; the floor keeps it usable on
             // short screens (the page then scrolls as before).
             isStickyHeader
-            maxHeight="max(320px, calc(100dvh - 560px))"
+            maxHeight="max(480px, calc(100dvh - 140px))"
             paginationMode="client"
             // Sr No + Item Name + Barcode stay put while the figure columns scroll underneath —
             // all three are marked fixedWidth above so their pinned offsets line up exactly.

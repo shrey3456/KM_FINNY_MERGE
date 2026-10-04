@@ -23,7 +23,7 @@ export function PageScrollButtons({ amount = 360 }: { amount?: number }) {
   const nudge = (dir: 1 | -1) => scrollTarget().scrollBy({ top: dir * amount, behavior: "smooth" });
   const btn = "rounded-2xl bg-white/10 p-2.5 text-white transition hover:bg-white/20 active:scale-95";
   return (
-    <div className="fixed bottom-24 right-4 z-[60] flex flex-col items-center gap-2 rounded-3xl bg-[#001d6e] px-2 py-2.5 text-white shadow-xl ring-1 ring-white/10">
+    <div className="fixed bottom-4 right-4 z-[60] flex flex-col items-center gap-2 rounded-3xl bg-[#001d6e] px-2 py-2.5 text-white shadow-xl ring-1 ring-white/10">
       <button type="button" onClick={() => nudge(-1)} aria-label="Scroll up" title="Scroll up" className={btn}>
         <ChevronUp className="h-6 w-6" />
       </button>

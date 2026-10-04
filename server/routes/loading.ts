@@ -989,11 +989,13 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 CASE WHEN ps.loading_completed_by_code = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = ps.loading_completed_by_code LIMIT 1) END AS "loadingCompletedByName",
                 ps.loading_owner_code AS "loadingOwnerCode", ps.loading_owner_name AS "loadingOwnerName",
                 ps.loading_paused_at AS "loadingPausedAt",
-                ps.loading_stv AS "loadingStv"
+                ps.loading_stv AS "loadingStv",
+                COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0)::int AS "totalQty",
+                COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0)::int AS "loadedQty"
          FROM loading_records lr
          LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
          ${listWhere}
-         ORDER BY lr.created_at DESC
+         ORDER BY ${tab === 'ready-desp' ? 'ps.loading_completed_at DESC NULLS LAST, ' : ''}lr.created_at DESC
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         params,
       ),
@@ -1386,15 +1388,8 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
 
     const { items: progressItems, allComplete, loadedVolume } = await withProgress(slip, rawItems);
 
-    // Auto-complete — "complete also auto if all item load". Attributed to whoever's scan
-    // finished it (more useful than a bare "system" marker), only fires once.
     let finalSlip: any = slip;
-    if (allComplete && !(slip as any).loadingCompletedAt) {
-      finalSlip = await storage.updateProformaSlip(slip.id, {
-        loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
-        notionStatus: NOTION_LOADING_COMPLETE_STATUS,
-      } as any) ?? slip;
-    }
+    // A load is never completed automatically — someone has to press Complete.
 
     res.json({
       slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,
@@ -1544,12 +1539,7 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
 
     const { items: progressItems, allComplete, loadedVolume } = await withProgress(slip, rawItems);
     let finalSlip: any = slip;
-    if (allComplete && !(slip as any).loadingCompletedAt) {
-      finalSlip = await storage.updateProformaSlip(slip.id, {
-        loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
-        notionStatus: NOTION_LOADING_COMPLETE_STATUS,
-      } as any) ?? slip;
-    }
+    // A load is never completed automatically — someone has to press Complete.
 
     res.json({
       slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,

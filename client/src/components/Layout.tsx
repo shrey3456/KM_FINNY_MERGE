@@ -77,6 +77,14 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
   const setHeaderHidden = isScanPage ? setScanHeaderHidden : setDefaultHiddenHeaderHidden;
   const hideHeader = canToggleHeader && headerHidden;
 
+  // Pages (Loading, Unloading) can ask for the header to be hidden from their own toolbar, so the
+  // button is reachable at every screen size, not just in the desktop bar.
+  useEffect(() => {
+    const onHide = () => setHeaderHidden(true);
+    window.addEventListener('app:hide-header', onHide);
+    return () => window.removeEventListener('app:hide-header', onHide);
+  }, [setHeaderHidden]);
+
   useEffect(() => {
     // Get user information from localStorage
     const userStr = localStorage.getItem('currentUser');
@@ -235,6 +243,15 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
 
             {!hideHeader && (
               <div className="flex items-center space-x-2">
+                {canToggleHeader && (
+                  <button
+                    onClick={() => setHeaderHidden(true)}
+                    className="flex shrink-0 items-center gap-1 rounded-lg border border-gray-200 px-2 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 hover:text-[#001d6e]"
+                    title="Hide header for more space"
+                  >
+                    <ChevronUp className="h-4 w-4" /> Hide header
+                  </button>
+                )}
                 {/* Home navigation button (only visible on non-home pages) */}
                 {location !== '/' && (
                   <Link href="/" className="flex items-center justify-center w-10 h-10 rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100 transition-colors">

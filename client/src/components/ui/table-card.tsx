@@ -58,8 +58,8 @@ export function TableCard({
   return (
     <div className={cn("rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden", className)}>
       <div className="border-b border-gray-200 bg-white px-3 py-3 sm:px-5 sm:py-3.5">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+          <div className="flex shrink-0 items-center gap-3">
             {!compactHeader && (
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] text-white sm:h-9 sm:w-9">
                 <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
@@ -68,15 +68,15 @@ export function TableCard({
             <div className="min-w-0">
               <div className={compactHeader
                 ? "text-xs font-medium text-gray-500"
-                : "text-lg font-bold tracking-tight text-gray-900 sm:text-xl"}>{title}</div>
+                : "whitespace-nowrap text-lg font-bold tracking-tight text-gray-900 sm:text-xl"}>{title}</div>
               {subtitle && (
-                <div className="mt-0.5 text-xs leading-none text-gray-400">{subtitle}</div>
+                <div className="mt-0.5 whitespace-nowrap text-xs leading-none text-gray-400">{subtitle}</div>
               )}
             </div>
           </div>
 
           {(headerActions || showSearch) && (
-            <div className="flex flex-wrap items-center gap-2 sm:shrink-0 sm:justify-end">
+            <div className="flex flex-wrap items-center gap-2 sm:min-w-0 sm:flex-1 sm:justify-end">
               {headerActions}
               {showSearch && (
                 <div className="relative w-full sm:w-auto sm:shrink-0">

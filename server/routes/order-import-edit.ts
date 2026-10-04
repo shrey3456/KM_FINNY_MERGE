@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
-import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
+import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { broadcastOrderImportUpdate } from '../lib/importEvents';
 import { getUserPlants, getPlantStateCode, resolvePalletSizeOrQty } from './order-scan';
 import { splitPallets, resplitEventsExtraFlag } from '../lib/orderScanRemap';
@@ -164,9 +164,13 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
       await client.query('ROLLBACK');
       return res.status(404).json({ message: 'Session not found' });
     }
-    if (session.scan_status === 'completed') {
+    // A completed CSV can only be corrected by an admin (e.g. a wrong expected quantity found
+    // later). The same re-split below runs, so scans that are now over the new expected quantity
+    // become Extra, and extras that now fit become regular, with stock's extra figure corrected.
+    if (session.scan_status === 'completed'
+        && !WRITE_ADMIN_ROLES.includes(String((req.user as any)?.role ?? '').toLowerCase())) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ message: 'This CSV is already completed and can no longer be edited.' });
+      return res.status(400).json({ message: 'This CSV is already completed — only an admin can edit it.' });
     }
 
     const allowedPlants = getUserPlants(req.user);

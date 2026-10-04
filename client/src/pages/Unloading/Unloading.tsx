@@ -1365,6 +1365,7 @@ export default function Unloading() {
             actions={
               // Reloads this page's session list now. The list does not refresh on its own, so use this
               // to see changes made elsewhere right away.
+              <div className="flex items-center gap-2">
               <Button
                 type="button"
                 variant="outline"
@@ -1380,6 +1381,7 @@ export default function Unloading() {
               >
                 <RotateCw className={`h-4 w-4 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} />
               </Button>
+              </div>
             }
           />
         )}
@@ -1398,6 +1400,13 @@ export default function Unloading() {
 
         {view === "list" && (
           <div className={`${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            <button
+              onClick={rotateNext}
+              className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+              title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
+            >
+              <RotateCw className="h-5 w-5" />
+            </button>
             {rotated && (
               <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
                 <ScrollNudgeButtons targetRef={vehiclesTableScrollRef} amount={360} />
@@ -1875,6 +1884,13 @@ export default function Unloading() {
 
         {view === "scan" && (
           <div className={`space-y-4 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+            <button
+              onClick={rotateNext}
+              className="fixed bottom-4 right-4 z-[60] flex items-center gap-2 rounded-full bg-[#001d6e] px-4 py-3 text-white shadow-lg transition-colors hover:bg-[#00154b]"
+              title={`Rotate the screen (now ${rotation}°) — steps a quarter turn each press, back to 0° after 270°`}
+            >
+              <RotateCw className="h-5 w-5" />
+            </button>
             {/* ── Rotated kiosk mode only. Unrotated, this whole header lives on the page's own
                 compact scan-header row above; rotated, the fixed rotate overlay covers that, so
                 the same pieces fold into a card here instead — same single merged row, so the
@@ -2097,7 +2113,7 @@ export default function Unloading() {
                       </div>
                     )}
                   </div>
-                  <div className={bigView ? "hidden" : "hidden xl:block"}>
+                  <div className={rotated ? "" : bigView ? "hidden" : "hidden xl:block"}>
                   <DataTable<SessionItem>
                     containerClassName="rounded-none border-0"
                     headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-sm"
@@ -2120,7 +2136,7 @@ export default function Unloading() {
                   </div>
                   {/* Two cards per row from sm (tablet) up — a single full-width card per row left most of
                       a tablet's width empty. Phones stay one per row. */}
-                  <div className={bigView ? "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2" : "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 xl:hidden"}>
+                  <div className={rotated ? "hidden" : bigView ? "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2" : "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 xl:hidden"}>
                     {filteredItems.length === 0 ? (
                       <p className="col-span-full py-8 text-center text-sm text-gray-400">{itemSearchText || itemStatusFilter ? "No items match your filters." : "No items on this batch."}</p>
                     ) : filteredItems.map((item) => {

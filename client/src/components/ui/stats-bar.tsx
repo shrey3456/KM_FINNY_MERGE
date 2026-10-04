@@ -68,6 +68,11 @@ const XL_COLS: Record<number, string> = {
   6: "xl:grid-cols-6",
 };
 
+const SINGLE_ROW_COLS: Record<number, string> = {
+  1: "md:grid-cols-1", 2: "md:grid-cols-2", 3: "md:grid-cols-3",
+  4: "md:grid-cols-4", 5: "md:grid-cols-5", 6: "md:grid-cols-6",
+};
+
 interface StatsBarProps {
   stats: StatItem[];
   /** Buttons rendered in a bar beneath the tiles. Omit for a stats-only card. */
@@ -76,6 +81,8 @@ interface StatsBarProps {
   columns?: number;
   /** Let long captions wrap onto multiple lines instead of truncating with an ellipsis. */
   wrapLabels?: boolean;
+  /** From tablet width up, keep every tile in ONE row with smaller type and no icon. */
+  singleRow?: boolean;
   className?: string;
 }
 
@@ -83,7 +90,7 @@ interface StatsBarProps {
  * Stats tiles (+ optional action bar) in one bordered card — the Product Master
  * header treatment, reusable across modules.
  */
-export function StatsBar({ stats, actions, columns, wrapLabels, className }: StatsBarProps) {
+export function StatsBar({ stats, actions, columns, wrapLabels, singleRow, className }: StatsBarProps) {
   const cols = Math.min(columns ?? stats.length, 6);
   const hasHints = stats.some((stat) => stat.hint != null);
 
@@ -92,8 +99,8 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
       <div
         className={cn(
           "grid grid-cols-2 divide-x divide-gray-100",
-          MD_COLS[cols] ?? "md:grid-cols-3",
-          XL_COLS[cols] ?? "xl:grid-cols-4",
+          singleRow ? SINGLE_ROW_COLS[cols] : MD_COLS[cols] ?? "md:grid-cols-3",
+          singleRow ? "" : XL_COLS[cols] ?? "xl:grid-cols-4",
           actions && "border-b border-gray-100",
         )}
       >
@@ -105,11 +112,12 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
               key={i}
               // Tiles with detail lines can differ in height — top-align them so every big number
               // sits on the same line across the row.
-              className={cn("flex gap-2 px-3 py-3 sm:gap-3 sm:px-5 sm:py-4", hasHints ? "items-start" : "items-center")}
+              className={cn("flex gap-2 px-3 py-3 sm:gap-3 sm:px-5 sm:py-4", singleRow && "max-xl:md:gap-1.5 max-xl:md:px-2 max-xl:md:py-2.5", hasHints ? "items-start" : "items-center")}
             >
               <div
                 className={cn(
                   "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg sm:h-10 sm:w-10",
+                  singleRow && "max-xl:md:hidden",
                   tone.badge,
                 )}
               >
@@ -121,7 +129,7 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
                     "font-extrabold leading-none",
                     // tabular-nums: every digit the same width, so the figures line up down the
                     // row instead of drifting against each other.
-                    stat.isTextValue ? "text-xs sm:text-sm font-bold" : cn("tabular-nums", valueSizeClass(stat.value)),
+                    stat.isTextValue ? "text-xs sm:text-sm font-bold" : cn("tabular-nums", valueSizeClass(stat.value), singleRow && "max-xl:md:!text-base"),
                     tone.value,
                   )}
                 >
@@ -129,13 +137,13 @@ export function StatsBar({ stats, actions, columns, wrapLabels, className }: Sta
                 </p>
                 {/* text-sm at every width: at sm:text-base a two-word caption ("Expected Purchase")
                     wrapped onto a second line and left the tiles at uneven heights. */}
-                <p className={cn("mt-0.5 text-sm font-medium text-gray-500", wrapLabels ? "break-words" : "truncate")}>
+                <p className={cn("mt-0.5 text-sm font-medium text-gray-500", singleRow && "max-xl:md:text-xs", wrapLabels ? "break-words" : "truncate")}>
                   {stat.label}
                 </p>
                 {(Array.isArray(stat.hint) ? stat.hint : [stat.hint])
                   .filter((line) => line != null && line !== "" && line !== false)
                   .map((line, lineIndex) => (
-                    <p key={lineIndex} className="mt-0.5 break-words text-xs font-medium leading-snug tabular-nums text-gray-400">
+                    <p key={lineIndex} className={cn("mt-0.5 break-words text-xs font-medium leading-snug tabular-nums text-gray-400", singleRow && "max-xl:md:text-[10px]")}>
                       {line}
                     </p>
                   ))}

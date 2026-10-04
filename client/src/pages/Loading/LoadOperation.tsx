@@ -3,7 +3,7 @@ import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronLeft, ChevronRight, Download, FileText,
-  ChevronDown, Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
+  ChevronDown, ChevronUp, Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
   Truck, UserCircle2, X, Zap,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
@@ -148,6 +148,8 @@ type LoadingRecord = {
   // "Load Date", not the order's own date. orderDate is the proforma slip's real order date,
   // straight from the source order data — the two can be days apart.
   createdAt: string; orderDate: string | null;
+  // Order's total quantity and how much of it is loaded so far (non-voided scans).
+  totalQty?: number; loadedQty?: number;
   loadingCompletedAt: string | null;
   // Who completed the load (Complete button or the scan that finished it) — a name, or null.
   loadingCompletedByCode?: string | null; loadingCompletedByName?: string | null;
@@ -421,8 +423,15 @@ export default function LoadOperation() {
   // here. Clicking it also switches the sort to newest-created-first, since that's the point of
   // the button — see each button's own onClick below.
   const [createdByMe, setCreatedByMe] = usePersistentFilter("loading:listCreatedByMe", false);
-  const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate">("loading:listSortBy", "orderNumber");
-  const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "asc");
+  // Each view opens in its own order: All Operations / Loading / My Slips by creation time, newest
+  // first; Ready for Dispatch by completion time, newest first. The sort dropdown can still be
+  // changed afterwards, and switching view resets it to that view's order.
+  useEffect(() => {
+    setSortBy(activeViewTab === "ready-desp" ? "completedAt" : "creationDate");
+    setSortOrder("desc");
+  }, [activeViewTab, createdByMe]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate" | "completedAt">("loading:listSortBy", "creationDate");
+  const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "desc");
   // Excel-style column filters for the landing list (see recordFilterColumns below).
   const [recordColumnConditions, setRecordColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("loading:columnFilters", {});
 
@@ -563,6 +572,9 @@ export default function LoadOperation() {
     .filter((r) => matchAllConditions(r, recordConditionList, recordFilterColumns))
     .sort((a, b) => {
       const dir = sortOrder === "asc" ? 1 : -1;
+      if (sortBy === "completedAt") {
+        return dir * (new Date(a.loadingCompletedAt ?? 0).getTime() - new Date(b.loadingCompletedAt ?? 0).getTime());
+      }
       if (sortBy === "orderNumber") {
         return dir * ((parseInt(a.orderNumber) || 0) - (parseInt(b.orderNumber) || 0));
       }
@@ -703,12 +715,8 @@ export default function LoadOperation() {
   // and Scan History's Load Event tab use) and filtered client-side per barcode when a row opens,
   // rather than one request per item.
   const [expandedItemBarcode, setExpandedItemBarcode] = useState<string | null>(null);
-  // The Scan Items block opens and closes when its header is clicked.
-  const [scannerOpen, setScannerOpen] = useState(true);
-  // The Load Totals block (tiles and progress bar) opens and closes from its header.
-  const [totalsOpen, setTotalsOpen] = useState(true);
-  // The panel under the Total / Scanner / Owner History row opens and closes with the arrow on that row.
-  const [panelsOpen, setPanelsOpen] = useState(true);
+  // ONE hide/show for every panel under the Total / Scanner / Owner History row (arrow on that row).
+  const [panelsOpen, setPanelsOpen] = useState(false);
   // Same click-to-filter tiles as Order Scan's own Order Totals card (Total/Loaded/Remaining/
   // Extra) — narrows the items table below to just that bucket; clicking the active one clears it.
   const [itemStatusFilter, setItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
@@ -1492,7 +1500,7 @@ export default function LoadOperation() {
       setLoadedVolume(data.loadedVolume);
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
       // A +/- correction can finish the load just as a scan can — same popup, same refresh.
-      if (data.allComplete && !slip?.loadingCompletedAt) {
+      if (data.allComplete && data.slip?.loadingCompletedAt && !slip?.loadingCompletedAt) {
         announceLoadComplete(data.slip, data.items, true);
         queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
       }
@@ -1681,7 +1689,7 @@ export default function LoadOperation() {
       setItems(data.items);
       setAllComplete(data.allComplete);
       setLoadedVolume(data.loadedVolume);
-      if (data.allComplete && !slip?.loadingCompletedAt) {
+      if (data.allComplete && data.slip?.loadingCompletedAt && !slip?.loadingCompletedAt) {
         announceLoadComplete(data.slip, data.items, true);
         // The server auto-set loadingCompletedAt as a side effect of this scan — the landing
         // list's badge reads that column, so it needs a refresh too, not just this order's own
@@ -2371,7 +2379,7 @@ export default function LoadOperation() {
                 "Welcome" bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
             {/* Same name and icon as this page's sidebar entry ("Load Operations", the factory).
                 Sticky: the header stays at the top while the list scrolls underneath it. */}
-            <div className="sticky top-0 z-20 -mx-2 bg-[#f4f5f7] px-2 pt-1 pb-2">
+            <div className="-mx-2 bg-white px-2 pt-1 pb-2">
             <PageHeader
               icon={Factory}
               iconClassName="h-5 w-5 fill-[#4d7eff]"
@@ -2579,16 +2587,6 @@ export default function LoadOperation() {
                         </div>
             ) : (
               <>
-            {/* Search bar (desktop) */}
-            <div className={`w-full ${bigView ? "hidden" : "hidden xl:block"}`}>
-              <Input
-                placeholder="Search by order number, party name, vehicle or status..."
-                value={listSearch}
-                onChange={(e) => setListSearch(e.target.value)}
-                className="w-full"
-              />
-            </div>
-
             {/* One stable toolbar for calendar, filters, statuses, and the primary action.
                 Wraps onto a second row on a narrow screen instead of scrolling horizontally —
                 every button stays visible without needing a left/right scroll to reach any of
@@ -2608,32 +2606,7 @@ export default function LoadOperation() {
                 plantOptions={plantOptions}
               />
 
-              <Select
-                value={`${sortBy}:${sortOrder}`}
-                onValueChange={(value) => {
-                  const [column, direction] = value.split(":") as ["orderNumber" | "creationDate", "asc" | "desc"];
-                  setSortBy(column);
-                  setSortOrder(direction);
-                }}
-              >
-                <SelectTrigger className="h-9 w-[180px] text-xs" aria-label="Sort loading slips">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="orderNumber:asc">Order No. — Ascending</SelectItem>
-                  <SelectItem value="orderNumber:desc">Order No. — Descending</SelectItem>
-                  <SelectItem value="creationDate:asc">Load Date — Ascending</SelectItem>
-                  <SelectItem value="creationDate:desc">Load Date — Descending</SelectItem>
-                </SelectContent>
-              </Select>
 
-              <AddColumnFilterButton
-                columns={recordFilterColumns}
-                conditions={recordColumnConditions}
-                onApply={setRecordCondition}
-                onClear={clearRecordCondition}
-                className="h-9 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
-              />
               {Object.entries(recordColumnConditions).map(([id, condition]) => (
                 <ColumnFilterChipView
                   key={id}
@@ -2722,14 +2695,40 @@ export default function LoadOperation() {
               </Tabs>
             </div>
 
-            {/* Compact search row (below xl) — the filter row above still covers Date/Plant/
-                Status at every width; this is just listSearch's own box at narrower widths. */}
-            <div className={`flex gap-2 ${bigView ? "" : "xl:hidden"}`}>
+            {/* Search with sort and filter beside it, all in one row at every width. */}
+            <div className="flex items-center gap-2">
               <Input
                 placeholder="Search order, party, vehicle..."
                 value={listSearch}
                 onChange={(e) => setListSearch(e.target.value)}
-                className="flex-1"
+                className="h-9 min-w-0 flex-1 text-sm"
+              />
+              <Select
+                value={`${sortBy}:${sortOrder}`}
+                onValueChange={(value) => {
+                  const [column, direction] = value.split(":") as ["orderNumber" | "creationDate" | "completedAt", "asc" | "desc"];
+                  setSortBy(column);
+                  setSortOrder(direction);
+                }}
+              >
+                <SelectTrigger className="h-9 w-[140px] shrink-0 text-xs" aria-label="Sort loading slips">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="orderNumber:asc">Order No. — Ascending</SelectItem>
+                  <SelectItem value="orderNumber:desc">Order No. — Descending</SelectItem>
+                  <SelectItem value="creationDate:asc">Load Date — Ascending</SelectItem>
+                  <SelectItem value="creationDate:desc">Load Date — Descending</SelectItem>
+                  <SelectItem value="completedAt:desc">Completed — Descending</SelectItem>
+                  <SelectItem value="completedAt:asc">Completed — Ascending</SelectItem>
+                </SelectContent>
+              </Select>
+              <AddColumnFilterButton
+                columns={recordFilterColumns}
+                conditions={recordColumnConditions}
+                onApply={setRecordCondition}
+                onClear={clearRecordCondition}
+                className="h-9 shrink-0 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
               />
             </div>
 
@@ -2762,14 +2761,14 @@ export default function LoadOperation() {
                     enough SPARE width to survive that; anything narrower gets the card list
                     instead (see the xl:hidden card view further down), which never scrolls
                     horizontally at all. */}
-                <div className={`border rounded-md w-full overflow-x-auto ${bigView ? "hidden" : "hidden xl:block"}`}>
+                <div className={`border rounded-md w-full overflow-x-auto [&>div]:max-h-[calc(100vh-16rem)] ${bigView ? "hidden" : "hidden xl:block"}`}>
                   {/* [&_th]/[&_td]:px-2 shrinks this table's own cell padding from the shared
                       Table component's default px-4 — 12 columns × 16px saved per side adds up
                       to over 150px, which is what was pushing "Actions" past the edge at
                       ~1024-1100px laptop widths even after merging Vehicle/RTO into a single
                       cell. Scoped to this table only via the descendant selector — doesn't touch
                       the shared component or any other table on the site. */}
-                  <Table className="[&_th]:px-2 [&_td]:px-2">
+                  <Table className="[&_th]:px-2 [&_td]:px-2 [&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-[#001d6e]">
                     <TableHeader>
                       {/* Same navy/white uppercase header every other table on the site uses,
                           instead of the plain shadcn default (muted-gray text on white) — makes
@@ -2784,6 +2783,7 @@ export default function LoadOperation() {
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The Dispatch Directory this load was started on — set once at Create Operation">{recordColumnHeader("stv", "Dispatch Directory")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Quantity loaded so far out of the order's total quantity">Loaded / Total</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("creator", "Creator")}</TableHead>
@@ -2847,6 +2847,7 @@ export default function LoadOperation() {
                                   <span className="text-xs text-gray-300">—</span>
                                 )}
                               </TableCell>
+                              <TableCell className="whitespace-nowrap tabular-nums"><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></TableCell>
                               <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
                               <TableCell>
                                 {r.loadingCompletedAt ? (
@@ -3006,6 +3007,7 @@ export default function LoadOperation() {
                                 {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
                               </span>
                             </span>
+                            <span className="whitespace-nowrap tabular-nums">Qty <span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> / <span className="font-semibold text-gray-700">{r.totalQty ?? 0}</span></span>
                             <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>
                             {r.loadingCompletedAt && (r.loadingCompletedByName || r.loadingCompletedByCode) && (
                               <span className="whitespace-nowrap text-emerald-700">Completed by {r.loadingCompletedByName ?? r.loadingCompletedByCode}</span>
@@ -3094,7 +3096,7 @@ export default function LoadOperation() {
             switch between; clicking a different tab reuses the same open-from-list path the
             landing list itself uses, so there's no second code path to keep in sync. */}
         {view === "create" && slip && activeSlips.length > 1 && (
-          <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-100 pb-2">
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-100 pb-2 pt-3">
             {activeSlips.map((s) => {
               const active = s.orderNumber === slip.orderNumber;
               return (
@@ -3661,7 +3663,7 @@ export default function LoadOperation() {
                   type="button"
                   onClick={() => setPanelsOpen((o) => !o)}
                   aria-expanded={panelsOpen}
-                  title={panelsOpen ? "Hide this panel" : "Show this panel"}
+                  title={panelsOpen ? "Hide panels" : "Show panels"}
                   className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
                 >
                   <ChevronDown className={`h-4 w-4 transition-transform ${panelsOpen ? "rotate-180" : ""}`} />
@@ -3688,18 +3690,8 @@ export default function LoadOperation() {
                 ? "" : "hidden"
             }>
               <div className="flex min-w-0 flex-col gap-1 rounded-xl border bg-white p-1.5 shadow-sm">
-                <div
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={totalsOpen}
-                  onClick={() => setTotalsOpen((o) => !o)}
-                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setTotalsOpen((o) => !o); } }}
-                  className="flex cursor-pointer items-baseline justify-between gap-2 rounded-md px-1 hover:bg-gray-50"
-                >
-                  <p className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    Load Totals
-                    <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${totalsOpen ? "rotate-180" : ""}`} />
-                  </p>
+                <div className="flex items-baseline justify-between">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Load Totals</p>
                   {itemTotals.expected <= 0 ? (
                     <p className="text-sm font-medium text-gray-400">—</p>
                   ) : itemPct >= 100 ? (
@@ -3713,7 +3705,7 @@ export default function LoadOperation() {
                 {/* Always 4 columns, even on the narrowest phone — was grid-cols-2 below sm
                     (wrapping to 2 rows); text/padding/gap now scale down with a sm: step
                     instead of the column count changing, so all four stay in one row. */}
-                <div className={`grid grid-cols-4 gap-1 ${totalsOpen ? "" : "hidden"}`}>
+                <div className={`grid grid-cols-4 gap-1 `}>
                   {([
                     { key: "" as const, label: "Total", value: itemTotals.expected, plt: itemTotals.pltExpected, dot: "bg-gray-400", text: "text-gray-900" },
                     { key: "done" as const, label: "Loaded", value: itemTotals.loaded, plt: itemTotals.pltLoaded, dot: "bg-emerald-500", text: "text-emerald-600" },
@@ -3742,7 +3734,7 @@ export default function LoadOperation() {
                     );
                   })}
                 </div>
-                <div className={`space-y-1 ${totalsOpen ? "" : "hidden"}`}>
+                <div className={`space-y-1 `}>
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-100">
                     <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-300" style={{ width: `${itemPct}%` }} />
                   </div>
@@ -3760,17 +3752,11 @@ export default function LoadOperation() {
             {canScanThisLoad && (
               <div className={!panelsOpen || activeTab !== "scanner" ? "hidden" : ""}>
                 <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setScannerOpen((o) => !o)}
-                    aria-expanded={scannerOpen}
-                    className={`flex w-full items-center gap-2 px-4 sm:px-5 py-3.5 text-left transition-colors hover:bg-gray-50 ${scannerOpen ? "border-b border-gray-100" : ""}`}
-                  >
+                  <div className="flex w-full items-center gap-2 border-b border-gray-100 px-4 sm:px-5 py-3.5">
                     <ScanLine className="h-4 w-4 text-[#001d6e]" />
                     <span className="text-sm font-semibold text-gray-900">Scan Items</span>
-                    <ChevronDown className={`ml-auto h-4 w-4 text-gray-400 transition-transform ${scannerOpen ? "rotate-180" : ""}`} />
-                  </button>
-                  <div className={`px-4 sm:px-5 py-4 space-y-3 ${scannerOpen ? "" : "hidden"}`}>
+                  </div>
+                  <div className="px-4 sm:px-5 py-4 space-y-3">
                     <div className="flex overflow-hidden rounded-xl border border-gray-300 divide-x divide-gray-300 bg-white">
                       <button
                         onClick={() => setItemScanMode("camera")}
@@ -3904,7 +3890,7 @@ export default function LoadOperation() {
                   to a row, since the 5-column table leaves a tablet cramped. Phones keep the
                   table above, desktop keeps it too, and so does the rotated kiosk view. */}
               {!rotated && (
-                <div className={`hidden min-h-0 overflow-y-auto p-3 ${itemCardsShow}`} style={scannerOpen ? { maxHeight: openSlipTableMaxHeight } : undefined}>
+                <div className={`hidden min-h-0 overflow-y-auto p-3 ${itemCardsShow}`} style={panelsOpen ? { maxHeight: openSlipTableMaxHeight } : undefined}>
                   {filteredItems.length === 0 ? (
                     <p className="py-8 text-center text-sm text-gray-400">{itemStatusFilter || itemSearchText ? "No items match this filter." : "No items on this slip."}</p>
                   ) : (
@@ -4938,7 +4924,14 @@ export default function LoadOperation() {
       {/* Items table's own +/- confirm — a manual correction to loaded qty, always confirmed
           first (never fires straight off the click) with an editable quantity, defaulting to 1. */}
       <Dialog open={!!adjustTarget} onOpenChange={(o) => { if (!o) setAdjustTarget(null); }}>
-        <DialogContent className={`max-w-sm`}>
+        <DialogContent className={`overflow-x-hidden p-0 sm:max-w-2xl`}>
+          <div className="flex flex-col sm:flex-row">
+            {adjustTarget && (
+              <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-64 sm:border-b-0 sm:border-r">
+                <ProductPhoto name={adjustTarget.item.itemName} className="max-h-48 w-full object-contain" zoomable />
+              </div>
+            )}
+            <div className="min-w-0 flex-1 space-y-4 p-6">
           <DialogHeader>
             <DialogTitle className={adjustTarget?.direction === "add" ? "text-emerald-700" : "text-red-700"}>
               {adjustTarget?.direction === "add" ? "Add to loaded quantity?" : "Remove from loaded quantity?"}
@@ -4981,6 +4974,41 @@ export default function LoadOperation() {
                 +
               </Button>
             </div>
+            {(adjustTarget?.item.itemsPerPallet ?? 0) > 0 && (
+              <div className="space-y-1 pt-1">
+                <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {adjustTarget?.item.itemsPerPallet}/pallet</span></Label>
+                <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
+                  <Button
+                    type="button" variant="ghost"
+                    className="h-11 w-10 shrink-0 rounded-none border-r border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100"
+                    onClick={() => setAdjustQty((q) => Math.max(1, q - (adjustTarget?.item.itemsPerPallet || 1)))}
+                    aria-label="Decrease by one pallet"
+                  >
+                    −
+                  </Button>
+                  <Input
+                    type="number" min={0} step="0.01"
+                    value={adjustQty > 0 ? (adjustQty / (adjustTarget?.item.itemsPerPallet || 1)).toFixed(2) : ""}
+                    onFocus={() => setAdjustQty(0)}
+                    onChange={(e) => {
+                      const ipp = adjustTarget?.item.itemsPerPallet || 1;
+                      const pl = parseFloat(e.target.value);
+                      setAdjustQty(Number.isFinite(pl) ? Math.max(0, Math.round(pl * ipp)) : 0);
+                    }}
+                    onBlur={() => setAdjustQty((q) => Math.max(1, q))}
+                    className="h-11 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-lg font-bold focus-visible:ring-0 focus-visible:ring-offset-0"
+                  />
+                  <Button
+                    type="button" variant="ghost"
+                    className="h-11 w-10 shrink-0 rounded-none border-l border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100"
+                    onClick={() => setAdjustQty((q) => q + (adjustTarget?.item.itemsPerPallet || 1))}
+                    aria-label="Increase by one pallet"
+                  >
+                    +
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setAdjustTarget(null)} disabled={adjustLoadMutation.isPending}>
@@ -4995,6 +5023,8 @@ export default function LoadOperation() {
               {adjustTarget?.direction === "add" ? `Add ${adjustQty}` : `Remove ${adjustQty}`}
             </Button>
           </DialogFooter>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 

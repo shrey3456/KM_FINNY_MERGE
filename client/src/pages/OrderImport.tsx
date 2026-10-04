@@ -2086,6 +2086,16 @@ export default function OrderImport() {
                             onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
                             <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
                           </Button>
+                          {/* Admin-only: correct the expected quantities of a completed CSV. Scans that
+                              no longer fit become Extra, and Extras that now fit become regular. */}
+                          {isAdminOrSuper && (
+                            <Button size="sm" variant="outline"
+                              className="h-7 px-2 text-xs text-[#001d6e] border-[#001d6e]/30 hover:bg-[#001d6e]/5 rounded-full"
+                              title="Edit this completed CSV's expected quantities"
+                              onClick={() => setEditSessionId(s.id)}>
+                              <Pencil className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Edit</span>
+                            </Button>
+                          )}
                           {/* Only for the single most-recently-completed session per plant — an
                               accidental Complete click, not a general "reopen any history" tool. */}
                           {canWriteOrderImport && lastCompletedIdByPlant.get((s.plant ?? "").toLowerCase())?.id === s.id && (
