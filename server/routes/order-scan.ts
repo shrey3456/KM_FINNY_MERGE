@@ -2713,6 +2713,24 @@ router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite
     );
 
     const { userCode, userName } = { userCode: (req.user as any)?.userCode ?? null, userName: (req.user as any)?.name ?? null };
+
+    // Audit trail: the original scan's identity is rewritten in place above, so leave a voided
+    // copy under the OLD product — Scan History then shows what it was changed from, and the old
+    // product no longer counts it (voided rows are excluded from totals and stock).
+    await client.query(
+      `INSERT INTO order_scan_events
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
+          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name, scanned_at,
+          voided, voided_by_code, voided_at, void_reason)
+       SELECT session_id, $6::int, $2, $3, pallets, loose_qty, total_qty,
+              items_per_pallet, true, stv, scanned_by_code, scanned_by_name, scanned_at,
+              true, $4, NOW(), $5
+         FROM order_scan_events WHERE id = $1`,
+      [eventId, event.barcode, event.item_name, userCode,
+       `Product changed via Adjust Exchange Extra: ${event.item_name ?? event.barcode} → ${newItemName ?? newBarcode}`,
+       event.scan_item_id ?? null],
+    );
+
     await storage.logActivity({
       pageName: 'Adjust Exchange Extra', action: 'update', entityType: 'order_scan_event', entityId: eventId,
       details: `Exchanged Extra scan from barcode ${event.barcode} to ${newBarcode} (${newItemName ?? ''}) — qty ${qty}`,

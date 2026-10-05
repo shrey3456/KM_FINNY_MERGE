@@ -389,6 +389,16 @@ async function withProgress(slip: any, items: any[]) {
   );
   const loadedByBarcode = new Map<string, number>(loadedRows.map((r: any) => [normalize(r.barcode), r.loadedQty]));
 
+  // Quantity logged through Add Extra / flagged is_extra. Counted in loaded like any scan, but
+  // "loaded - expected" alone can't see it while the item still has room left (expected 100,
+  // loaded 10 of which all Extra) — so it's reported separately for the Extra stat/filter.
+  const { rows: extraRows } = await pool.query(
+    `SELECT barcode, COALESCE(SUM(total_qty), 0)::int AS "extraQty"
+     FROM loading_scan_events WHERE order_number = $1 AND voided IS NOT TRUE AND is_extra = true GROUP BY barcode`,
+    [slip.orderNumber],
+  );
+  const extraByBarcode = new Map<string, number>(extraRows.map((r: any) => [normalize(r.barcode), r.extraQty]));
+
   const progressItems = await Promise.all(items.map(async (item) => {
     const product = item.barcode ? await storage.getProductByBarcode(item.barcode, slip.plant) : undefined;
     const expected = item.quantity ?? 0;
@@ -408,6 +418,7 @@ async function withProgress(slip: any, items: any[]) {
     }
     return {
       ...item, expected, loaded, remaining: Math.max(0, expected - loaded),
+      extraQty: Math.max(extraByBarcode.get(normalize(item.barcode)) ?? 0, loaded - expected, 0),
       itemsPerPallet,
       // The pallet size actually configured in Product Master (0 when GJ/MP PLT is blank).
       // itemsPerPallet falls back to the line quantity so totals still count one pallet; this
@@ -438,7 +449,7 @@ async function withProgress(slip: any, items: any[]) {
       barcode: product.barcode ?? bc, itemName: product.name ?? bc, sapCode: product.sapCode ?? null,
       srNo: product.newSr ?? null, volumeInCuFt: product.volumeInCuFt ?? null,
       quantity: null,
-      expected: 0, loaded, remaining: 0, itemsPerPallet,
+      expected: 0, loaded, remaining: 0, extraQty: loaded, itemsPerPallet,
       realPackSize: getPalletSize(product, state),
       isComplete: true, stockAvailable,
     };
@@ -771,6 +782,23 @@ router.post('/loading/proforma/:orderNumber/claim', requireLoadingWrite, async (
   } catch (error) {
     console.error('Error claiming load:', error);
     res.status(500).json({ message: 'Failed to claim load' });
+  }
+});
+
+// GET /api/loading/proforma/:orderNumber/stock?barcode= — stock a scan of this barcode could draw
+// on for this order's plant (pooled across the plant's state, same figure /scan checks). Used by
+// Add Extra, whose picked product may not be on the slip and so has no stockAvailable row.
+router.get('/loading/proforma/:orderNumber/stock', requirePageAccess('loading'), async (req: Request, res: Response) => {
+  try {
+    const barcode = String(req.query.barcode ?? '').trim();
+    if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+    const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    const { total } = await getPooledStock(pool, barcode, slip.plant ?? '');
+    res.json({ stock: total });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to fetch stock' });
   }
 });
 

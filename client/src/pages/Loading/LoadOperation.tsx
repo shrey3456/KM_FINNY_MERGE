@@ -16,7 +16,6 @@ import { type FilterableColumn, type FilterCondition, type FilterOption, matchAl
 import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
-import { PageScrollButtons } from "@/components/PageScrollButtons";
 import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
@@ -92,12 +91,16 @@ type ProformaItem = {
   quantity: number | null;
   // Progress fields, added by withProgress() server-side
   expected: number; loaded: number; remaining: number; itemsPerPallet: number;
+  // Qty logged as Extra (Add Extra, or beyond expected) — can be > 0 while loaded < expected.
+  extraQty?: number;
   // The pallet size actually set in Product Master for this plant's state (GJ PLT / MP PLT),
   // 0 when nobody set one. itemsPerPallet falls back to the line quantity, so only this field
   // can answer "is a real pallet size set?".
   realPackSize?: number;
   isComplete: boolean; stockAvailable: number | null;
 };
+const extraOf = (it: { loaded: number; expected: number; extraQty?: number }) =>
+  Math.max(it.extraQty ?? 0, it.loaded - it.expected, 0);
 type ProformaSlip = {
   id: number; orderNumber: string; partyName: string; plant: string | null;
   orderDate: string | null; totalQuantity: number | null;
@@ -717,6 +720,12 @@ export default function LoadOperation() {
   const [expandedItemBarcode, setExpandedItemBarcode] = useState<string | null>(null);
   // ONE hide/show for every panel under the Total / Scanner / Owner History row (arrow on that row).
   const [panelsOpen, setPanelsOpen] = useState(false);
+  // Tabs are their own show/hide: clicking one opens its panel, clicking the open one hides it.
+  const togglePanelTab = (tab: "total" | "scanner" | "owner" | "sort") => {
+    if (panelsOpen && activeTab === tab) { setPanelsOpen(false); return; }
+    setActiveTab(tab);
+    setPanelsOpen(true);
+  };
   // Same click-to-filter tiles as Order Scan's own Order Totals card (Total/Loaded/Remaining/
   // Extra) — narrows the items table below to just that bucket; clicking the active one clears it.
   const [itemStatusFilter, setItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
@@ -1398,6 +1407,16 @@ export default function LoadOperation() {
     enabled: extraDialogOpen,
     staleTime: 60_000,
   });
+  // Stock available for the picked product — it may not be on the slip, so no items row has it.
+  const extraStockQuery = useQuery<{ stock: number }>({
+    queryKey: ["/api/loading/proforma", slip?.orderNumber, "stock", extraTarget?.barcode],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/stock?barcode=${encodeURIComponent(extraTarget!.barcode)}`);
+      if (!res.ok) throw new Error("Failed to fetch stock");
+      return res.json();
+    },
+    enabled: extraDialogOpen && !!extraTarget && !!slip,
+  });
   const extraSearchResults = (() => {
     const q = extraSearch.trim().toLowerCase();
     if (!q) return [];
@@ -1992,7 +2011,7 @@ export default function LoadOperation() {
   // duplicating it as three plain Items/Qty/Volume boxes.
   const itemTotals = items.reduce(
     (acc, it) => {
-      const extra = Math.max(0, it.loaded - it.expected);
+      const extra = extraOf(it);
       const ipp = it.itemsPerPallet ?? 0;
       acc.expected += it.expected;
       acc.loaded += it.loaded;
@@ -2027,7 +2046,7 @@ export default function LoadOperation() {
   const unitBasisQty = (it: ProformaItem) =>
     itemStatusFilter === "remaining" ? it.remaining
     : itemStatusFilter === "done"    ? it.loaded
-    : itemStatusFilter === "extra"   ? Math.max(0, it.loaded - it.expected)
+    : itemStatusFilter === "extra"   ? extraOf(it)
     : it.expected;
   const palletsOfQty = (it: ProformaItem, qty: number) => {
     const ipp = it.itemsPerPallet ?? 0;
@@ -2046,7 +2065,7 @@ export default function LoadOperation() {
   const filteredItems = items.filter((it) => {
     if (itemStatusFilter === "done" && !(it.loaded > 0)) return false;
     if (itemStatusFilter === "remaining" && !(it.remaining > 0)) return false;
-    if (itemStatusFilter === "extra" && !(it.loaded > it.expected)) return false;
+    if (itemStatusFilter === "extra" && !(extraOf(it) > 0)) return false;
     if (itemUnitTab === "pallet" && !(palletsOfQty(it, unitBasisQty(it)) > 0)) return false;
     if (itemUnitTab === "loose" && !(looseOfQty(it, unitBasisQty(it)) > 0)) return false;
     if (itemSearchText.trim()) {
@@ -2195,7 +2214,7 @@ export default function LoadOperation() {
       total: (rows) => renderPalletLooseTotal(rows, (r) => r.loaded),
       cellClassName: "font-medium text-gray-900 text-sm sm:text-sm",
       render: (row) => {
-        const extra = Math.max(0, row.loaded - row.expected);
+        const extra = extraOf(row);
         return (
           <div className="flex items-center justify-center gap-1">
             {canScanThisLoad && row.barcode && (
@@ -2372,7 +2391,6 @@ export default function LoadOperation() {
              wall-mounted station can rotate the landing list too, not just an open order. ──── */}
         {view === "list" && (
           <div className={`space-y-6 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
-            <PageScrollButtons />
             {/* Page header only on the list — nothing there competes with it for room. The
                 create/scan view (an open order, often with many items to scroll through) skips
                 it entirely instead; that view's only collapsible header now is the global
@@ -3283,11 +3301,6 @@ export default function LoadOperation() {
             mount until then. ──────────────────────────────────────────────────────────────── */}
         {view === "create" && slip && isVehicleClaimed && (
           <div className={`flex h-full min-h-0 flex-col gap-3 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
-              {/* Kiosk rotate — same floating button Order Scan/Unloading use, for a screen
-                  physically mounted at an angle next to the loading bay. Fixed positioning
-                  inside the (transform:rotate) wrapper above keeps it pinned to a natural
-                  on-screen corner from the viewer's rotated perspective. */}
-              <PageScrollButtons />
               {/* No overflow-hidden here — the vehicle-search dropdown below is absolutely
                   positioned and needs to be able to render past this card's edge; clipping it
                   made the suggestions invisible even though the search itself worked fine.
@@ -3624,15 +3637,17 @@ export default function LoadOperation() {
                   <>
                     <button
                       type="button"
-                      onClick={() => setActiveTab("total")}
-                      className={workTabClass(activeTab === "total")}
+                      onClick={() => togglePanelTab("total")}
+                      aria-expanded={panelsOpen && activeTab === "total"}
+                      className={workTabClass(panelsOpen && activeTab === "total")}
                     >
                       Total
                     </button>
                     <button
                       type="button"
-                      onClick={() => setActiveTab("scanner")}
-                      className={workTabClass(activeTab === "scanner")}
+                      onClick={() => togglePanelTab("scanner")}
+                      aria-expanded={panelsOpen && activeTab === "scanner"}
+                      className={workTabClass(panelsOpen && activeTab === "scanner")}
                     >
                       Scanner
                     </button>
@@ -3641,8 +3656,9 @@ export default function LoadOperation() {
                 {(loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
                   <button
                     type="button"
-                    onClick={() => setActiveTab((t) => (t === "owner" ? "scanner" : "owner"))}
-                    className={workTabClass(activeTab === "owner")}
+                    onClick={() => togglePanelTab("owner")}
+                    aria-expanded={panelsOpen && activeTab === "owner"}
+                    className={workTabClass(panelsOpen && activeTab === "owner")}
                   >
                     <UserCircle2 className="h-3.5 w-3.5" /> Owner History
                   </button>
@@ -3650,24 +3666,16 @@ export default function LoadOperation() {
                 {sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0 && (
                   <button
                     type="button"
-                    onClick={() => setActiveTab((t) => (t === "sort" ? "scanner" : "sort"))}
-                    className={workTabClass(activeTab === "sort")}
+                    onClick={() => togglePanelTab("sort")}
+                    aria-expanded={panelsOpen && activeTab === "sort"}
+                    className={workTabClass(panelsOpen && activeTab === "sort")}
                   >
                     <ClipboardList className="h-3.5 w-3.5" /> Sort History
-                    <span className={activeTab === "sort" ? "text-white/70" : "text-gray-400"}>
+                    <span className={panelsOpen && activeTab === "sort" ? "text-white/70" : "text-gray-400"}>
                       ({sortLoaderHistoryQuery.data.pickedQty ?? 0}/{sortLoaderHistoryQuery.data.totalQty ?? 0})
                     </span>
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => setPanelsOpen((o) => !o)}
-                  aria-expanded={panelsOpen}
-                  title={panelsOpen ? "Hide panels" : "Show panels"}
-                  className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
-                >
-                  <ChevronDown className={`h-4 w-4 transition-transform ${panelsOpen ? "rotate-180" : ""}`} />
-                </button>
               </div>
             )}
 
@@ -3896,7 +3904,7 @@ export default function LoadOperation() {
                   ) : (
                     <div className="space-y-2">
                       {filteredItems.map((row) => {
-                        const extra = Math.max(0, row.loaded - row.expected);
+                        const extra = extraOf(row);
                         const noStock = (row.stockAvailable ?? 0) <= 0;
                         const tone = row.isComplete
                           ? { bar: "bg-emerald-500", edge: "border-l-emerald-500", badge: "bg-emerald-50 text-emerald-700 ring-emerald-200", label: "Loaded" }
@@ -3909,7 +3917,7 @@ export default function LoadOperation() {
                             <div
                               role={row.barcode ? "button" : undefined}
                               onClick={() => row.barcode && setExpandedItemBarcode((cur) => (cur === row.barcode ? null : row.barcode!))}
-                              className={`flex items-center gap-2.5 rounded-lg border border-l-4 border-gray-200 bg-white px-2.5 py-2 text-left shadow-sm transition hover:shadow ${tone.edge}`}
+                              className={`flex items-center gap-2.5 rounded-lg border border-l-4 border-gray-200 px-2.5 py-2 text-left shadow-sm transition hover:shadow ${extra > 0 ? "bg-amber-50" : row.isComplete ? "bg-emerald-50" : "bg-white"} ${tone.edge}`}
                             >
                               {/* Tap the picture to enlarge it (zoomable); the row itself toggles the history. */}
                               <ItemRowThumb name={row.itemName} className="h-10 w-10 shrink-0" />
@@ -3962,7 +3970,10 @@ export default function LoadOperation() {
                 data={filteredItems}
                 getRowId={(row) => row.barcode ?? `row-${row.id}`}
                 enableZebraStripes
-                rowClassName={(row) => (row.isComplete ? "bg-emerald-50/50" : undefined)}
+                rowClassName={(row) =>
+                  extraOf(row) > 0 ? "bg-amber-50 hover:bg-amber-50/80"
+                    : row.isComplete ? "bg-emerald-50 hover:bg-emerald-50/80"
+                    : undefined}
                 renderExpandedRow={renderLoadingItemHistoryPanel}
                 isRowExpandable={(row) => !!row.barcode}
                 expandedRowId={expandedItemBarcode}
@@ -4481,12 +4492,20 @@ export default function LoadOperation() {
 
                   {/* Same info-box treatment Order Scan's own confirm dialog uses for SAP/pallet
                       size, instead of small inline text. */}
-                  {(extraTarget.sapCode || extraIpp > 0) && (
-                    <div className="space-y-1 rounded-xl bg-gray-50 px-4 py-3 text-sm text-gray-600">
-                      {extraTarget.sapCode && <p>SAP: <span className="font-mono font-bold text-gray-700">{extraTarget.sapCode}</span></p>}
-                      {extraIpp > 0 && <p>Items per pallet: <strong>{extraIpp}</strong></p>}
-                    </div>
-                  )}
+                  <div className="space-y-1 rounded-xl bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                    {extraTarget.sapCode && <p>SAP: <span className="font-mono font-bold text-gray-700">{extraTarget.sapCode}</span></p>}
+                    {extraIpp > 0 && <p>Items per pallet: <strong>{extraIpp}</strong></p>}
+                    <p>
+                      In stock:{" "}
+                      {extraStockQuery.isLoading ? <span className="text-gray-400">…</span> : extraStockQuery.data ? (
+                        <strong className={extraStockQuery.data.stock <= 0 ? "text-red-600" : "text-gray-800"}>
+                          {extraStockQuery.data.stock}
+                          {extraStockQuery.data.stock <= 0 && " — no stock"}
+                          {extraStockQuery.data.stock > 0 && extraQty > extraStockQuery.data.stock && " — less than the quantity entered"}
+                        </strong>
+                      ) : <span className="text-gray-400">—</span>}
+                    </p>
+                  </div>
 
                   {/* Same −/+ stepper boxes Order Scan's own confirm dialog uses for Qty/Pallets,
                       instead of plain number inputs — easy to nudge by one box/pallet without
