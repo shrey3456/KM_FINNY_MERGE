@@ -3629,20 +3629,19 @@ export default function LoadOperation() {
               to actually exist) only renders when it has something to show, and the whole row
               disappears if none of them do. */}
           <div className="space-y-2 border-t border-gray-100 px-3 sm:px-4 py-2">
-            {(canScanThisLoad
-              || (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0
-              || (sortLoaderHistoryQuery.data?.exists && (sortLoaderHistoryQuery.data.timeline?.length ?? 0) > 0)) && (
-              <div className="flex flex-wrap items-center gap-2">
+            {/* Total stays available once the load is locked (Ready for Dispatch / read-only) —
+                only Scanner needs write access. */}
+            <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => togglePanelTab("total")}
+                  aria-expanded={panelsOpen && activeTab === "total"}
+                  className={workTabClass(panelsOpen && activeTab === "total")}
+                >
+                  Total
+                </button>
                 {canScanThisLoad && (
                   <>
-                    <button
-                      type="button"
-                      onClick={() => togglePanelTab("total")}
-                      aria-expanded={panelsOpen && activeTab === "total"}
-                      className={workTabClass(panelsOpen && activeTab === "total")}
-                    >
-                      Total
-                    </button>
                     <button
                       type="button"
                       onClick={() => togglePanelTab("scanner")}
@@ -3677,7 +3676,6 @@ export default function LoadOperation() {
                   </button>
                 )}
               </div>
-            )}
 
             {panelsOpen && activeTab === "owner" && (loadHandoffsQuery.data?.timeline?.length ?? 0) > 0 && (
               <div className="border rounded-md overflow-hidden bg-white">

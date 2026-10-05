@@ -438,12 +438,15 @@ async function withProgress(slip: any, items: any[]) {
   // means its whole loaded qty already counts as extra under that same formula.
   const knownBarcodes = new Set(items.map((it) => normalize(it.barcode)));
   const offOrderBarcodes = Array.from(loadedByBarcode.keys()).filter((bc) => bc && !knownBarcodes.has(bc));
+  // The keys above are lowercased for matching, but Product Master lookups are case-sensitive and
+  // letter barcodes exist (e.g. "A01" advertisement stands) — look up by the barcode as scanned.
+  const originalBarcode = new Map<string, string>(loadedRows.map((r: any) => [normalize(r.barcode), String(r.barcode).trim()]));
   const offOrderItems = (await Promise.all(offOrderBarcodes.map(async (bc) => {
-    const product = await storage.getProductByBarcode(bc, slip.plant);
+    const product = await storage.getProductByBarcode(originalBarcode.get(bc) ?? bc, slip.plant);
     if (!product) return null; // shouldn't happen — /scan already requires Product Master to have it — but never render junk if it somehow does
     const loaded = loadedByBarcode.get(bc) ?? 0;
     const itemsPerPallet = resolvePalletSizeOrQty(product, state, 0);
-    const { total: stockAvailable } = await getPooledStock(pool, bc, slip.plant ?? '');
+    const { total: stockAvailable } = await getPooledStock(pool, product.barcode ?? bc, slip.plant ?? '');
     return {
       id: -product.id, // negative so it can never collide with a real proforma_slip_items.id
       barcode: product.barcode ?? bc, itemName: product.name ?? bc, sapCode: product.sapCode ?? null,
