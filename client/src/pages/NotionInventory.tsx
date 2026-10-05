@@ -26,6 +26,8 @@ import {
   Zap,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
+import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
+import { type FilterableColumn, type FilterCondition, matchAllConditions } from "@/lib/columnFilters";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -211,9 +213,17 @@ export default function NotionInventory() {
   const [searchTerm, setSearchTerm] = usePersistentFilter("notionInventory:search", "");
   // Sorted by New Sr. by default; any column header can be clicked to sort by that one instead,
   // cycling asc → desc → back to the New Sr. default.
-  const [productSort, setProductSort] = usePersistentFilter<{ key: string; direction: "asc" | "desc" }>(
-    "notionInventory:sort", { key: "newSr", direction: "asc" },
+  // Not remembered between visits: the list always opens in Sr. No. order.
+  const [productSort, setProductSort] = useState<{ key: string; direction: "asc" | "desc" }>(
+    { key: "newSr", direction: "asc" },
   );
+  // Excel-style column filters — same "+ Filter" button, header filter icons and removable chips
+  // as the other tables. Only the pictures are left out (nothing to filter on in a filename).
+  const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>({});
+  const setColumnCondition = (id: string, condition: FilterCondition) =>
+    setColumnConditions((prev) => ({ ...prev, [id]: condition }));
+  const clearColumnCondition = (id: string) =>
+    setColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
   const cycleProductSort = (key: string) =>
     setProductSort((cur) =>
       cur.key !== key ? { key, direction: "asc" }
@@ -495,19 +505,58 @@ export default function NotionInventory() {
     document.addEventListener("mouseup", onUp);
   };
 
+  const filterColumns = useMemo<FilterableColumn<Product>[]>(
+    () => productColumns
+      .filter((c) => c.key !== "productImage" && c.key !== "boxImage")
+      .map((c) => {
+        const id = String(c.key);
+        if (c.key === "lastUpdated") {
+          return { id, label: c.label, filterType: "date", disableValues: true, options: [], accessor: (p: Product) => (p[c.key] as any) ?? null } as FilterableColumn<Product>;
+        }
+        const values = Array.from(new Set(products.map((p) => String(p[c.key] ?? "").trim()).filter(Boolean)))
+          .sort((a, b) => naturalSortKey(a).localeCompare(naturalSortKey(b)));
+        return {
+          id, label: c.label, filterType: "text",
+          options: values.map((v) => ({ value: v, label: v })),
+          accessor: (p: Product) => { const v = p[c.key]; return v == null || v === "" ? null : String(v); },
+        } as FilterableColumn<Product>;
+      }),
+    [products],
+  );
+  const conditionList = Object.values(columnConditions);
+  const filterHeader = (key: string) => {
+    const column = filterColumns.find((c) => c.id === key);
+    if (!column) return null;
+    return (
+      <ColumnHeaderFilterButton
+        column={column}
+        condition={columnConditions[key]}
+        onChange={(c) => setColumnCondition(key, c)}
+        onRemove={() => clearColumnCondition(key)}
+      />
+    );
+  };
+
   const filteredProducts = useMemo(() => {
     const query = searchTerm.trim().toLowerCase();
-    const searched = !query ? products : products.filter((product) =>
-      visibleColumns.some((col) => cellValue(product, col.key).toLowerCase().includes(query)),
-    );
+    const searched = products.filter((product) => {
+      if (!matchAllConditions(product, conditionList, filterColumns)) return false;
+      if (!query) return true;
+      return (product.newSr ?? "").toLowerCase().includes(query)
+        || visibleColumns.some((col) => cellValue(product, col.key).toLowerCase().includes(query));
+    });
     const sortCol = productColumns.find((c) => String(c.key) === productSort.key) ?? productColumns[0];
     const dir = productSort.direction === "asc" ? 1 : -1;
     return [...searched].sort((a, b) => {
+      const ae = cellValue(a, sortCol.key) === "-";
+      const be = cellValue(b, sortCol.key) === "-";
+      // Rows with nothing in the sorted column go last, whichever way it is sorted.
+      if (ae !== be) return ae ? 1 : -1;
       const av = naturalSortKey(cellValue(a, sortCol.key));
       const bv = naturalSortKey(cellValue(b, sortCol.key));
       return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
     });
-  }, [products, searchTerm, visibleColumns, productSort]);
+  }, [products, searchTerm, visibleColumns, productSort, columnConditions, filterColumns]);
 
   function toggleColumn(key: string) {
     setVisibleColumnKeys((prev) => {
@@ -846,7 +895,7 @@ export default function NotionInventory() {
             <div>
               <div className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">Product Master</div>
               <div className="text-xs text-gray-400 leading-none mt-0.5">
-                {searchTerm
+                {searchTerm || conditionList.length > 0
                   ? `${filteredProducts.length} of ${products.length} products`
                   : `${products.length} products`}
                 {visibleColumns.length < productColumns.length && (
@@ -855,8 +904,16 @@ export default function NotionInventory() {
               </div>
             </div>
           </div>
-          {/* Search */}
-          <div className="relative w-full sm:w-auto sm:shrink-0">
+          {/* Filter + Search */}
+          <div className="flex w-full items-center gap-2 sm:w-auto sm:shrink-0">
+          <AddColumnFilterButton
+            columns={filterColumns}
+            conditions={columnConditions}
+            onApply={setColumnCondition}
+            onClear={clearColumnCondition}
+            className="h-7 shrink-0 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+          />
+          <div className="relative min-w-0 flex-1 sm:w-auto sm:flex-none">
             <Search className="absolute left-2.5 top-1.5 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
             <input
               value={searchTerm}
@@ -870,7 +927,22 @@ export default function NotionInventory() {
               </button>
             )}
           </div>
+          </div>
         </div>
+        {conditionList.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-gray-200 bg-white px-3 py-2 sm:px-5">
+            {Object.entries(columnConditions).map(([id, condition]) => (
+              <ColumnFilterChipView
+                key={id}
+                columnId={id}
+                condition={condition}
+                columns={filterColumns}
+                onEdit={(c) => setColumnCondition(id, c)}
+                onRemove={() => clearColumnCondition(id)}
+              />
+            ))}
+          </div>
+        )}
 
         {/* Empty states */}
         {!productsQuery.isLoading && !isConfigured && products.length === 0 && (
@@ -936,6 +1008,7 @@ export default function NotionInventory() {
                       >
                         <span className="inline-flex items-center gap-1">
                           {col.label}
+                          {filterHeader(String(col.key))}
                           {productSort.key === col.key ? (
                             productSort.direction === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
                           ) : (
@@ -972,7 +1045,7 @@ export default function NotionInventory() {
                   <tr>
                     <td colSpan={visibleColumns.length} className="h-32 text-center text-muted-foreground">
                       <Search className="mx-auto mb-2 h-5 w-5 opacity-30" />
-                      <div className="text-sm">No products match your search.</div>
+                      <div className="text-sm">No products match your search or filters.</div>
                     </td>
                   </tr>
                 ) : (

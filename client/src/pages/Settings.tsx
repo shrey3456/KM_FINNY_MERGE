@@ -33,6 +33,7 @@ import { Smartphone, Radio, QrCode, Zap, Shield, Database, Loader2, Upload, Down
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { apiRequest } from '@/lib/queryClient';
+import { SyncProgressDialog, type SyncProgress } from '@/components/SyncProgressDialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { hasPageWriteAccess } from '@/lib/permissions';
 import {
@@ -284,10 +285,25 @@ const Settings = () => {
   const [acknowledge, setAcknowledge] = useState(false);
 
   // NEW: counts (read from cache)
-  const productCount = (() => {
-    const d = queryClient.getQueryData(['/api/products']) as any;
-    return Array.isArray(d) ? d.length : 0;
-  })();
+  // The real number of products, fetched when the Full Sync dialog opens — the old cache read
+  // always said 0 here because this page never loads the product list itself.
+  const productCountQuery = useQuery<any[]>({
+    queryKey: ['/api/products', 'settings-count'],
+    queryFn: () => apiRequest('GET', '/api/products?all=true', undefined, false, true),
+    enabled: showClearDialog,
+    staleTime: 0,
+  });
+  // Full Sync's live progress ("Rebuilding Product Master · 120 of 300") — the server keeps it,
+  // so it's polled while the sync button is running.
+  const fullSyncStatusQuery = useQuery<{ isSyncing: boolean; syncProgress: SyncProgress | null }>({
+    queryKey: ['/api/notion-inventory-sync/status', 'settings-progress'],
+    queryFn: () => apiRequest('GET', '/api/notion-inventory-sync/status', undefined, false, true),
+    enabled: isClearing,
+    refetchInterval: 1500,
+  });
+  const productCount: number | string = productCountQuery.isLoading
+    ? '…'
+    : Array.isArray(productCountQuery.data) ? productCountQuery.data.length : 0;
   const salesCount = (() => {
     const d = queryClient.getQueryData(['/api/sales']) as any;
     return Array.isArray(d) ? d.length : 0;
@@ -890,6 +906,29 @@ const Settings = () => {
     }
   };
 
+  // Full Sync Product Master — the same full sync the Product Master page has: it reads every
+  // product from Notion first and only then clears the Product Master and rebuilds it from
+  // scratch (nothing is deleted if Notion can't be read). Replaces the plain "Clear Product
+  // Master" button here, since an empty Product Master was never the goal.
+  const fullSyncProductMaster = async () => {
+    setIsClearing(true);
+    setShowClearDialog(false); // the progress popup takes over from the confirmation
+    try {
+      const data = await apiRequest('POST', '/api/notion-inventory-sync/full-sync', {}, false, true);
+      toast({ title: "Product Master rebuilt", description: `${data?.created ?? 0} products imported from Notion.` });
+      queryClient.invalidateQueries({ queryKey: ['/api/products'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/notion-inventory-sync/status'] });
+    } catch (error: any) {
+      console.error("Error in full sync:", error);
+      toast({ title: "Full sync failed", description: error?.message || "Could not rebuild the Product Master from Notion.", variant: "destructive" });
+    } finally {
+      setIsClearing(false);
+      setShowClearDialog(false);
+      setConfirmText('');
+      setAcknowledge(false);
+    }
+  };
+
   const clearInventory = async () => {
     // Native confirm removed
     setIsClearing(true);
@@ -1451,6 +1490,10 @@ const Settings = () => {
                             just unreachable from here after the ledger confusion it kept causing
                             this session (negative Opening, mismatched reports). Re-add this
                             Button to bring it back. */}
+                        {/* "Remove Scan & Order Import Data" and "Remove All Operations Data" — hidden
+                            from the UI, not removed: both dialogs, their state and the backend
+                            routes all still exist. Re-add these two Buttons to bring them back. */}
+                        {false && (<>
                         <Button
                           variant="destructive"
                           size="sm"
@@ -1469,14 +1512,15 @@ const Settings = () => {
                         >
                           Remove All Operations Data
                         </Button>
+                        </>)}
                         <Button
                           variant="destructive"
                           size="sm"
                           onClick={() => setShowClearDialog(true)}
                           disabled={isClearing || !canWrite}
-                          title={!canWrite ? "You have read-only access to Settings" : undefined}
+                          title={!canWrite ? "You have read-only access to Settings" : "Clears the Product Master and rebuilds it from Notion"}
                         >
-                          {isClearing ? "Clearing..." : "Clear Product Master"}
+                          {isClearing ? "Syncing..." : "Full Sync Product Master"}
                         </Button>
                         <Button
                           variant="destructive"
@@ -1888,43 +1932,45 @@ const Settings = () => {
         </DialogContent>
       </Dialog>
 
+      {/* Open for the whole Full Sync (it can take minutes) and closes itself when it's finished. */}
+      <SyncProgressDialog
+        open={isClearing}
+        title="Full sync in progress"
+        progress={fullSyncStatusQuery.data?.syncProgress ?? null}
+        note="Safe to leave this tab open — this closes automatically once it's done."
+      />
+
       <AlertDialog open={showClearDialog} onOpenChange={handleClearDialogOpenChange}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Clear Product Master?</AlertDialogTitle>
+            <AlertDialogTitle>Full sync Product Master from Notion?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently delete all products and related data. This action cannot be undone.
+              This reads every product from Notion, then clears the Product Master and rebuilds it from the start.
+              Nothing is deleted if Notion can't be reached. Products are re-created, so scan and order history keeps
+              its text but is no longer linked to a product row. This can take a few minutes.
             </AlertDialogDescription>
           </AlertDialogHeader>
 
-          {/* NEW: details and guards */}
+          {/* Details and guards */}
           <div className="space-y-4 mt-2">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
+            <div className="grid grid-cols-1 gap-2 text-sm">
               <div className="p-2 rounded border bg-white">
-                <div className="font-medium">Products</div>
+                <div className="font-medium">Products now</div>
                 <div className="text-muted-foreground">{productCount}</div>
-              </div>
-              <div className="p-2 rounded border bg-white">
-                <div className="font-medium">Sales</div>
-                <div className="text-muted-foreground">{salesCount}</div>
-              </div>
-              <div className="p-2 rounded border bg-white">
-                <div className="font-medium">Scans</div>
-                <div className="text-muted-foreground">{scanCount}</div>
               </div>
             </div>
 
             <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
-              Deleting inventory is permanent. Export your data first if needed.
+              Edits made only in the app (not in Notion) are replaced by what Notion has.
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="confirmText">Type CLEAR to confirm</Label>
+              <Label htmlFor="confirmText">Type SYNC to confirm</Label>
               <Input
                 id="confirmText"
                 value={confirmText}
                 onChange={(e) => setConfirmText(e.target.value)}
-                placeholder="CLEAR"
+                placeholder="SYNC"
               />
               <label className="flex items-center gap-2 text-sm">
                 <input
@@ -1932,7 +1978,7 @@ const Settings = () => {
                   checked={acknowledge}
                   onChange={(e) => setAcknowledge(e.target.checked)}
                 />
-                I understand this action cannot be undone.
+                I understand the Product Master will be rebuilt from Notion.
               </label>
             </div>
           </div>
@@ -1940,11 +1986,11 @@ const Settings = () => {
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isClearing}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={clearInventory}
+              onClick={(e) => { e.preventDefault(); void fullSyncProductMaster(); }}
               className="bg-red-600 hover:bg-red-700"
-              disabled={isClearing || confirmText !== 'CLEAR' || !acknowledge}
+              disabled={isClearing || confirmText !== 'SYNC' || !acknowledge}
             >
-              {isClearing ? "Clearing..." : "Clear Product Master"}
+              {isClearing ? "Syncing..." : "Full Sync Product Master"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

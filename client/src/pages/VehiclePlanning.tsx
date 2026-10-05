@@ -20,6 +20,7 @@ import { hasPageWriteAccess } from "@/lib/permissions";
 import { parseApiErrorMessage } from "@/lib/apiError";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
+import { SyncProgressDialog } from "@/components/SyncProgressDialog";
 
 // Vehicle Planning: a Gantt-style fleet timeline (rows = Krupa's vehicles, columns = days) plus
 // the assign-a-vehicle-to-an-order workflow. Each vehicle's bar spans its current order's start
@@ -802,6 +803,10 @@ export default function VehiclePlanning() {
           </Button>
         </div>
       )}
+
+      {/* Stays open until the Notion sync has finished; no progress count is available for this
+          one, so it just says it's running. */}
+      <SyncProgressDialog open={syncMutation.isPending} title="Syncing from Notion…" />
 
       <Dialog open={!!assignTarget} onOpenChange={(open) => { if (!open) setAssignTarget(null); }}>
         <DialogContent className="sm:max-w-md">

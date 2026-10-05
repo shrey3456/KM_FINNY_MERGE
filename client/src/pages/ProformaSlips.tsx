@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
+import { NotionStatusBadge } from "@/components/NotionStatusBadge";
 import { ProformaSlipNotionSync } from "@/components/ProformaSlipNotionSync";
 import PageHeader from "../components/PageHeader";
 import { Lock, Unlock } from "lucide-react";
@@ -1509,7 +1510,7 @@ export default function ProformaSlips() {
       id: 'notionStatus',
       header: columnHeader('notionStatus', 'Notion Status'),
       width: 110,
-      render: (slip) => slip.notionStatus || ' ',
+      render: (slip) => (slip.notionStatus ? <NotionStatusBadge status={slip.notionStatus} /> : ' '),
     },
     {
       id: 'storeKeeperInfo',

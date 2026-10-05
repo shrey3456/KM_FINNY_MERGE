@@ -9,6 +9,7 @@ import { AlertCircle, CheckCircle, RefreshCw, Shield, Search, XCircle } from "lu
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useUser } from "@/hooks/use-user";
 import { useToast } from "@/hooks/use-toast";
+import { SyncProgressDialog } from "@/components/SyncProgressDialog";
 import { format } from "date-fns";
 
 interface FieldChange {
@@ -195,6 +196,12 @@ export function ProformaSlipNotionSync({ onApplySuccess }: ProformaSlipNotionSyn
 
   return (
     <div className="space-y-4 p-4 border rounded-lg bg-white">
+      {/* Stays open for as long as a check or apply is running; closes itself when it's done. */}
+      <SyncProgressDialog
+        open={checking || applying}
+        title={applying ? "Applying changes from Notion…" : "Checking Notion for changes…"}
+        note="Please wait — this closes automatically once it's done."
+      />
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center space-x-2">
           <Search className="h-5 w-5 text-[#001d6e]" />

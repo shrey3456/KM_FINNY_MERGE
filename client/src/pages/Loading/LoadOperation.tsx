@@ -4,7 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronLeft, ChevronRight, Download, FileText,
   ChevronDown, ChevronUp, Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
-  Truck, UserCircle2, X, Zap,
+  Truck, UserCircle2, X, Zap, Pause,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
@@ -32,6 +32,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlantFilter } from "@/components/PlantFilter";
+import { NotionStatusBadge } from "@/components/NotionStatusBadge";
 import { SingleDateFilter } from "@/components/SingleDateFilter";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -501,15 +502,8 @@ export default function LoadOperation() {
   // Finny Status values this page pushes to Notion (server/services/notionOrderStatusSync.ts), so
   // the status shown here reads identically to Load Operations' own status column.
   const recordStatus = (r: LoadingRecord) => (r.loadingCompletedAt ? "READY≈DESP" : "LOADING");
-  // Colors the status badge AND (on the mobile card list) a left accent strip by the same
-  // three states — completed/paused/in-progress all looked identical purple before, which was
-  // part of why the card list read as flat/plain.
-  const recordStatusBadgeClass = (r: LoadingRecord) =>
-    r.loadingCompletedAt
-      ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
-      : r.loadingPausedAt
-      ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
-      : "bg-blue-100 text-blue-800 hover:bg-blue-200";
+  // The status badge itself takes Notion's own colour for the status (NotionStatusBadge); this is
+  // only the left accent strip on the mobile card list, by completed/paused/in-progress.
   const recordAccentBorderClass = (r: LoadingRecord) =>
     r.loadingCompletedAt ? "border-l-4 border-l-emerald-400" : r.loadingPausedAt ? "border-l-4 border-l-amber-400" : "border-l-4 border-l-blue-400";
 
@@ -730,6 +724,8 @@ export default function LoadOperation() {
   // Extra) — narrows the items table below to just that bucket; clicking the active one clears it.
   const [itemStatusFilter, setItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
   const [itemSearchText, setItemSearchText] = useState("");
+  // Same Excel-style column filters as the landing list ("+ Filter", header filter icons, chips).
+  const [itemColumnConditions, setItemColumnConditions] = useState<Record<string, FilterCondition>>({});
 
   // Kiosk rotate — a screen mounted at an angle next to the loading bay. See
   // LOADING_ROTATIONS above; mechanics match Unloading's own rotate view exactly.
@@ -773,7 +769,29 @@ export default function LoadOperation() {
   const kioskTableMaxHeight = bigView ? (quarterTurn ? "62vw" : "62vh") : "65vh";
   // With an order open, the summary is fixed and the items grid owns the remaining viewport.
   // This keeps a long item list from scrolling the summary out of view.
-  const openSlipTableMaxHeight = bigView ? kioskTableMaxHeight : "calc(100vh - 25rem)";
+  // Not tied to a fixed offset: the header (and the Total/Scanner panels) can be shown or hidden,
+  // which moves the table's top edge, so the height is measured from where the table actually
+  // starts down to the bottom of the window — otherwise hiding the header leaves white space
+  // under a table still capped for the taller layout.
+  const itemsTableWrapRef = useRef<HTMLDivElement>(null);
+  const [itemsTableFillHeight, setItemsTableFillHeight] = useState<string | null>(null);
+  useEffect(() => {
+    if (bigView) { setItemsTableFillHeight(null); return; }
+    const measure = () => {
+      const el = itemsTableWrapRef.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top;
+      setItemsTableFillHeight(`${Math.max(240, Math.floor(window.innerHeight - top - 16))}px`);
+    };
+    measure();
+    const raf = requestAnimationFrame(measure);
+    window.addEventListener("resize", measure);
+    const ro = new ResizeObserver(measure);
+    if (itemsTableWrapRef.current?.parentElement) ro.observe(itemsTableWrapRef.current.parentElement);
+    ro.observe(document.body);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", measure); ro.disconnect(); };
+  });
+  const openSlipTableMaxHeight = bigView ? kioskTableMaxHeight : (itemsTableFillHeight ?? "calc(100vh - 25rem)");
   // Reports this page's rotation to Layout so every popup it opens — dialogs, dropdowns, filter
   // popovers, calendars — turns to match (see lib/portalRotation). Reset on unmount so the next
   // page doesn't inherit a stale turn.
@@ -1407,6 +1425,10 @@ export default function LoadOperation() {
     enabled: extraDialogOpen,
     staleTime: 60_000,
   });
+  // The picked product is on this order and still has quantity left → Extra isn't allowed yet.
+  const extraBlockedBy = extraTarget
+    ? items.find((i) => i.expected > 0 && i.remaining > 0 && normalize(i.barcode) === normalize(extraTarget.barcode)) ?? null
+    : null;
   // Stock available for the picked product — it may not be on the slip, so no items row has it.
   const extraStockQuery = useQuery<{ stock: number }>({
     queryKey: ["/api/loading/proforma", slip?.orderNumber, "stock", extraTarget?.barcode],
@@ -1488,7 +1510,13 @@ export default function LoadOperation() {
       toast({ title: "Extra added", description: `${extraTarget?.name} · +${extraQty}` });
       resetExtraDialog();
     },
-    onError: (err: any) => toast({ title: "Could not add extra", description: parseApiErrorMessage(err), variant: "destructive" }),
+    onError: (err: any) => {
+      // "Load the remaining quantity first" — shown as the same centered popup the regular scan's
+      // Extra-not-allowed rejection uses, not a passing toast.
+      const extraNotAllowed = matchExtraNotAllowedError(err);
+      if (extraNotAllowed) { setExtraNotAllowedMessage(extraNotAllowed); return; }
+      toast({ title: "Could not add extra", description: parseApiErrorMessage(err), variant: "destructive" });
+    },
   });
 
   // Items table's own +/- on the Loaded column — a manual correction, confirmed first (same
@@ -2062,7 +2090,38 @@ export default function LoadOperation() {
   // or +/- stamps that row with a rising number, and rows are sorted by it, so whatever was just
   // handled sits at the top instead of staying wherever its Sr. No. put it. Rows nobody has
   // touched keep their original order (the sort is stable, and they all score 0).
+  const itemFilterColumns: FilterableColumn<ProformaItem>[] = [
+    { id: "sr", label: "Sr. No.", filterType: "text", options: recordDistinct(items.map((it) => it.srNo)), accessor: (it) => it.srNo },
+    { id: "item", label: "Item Name", filterType: "text", options: recordDistinct(items.map((it) => it.itemName)), accessor: (it) => it.itemName },
+    { id: "barcode", label: "Barcode", filterType: "text", options: recordDistinct(items.map((it) => it.barcode)), accessor: (it) => it.barcode },
+    { id: "expected", label: "Expected", filterType: "number", disableValues: true, options: [], accessor: (it) => it.expected },
+    { id: "loaded", label: "Loaded", filterType: "number", disableValues: true, options: [], accessor: (it) => it.loaded },
+    { id: "remaining", label: "Remaining", filterType: "number", disableValues: true, options: [], accessor: (it) => it.remaining },
+    { id: "extra", label: "Extra", filterType: "number", disableValues: true, options: [], accessor: (it) => extraOf(it) },
+    { id: "stock", label: "Stock", filterType: "number", disableValues: true, options: [], accessor: (it) => it.stockAvailable ?? 0 },
+  ];
+  const itemConditionList = Object.values(itemColumnConditions);
+  const setItemCondition = (id: string, condition: FilterCondition) =>
+    setItemColumnConditions((prev) => ({ ...prev, [id]: condition }));
+  const clearItemCondition = (id: string) =>
+    setItemColumnConditions((prev) => { const next = { ...prev }; delete next[id]; return next; });
+  const itemColumnHeader = (id: string, label: string) => {
+    const column = itemFilterColumns.find((c) => c.id === id);
+    if (!column) return label;
+    return (
+      <span className="inline-flex items-center gap-1">
+        {label}
+        <ColumnHeaderFilterButton
+          column={column}
+          condition={itemColumnConditions[id]}
+          onChange={(c) => setItemCondition(id, c)}
+          onRemove={() => clearItemCondition(id)}
+        />
+      </span>
+    );
+  };
   const filteredItems = items.filter((it) => {
+    if (!matchAllConditions(it, itemConditionList, itemFilterColumns)) return false;
     if (itemStatusFilter === "done" && !(it.loaded > 0)) return false;
     if (itemStatusFilter === "remaining" && !(it.remaining > 0)) return false;
     if (itemStatusFilter === "extra" && !(extraOf(it) > 0)) return false;
@@ -2070,7 +2129,7 @@ export default function LoadOperation() {
     if (itemUnitTab === "loose" && !(looseOfQty(it, unitBasisQty(it)) > 0)) return false;
     if (itemSearchText.trim()) {
       const q = itemSearchText.trim().toLowerCase();
-      const hay = `${it.itemName ?? ""} ${it.barcode ?? ""} ${it.sapCode ?? ""}`.toLowerCase();
+      const hay = `${it.srNo ?? ""} ${it.itemName ?? ""} ${it.barcode ?? ""} ${it.sapCode ?? ""}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -2173,7 +2232,7 @@ export default function LoadOperation() {
       // auto-applied text-center on the cell itself (DataTable's cn() twMerges the two, so the
       // later one — cellClassName — wins), same header-centered/cell-left split the user wants
       // only on this column, not the numeric ones.
-      id: "item", header: "Item Name", align: "center", width: 150, minWidth: 90, sortable: true,
+      id: "item", header: itemColumnHeader("item", "Item Name"), align: "center", width: 150, minWidth: 90, sortable: true,
       accessor: (row) => `${row.itemName ?? ""} ${row.barcode ?? ""} ${row.sapCode ?? ""}`,
       cellClassName: "whitespace-normal break-words text-left text-gray-700 text-xs sm:text-xs leading-tight",
       totalable: false,
@@ -2194,7 +2253,7 @@ export default function LoadOperation() {
       ),
     },
     {
-      id: "expected", header: "Expected", align: "center", width: 58, minWidth: 55, sortable: true,
+      id: "expected", header: itemColumnHeader("expected", "Expected"), align: "center", width: 58, minWidth: 55, sortable: true,
       accessor: (row) => row.expected,
       total: (rows) => renderPalletLooseTotal(rows, (r) => r.expected),
       cellClassName: "text-gray-700 text-sm sm:text-sm",
@@ -2206,15 +2265,11 @@ export default function LoadOperation() {
       ),
     },
     {
-      // No dedicated Extra column — extra only ever happens through the separate Add Extra flow
-      // (see EXTRA_NOT_ALLOWED in server/routes/loading.ts), so it stays a rare inline note on
-      // Loaded rather than a column that's blank for almost every row.
-      id: "loaded", header: "Loaded", align: "center", width: 104, minWidth: 96, sortable: true,
+      id: "loaded", header: itemColumnHeader("loaded", "Loaded"), align: "center", width: 104, minWidth: 96, sortable: true,
       accessor: (row) => row.loaded,
       total: (rows) => renderPalletLooseTotal(rows, (r) => r.loaded),
       cellClassName: "font-medium text-gray-900 text-sm sm:text-sm",
       render: (row) => {
-        const extra = extraOf(row);
         return (
           <div className="flex items-center justify-center gap-1">
             {canScanThisLoad && row.barcode && (
@@ -2231,7 +2286,6 @@ export default function LoadOperation() {
             <span>
               <span className="block">{row.loaded}</span>
               {renderPalletLoose(row.loaded, row.itemsPerPallet ?? 0)}
-              {extra > 0 && <span className="block text-xs font-bold text-amber-600">+{extra} extra</span>}
             </span>
             {canScanThisLoad && row.barcode && (
               <Button
@@ -2248,7 +2302,7 @@ export default function LoadOperation() {
       },
     },
     {
-      id: "remaining", header: "Remaining", align: "center", width: 62, minWidth: 55, sortable: true,
+      id: "remaining", header: itemColumnHeader("remaining", "Remaining"), align: "center", width: 62, minWidth: 55, sortable: true,
       accessor: (row) => row.remaining,
       total: (rows) => renderPalletLooseTotal(rows, (r) => r.remaining),
       cellClassName: "text-gray-700 text-sm sm:text-sm",
@@ -2260,7 +2314,25 @@ export default function LoadOperation() {
       ),
     },
     {
-      id: "stock", header: "Stock", align: "center", width: 62, minWidth: 55, sortable: true, totalable: false,
+      // Right after Remaining. Blank when the item has no Extra. Loaded still counts everything
+      // on the truck, so Loaded 60 with 20 of it Extra reads 60 | … | 20.
+      id: "extra", header: itemColumnHeader("extra", "Extra"), align: "center", width: 58, minWidth: 52, sortable: true,
+      accessor: (row) => extraOf(row),
+      total: (rows) => renderPalletLooseTotal(rows, (r) => extraOf(r)),
+      cellClassName: "text-sm sm:text-sm",
+      render: (row) => {
+        const extra = extraOf(row);
+        if (extra <= 0) return null;
+        return (
+          <>
+            <span className="block font-bold text-amber-600">+{extra}</span>
+            {renderPalletLoose(extra, row.itemsPerPallet ?? 0)}
+          </>
+        );
+      },
+    },
+    {
+      id: "stock", header: itemColumnHeader("stock", "Stock"), align: "center", width: 62, minWidth: 55, sortable: true, totalable: false,
       cellClassName: "text-sm sm:text-sm",
       accessor: (row) => row.stockAvailable ?? 0,
       render: (row) => {
@@ -2278,8 +2350,8 @@ export default function LoadOperation() {
   // Same "Export" affordance Order Scan/Master View offer on their own items tables — a plain
   // client-side CSV of whatever's currently filtered/searched, not just the full unfiltered set.
   function downloadLoadingItemsCsv() {
-    const headers = ["SKU", "Item Name", "Expected", "Loaded", "Remaining", "Stock"];
-    const rows = filteredItems.map((it) => [it.barcode ?? "", it.itemName ?? "", it.expected, it.loaded, it.remaining, it.stockAvailable ?? ""]);
+    const headers = ["SKU", "Item Name", "Expected", "Loaded", "Extra", "Remaining", "Stock"];
+    const rows = filteredItems.map((it) => [it.barcode ?? "", it.itemName ?? "", it.expected, it.loaded, extraOf(it), it.remaining, it.stockAvailable ?? ""]);
     const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
@@ -2326,7 +2398,7 @@ export default function LoadOperation() {
         ) : ev.isAdjust ? (
           <span className="whitespace-nowrap text-[11px] font-semibold uppercase text-blue-700">Loading Adjust</span>
         ) : ev.isExtra ? (
-          <span className="text-[11px] font-semibold uppercase text-amber-700">Extra</span>
+          <span className="text-[11px] font-bold text-amber-700">+{ev.totalQty}</span>
         ) : (
           <span className="text-[11px] text-gray-400">—</span>
         ),
@@ -2838,9 +2910,7 @@ export default function LoadOperation() {
                                   : <span className="text-muted-foreground">-</span>}
                               </TableCell>
                               <TableCell>
-                                <Badge className={recordStatusBadgeClass(r)}>
-                                  {recordStatus(r)}
-                                </Badge>
+                                <div className="flex flex-wrap items-center gap-1"><NotionStatusBadge status={recordStatus(r)} />{r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}</div>
                               </TableCell>
                               <TableCell onClick={(e) => e.stopPropagation()}>
                                 {r.loadingCompletedAt ? (
@@ -2950,9 +3020,7 @@ export default function LoadOperation() {
                               </div>
                               <div className="text-sm text-muted-foreground mt-0.5 truncate">{r.partyName || "-"}</div>
                             </div>
-                            <Badge className={`${recordStatusBadgeClass(r)} text-xs shrink-0`}>
-                              {recordStatus(r)}
-                            </Badge>
+                            <div className="flex shrink-0 flex-col items-end gap-1"><NotionStatusBadge status={recordStatus(r)} />{r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}</div>
                           </div>
                         </CardHeader>
                         <CardContent className="pb-2.5 pt-0">
@@ -3834,7 +3902,7 @@ export default function LoadOperation() {
                 <Package className="h-4 w-4 text-[#001d6e]" />
                 <span className="text-sm font-semibold text-gray-900">Items on this order</span>
                 <span className="text-xs text-gray-400">
-                  {itemStatusFilter || itemSearchText ? `(${filteredItems.length} of ${items.length})` : `(${items.length})`}
+                  {itemStatusFilter || itemSearchText || itemConditionList.length > 0 ? `(${filteredItems.length} of ${items.length})` : `(${items.length})`}
                 </span>
                 {/* All/Pallet/Loose — three separate lists sharing one table. "All" shows every
                     item with both numbers merged; "Pallet" and "Loose" each narrow the rows
@@ -3883,8 +3951,29 @@ export default function LoadOperation() {
                       <Download className="h-3.5 w-3.5" /> Export
                     </button>
                   )}
+                  <AddColumnFilterButton
+                    columns={itemFilterColumns}
+                    conditions={itemColumnConditions}
+                    onApply={setItemCondition}
+                    onClear={clearItemCondition}
+                    className="h-8 shrink-0 gap-1 rounded-xl border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                  />
                   <CollapsibleSearch value={itemSearchText} onChange={setItemSearchText} placeholder="Search items…" />
                 </div>
+                {itemConditionList.length > 0 && (
+                  <div className="flex w-full flex-wrap items-center gap-1.5">
+                    {Object.entries(itemColumnConditions).map(([id, condition]) => (
+                      <ColumnFilterChipView
+                        key={id}
+                        columnId={id}
+                        condition={condition}
+                        columns={itemFilterColumns}
+                        onEdit={(c) => setItemCondition(id, c)}
+                        onRemove={() => clearItemCondition(id)}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
               {/* Same wide table on every screen — mobile, tablet, and the rotated kiosk view
                   all get the exact 5-column ITEM NAME/EXPECTED/LOADED/REMAINING/STOCK layout,
@@ -3898,7 +3987,7 @@ export default function LoadOperation() {
               {!rotated && (
                 <div className={`hidden min-h-0 overflow-y-auto p-3 ${itemCardsShow}`} style={panelsOpen ? { maxHeight: openSlipTableMaxHeight } : undefined}>
                   {filteredItems.length === 0 ? (
-                    <p className="py-8 text-center text-sm text-gray-400">{itemStatusFilter || itemSearchText ? "No items match this filter." : "No items on this slip."}</p>
+                    <p className="py-8 text-center text-sm text-gray-400">{itemStatusFilter || itemSearchText || itemConditionList.length > 0 ? "No items match this filter." : "No items on this slip."}</p>
                   ) : (
                     <div className="space-y-2">
                       {filteredItems.map((row) => {
@@ -3932,7 +4021,7 @@ export default function LoadOperation() {
                                   Remaining <span className="font-bold text-[#001d6e]">{row.remaining}</span>
                                   <span className="text-gray-300"> · </span>
                                   Stock <span className={`font-bold ${noStock ? "text-red-600" : "text-gray-700"}`}>{row.stockAvailable ?? 0}</span>
-                                  {extra > 0 && <span className="ml-1.5 font-bold text-amber-600">+{extra} extra</span>}
+                                  {extra > 0 && <span className="ml-1.5 font-bold text-amber-600">+{extra}</span>}
                                   {noStock && <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
                                 </p>
                               </div>
@@ -3960,8 +4049,9 @@ export default function LoadOperation() {
                   )}
                 </div>
               )}
+              <div ref={itemsTableWrapRef} className={`flex min-h-0 flex-1 flex-col ${rotated ? "" : itemTableHide}`}>
               <DataTable<ProformaItem>
-                className={`min-h-0 flex-1 ${rotated ? "" : itemTableHide}`}
+                className="min-h-0 flex-1"
                 containerClassName="rounded-none border-0"
                 headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-xs"
                 columns={loadingItemColumns}
@@ -3978,7 +4068,7 @@ export default function LoadOperation() {
                 onRowClick={(row) => row.barcode && setExpandedItemBarcode((cur) => (cur === row.barcode ? null : row.barcode!))}
                 emptyState="No items on this slip."
                 noResultsState="No items match this filter."
-                hasActiveFilters={!!itemStatusFilter || !!itemSearchText}
+                hasActiveFilters={!!itemStatusFilter || !!itemSearchText || itemConditionList.length > 0}
                 sortMode="client"
                 enableTotalsRow
                 totalsLabelColumnId="item"
@@ -3987,6 +4077,7 @@ export default function LoadOperation() {
                 maxHeight={openSlipTableMaxHeight}
                 showMobileSwipeHint
               />
+              </div>
             </div>
           </div>
         )}
@@ -4094,16 +4185,10 @@ export default function LoadOperation() {
                     {/* The real status stored on the slip (notionStatus) — not a guess derived
                         from loadingCompletedAt/vehicleNumber, so an order already at some other
                         real-world stage (DISPATCHED, SHORTAGE, ...) shows that, not "PENDING". */}
-                    <Badge
-                      variant="secondary"
-                      className={
-                        pendingSlipAlreadyLoading
-                          ? "bg-red-100 text-red-800 hover:bg-red-200"
-                          : "bg-purple-100 text-purple-800 hover:bg-purple-200"
-                      }
-                    >
-                      {pendingSlip?.slip?.notionStatus || "PENDING"}
-                    </Badge>
+                    <NotionStatusBadge
+                      status={pendingSlip?.slip?.notionStatus}
+                      label={pendingSlip?.slip?.notionStatus || "PENDING"}
+                    />
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Total Items:</span>
@@ -4505,6 +4590,14 @@ export default function LoadOperation() {
                     </p>
                   </div>
 
+                  {/* Extra only after the item is complete: this product is on the order and still
+                      has quantity left, so it has to be loaded normally first. */}
+                  {extraBlockedBy && (
+                    <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+                      Only {extraBlockedBy.remaining} left to load for this item on the order. Load those first, then add the Extra.
+                    </div>
+                  )}
+
                   {/* Same −/+ stepper boxes Order Scan's own confirm dialog uses for Qty/Pallets,
                       instead of plain number inputs — easy to nudge by one box/pallet without
                       having to type. */}
@@ -4658,7 +4751,7 @@ export default function LoadOperation() {
                 <Button variant="outline" onClick={resetExtraDialog} disabled={extraMutation.isPending}>Cancel</Button>
                 <Button
                   className="bg-amber-600 text-white hover:bg-amber-700"
-                  disabled={!extraTarget || extraQty <= 0 || extraMutation.isPending}
+                  disabled={!extraTarget || extraQty <= 0 || extraMutation.isPending || !!extraBlockedBy}
                   onClick={() => extraMutation.mutate()}
                 >
                   {extraMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <PackagePlus className="mr-1.5 h-3.5 w-3.5" />}

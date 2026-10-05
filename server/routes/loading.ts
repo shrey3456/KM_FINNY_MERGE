@@ -8,7 +8,7 @@ import {
   getPooledStock, debitStatePool, reverseStockPullsForEvent, recordStockPulls,
   type StockPullContribution,
 } from '../lib/statePool';
-import { pushOrderStatusToNotion, pushStoreKeeperInfoToNotion, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
+import { pushOrderStatusToNotion, pushStoreKeeperInfoToNotion, getFinnyStatusOptions, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
 import { searchNotionVehicleByNumber } from '../services/notionVehicleSync';
 import { computeLoadDateReport, computeLoadDateActivity } from '../lib/loadDateReport';
 
@@ -620,6 +620,36 @@ router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (
       }
     }
 
+    // The landing-list row is created here, at Create Operation, and nowhere else — linking a
+    // vehicle alone never lists the slip. Per-order advisory lock so a double click or retry can't
+    // insert it twice.
+    {
+      const { userCode, userName } = actor(req);
+      const vehicleForRow: any = await withRto(slip);
+      const recClient = await pool.connect();
+      try {
+        await recClient.query('BEGIN');
+        await recClient.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`loading_record:${slip.orderNumber}`]);
+        const { rows: existingRows } = await recClient.query(
+          `SELECT id FROM loading_records WHERE order_number = $1 LIMIT 1`, [slip.orderNumber],
+        );
+        if (!existingRows[0]) {
+          await recClient.query(
+            `INSERT INTO loading_records (order_number, proforma_slip_id, party_name, plant, vehicle_number, rto_number, volume, created_by_code, created_by_name)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [slip.orderNumber, slip.id, slip.partyName, slip.plant, slip.vehicleNumber ?? null, vehicleForRow?.rtoNumber ?? null,
+             vehicleForRow?.vehicleVolume != null ? String(vehicleForRow.vehicleVolume) : null, userCode ?? null, userName ?? null],
+          );
+        }
+        await recClient.query('COMMIT');
+      } catch (e) {
+        await recClient.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        recClient.release();
+      }
+    }
+
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
     const withVehicle: any = await withRto(slip);
@@ -788,6 +818,14 @@ router.post('/loading/proforma/:orderNumber/claim', requireLoadingWrite, async (
   }
 });
 
+// GET /api/notion-status-options — the Finny Status options with Notion's own colour for each, so
+// the Loading and Proforma Slips pages can show a status in the colour Notion shows it in. Any
+// signed-in user (both pages need it); it exposes no order data.
+router.get('/notion-status-options', async (req: Request, res: Response) => {
+  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  res.json({ options: await getFinnyStatusOptions() });
+});
+
 // GET /api/loading/proforma/:orderNumber/stock?barcode= — stock a scan of this barcode could draw
 // on for this order's plant (pooled across the plant's state, same figure /scan checks). Used by
 // Add Extra, whose picked product may not be on the slip and so has no stockAvailable row.
@@ -933,6 +971,93 @@ router.get('/loading/date-report/scan-activity', requirePageAccess('loading'), a
   }
 });
 
+// GET /api/loading/date-items?plant=&date= — Overall Scan Ops' "Loading" view: every product used
+// by the Notion orders (proforma slips) of one plant + order date, rolled up to one row per
+// product, with each party's share underneath. Read-only, guarded by the scan-viewer page (not
+// Loading) since that is the page that shows it. Built on computeLoadDateReport, so the numbers
+// match the Loading page's own date report; orders not loaded yet are included (loaded 0).
+router.get('/loading/date-items', requirePageAccess('scan-viewer'), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const date = String(req.query.date ?? '').trim();
+    if (!plant || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'plant and date (YYYY-MM-DD) are required' });
+    const allPlants = plant === '__all__';
+    if (!allPlants && !canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+
+    // proforma_slips.plant keeps whatever casing the source used ("VALSAD"), the picker sends the
+    // plant's configured name ("Valsad") — resolve the stored spelling(s) case-insensitively.
+    // "__all__" = every plant this user may see (all of them for an unrestricted user).
+    const userPlants = getUserPlants(req.user);
+    const { rows: plantRows } = allPlants
+      ? await pool.query(
+          `SELECT DISTINCT plant FROM proforma_slips WHERE order_date = $1::date AND plant IS NOT NULL
+             ${userPlants !== null ? 'AND LOWER(plant) = ANY($2)' : ''}`,
+          userPlants !== null ? [date, userPlants] : [date],
+        )
+      : await pool.query(
+          `SELECT DISTINCT plant FROM proforma_slips WHERE LOWER(plant) = LOWER($1) AND order_date = $2::date`,
+          [plant, date],
+        );
+    const slips: any[] = [];
+    for (const p of plantRows as any[]) {
+      const report = await computeLoadDateReport(p.plant, date);
+      if (report) slips.push(...report.slips.map((s) => ({ ...s, plant: p.plant as string })));
+    }
+
+    const barcodes = Array.from(new Set(slips.flatMap((s) => s.items.map((i: any) => i.barcode))));
+    const nameByBarcode = new Map<string, string>();
+    const srByBarcode = new Map<string, string>();
+    if (barcodes.length > 0) {
+      const { rows: productRows } = await pool.query(
+        `SELECT barcode, name, new_sr FROM products WHERE barcode = ANY($1::text[])`, [barcodes],
+      );
+      for (const r of productRows as any[]) {
+        if (r.name && !nameByBarcode.has(r.barcode)) nameByBarcode.set(r.barcode, r.name);
+        // A barcode can sit on more than one product row (one per plant) — take the first Sr No set.
+        if (r.new_sr && !srByBarcode.has(r.barcode)) srByBarcode.set(r.barcode, String(r.new_sr));
+      }
+    }
+
+    type PartyRow = { partyName: string; orderNumber: string; plant: string; vehicleNumber: string | null; expected: number; loaded: number; extra: number; remaining: number };
+    type ItemAgg = { barcode: string; srNo: string | null; itemName: string; itemsPerPallet: number; expected: number; loaded: number; extra: number; remaining: number; parties: PartyRow[] };
+    const byBarcode = new Map<string, ItemAgg>();
+    for (const slip of slips) {
+      for (const it of slip.items) {
+        const loaded = it.receivedQty + it.extraQty;
+        const row: ItemAgg = byBarcode.get(it.barcode) ?? {
+          barcode: it.barcode, srNo: srByBarcode.get(it.barcode) ?? null, itemName: nameByBarcode.get(it.barcode) ?? it.itemName, itemsPerPallet: it.itemsPerPallet,
+          expected: 0, loaded: 0, extra: 0, remaining: 0, parties: [],
+        };
+        const remaining = Math.max(0, it.expectedQty - loaded);
+        row.expected += it.expectedQty;
+        row.loaded += loaded;
+        row.extra += it.extraQty;
+        row.remaining += remaining;
+        row.parties.push({
+          partyName: slip.partyName, orderNumber: slip.orderNumber, plant: slip.plant, vehicleNumber: slip.vehicleNumber,
+          expected: it.expectedQty, loaded, extra: it.extraQty, remaining,
+        });
+        byBarcode.set(it.barcode, row);
+      }
+    }
+    // In Sr No order (the order Product Master lists them in); products with no Sr No go last.
+    const items = Array.from(byBarcode.values()).sort((a, b) =>
+      (a.srNo ? 0 : 1) - (b.srNo ? 0 : 1)
+      || (a.srNo ?? '').localeCompare(b.srNo ?? '', undefined, { numeric: true, sensitivity: 'base' })
+      || a.itemName.localeCompare(b.itemName, undefined, { numeric: true, sensitivity: 'base' }));
+    for (const row of items) row.parties.sort((a, b) => a.partyName.localeCompare(b.partyName));
+
+    res.json({
+      plant, date,
+      orders: slips.length,
+      parties: new Set(slips.map((s) => s.partyName)).size,
+      items,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build the loading item list' });
+  }
+});
+
 router.get('/loading/records', requirePageAccess('loading'), async (req: Request, res: Response) => {
   try {
     const limit  = Math.max(1, Math.min(100, parseInt(String(req.query.limit  ?? '20'), 10) || 20));
@@ -956,7 +1081,11 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
     // "list available to all" only ever meant all USERS, not all plants; a user with no access
     // to a plant still shouldn't see that plant's loads here.
     const userPlants = getUserPlants(req.user);
-    const baseConditions: string[] = [];
+    // One row per order, always — if a duplicate loading_records row ever exists (older data from
+    // before link-vehicle was serialized), only the first one is listed, counted and totalled.
+    const baseConditions: string[] = [
+      `lr.id = (SELECT MIN(d.id) FROM loading_records d WHERE d.order_number = lr.order_number)`,
+    ];
     const params: any[] = [];
     if (userPlants !== null) {
       params.push(userPlants);
@@ -1163,38 +1292,19 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requireLoadingWrite, 
     // The check-then-write below runs under a per-order advisory lock in one transaction, so two
     // link-vehicle requests arriving together (a double tap, a retry) can't both find "no row yet"
     // and each insert one.
-    const recClient = await pool.connect();
-    try {
-      await recClient.query('BEGIN');
-      await recClient.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`loading_record:${updated.orderNumber}`]);
-      const { rows: existingRecordRows } = await recClient.query(
-        `SELECT id FROM loading_records WHERE order_number = $1 ORDER BY id LIMIT 1`,
-        [updated.orderNumber],
-      );
-      if (existingRecordRows[0]) {
-        await recClient.query(
-          `UPDATE loading_records SET proforma_slip_id = $1, party_name = $2, plant = $3,
-                  vehicle_number = $4, rto_number = $5, volume = $6,
-                  created_by_code = $7, created_by_name = $8, created_at = now()
-           WHERE id = $9`,
-          [updated.id, updated.partyName, updated.plant, vehicle.vehicleNumber, vehicle.rtoNumber ?? null,
-           vehicle.volume != null ? String(vehicle.volume) : null, userCode ?? null, userName ?? null, existingRecordRows[0].id],
-        );
-      } else {
-        await recClient.query(
-          `INSERT INTO loading_records (order_number, proforma_slip_id, party_name, plant, vehicle_number, rto_number, volume, created_by_code, created_by_name)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [updated.orderNumber, updated.id, updated.partyName, updated.plant, vehicle.vehicleNumber, vehicle.rtoNumber ?? null,
-           vehicle.volume != null ? String(vehicle.volume) : null, userCode ?? null, userName ?? null],
-        );
-      }
-      await recClient.query('COMMIT');
-    } catch (e) {
-      await recClient.query('ROLLBACK').catch(() => {});
-      throw e;
-    } finally {
-      recClient.release();
-    }
+    //
+    // NOT created here any more: the landing-list row is written only by POST /start (Create
+    // Operation). Linking a vehicle from the Create dialog and closing it without pressing Create
+    // Operation used to leave the slip in the list (and marked as already created). This only
+    // keeps an ALREADY-created load's row in step with a vehicle change — creator and load date
+    // are left alone, and nothing happens when no row exists yet.
+    await pool.query(
+      `UPDATE loading_records SET proforma_slip_id = $1, party_name = $2, plant = $3,
+              vehicle_number = $4, rto_number = $5, volume = $6
+       WHERE order_number = $7`,
+      [updated.id, updated.partyName, updated.plant, vehicle.vehicleNumber, vehicle.rtoNumber ?? null,
+       vehicle.volume != null ? String(vehicle.volume) : null, updated.orderNumber],
+    );
 
     res.json({ slip: await withRto(updated), vehicle, capacityWarning });
   } catch (error) {
@@ -1341,6 +1451,17 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
       // extra portion at all).
       regularQty = (matchedItem && !isExtraScan) ? Math.min(qty, remainingBefore) : 0;
       extraQty = qty - regularQty;
+
+      // Extra only after the item is complete: an item that IS on this order and still has
+      // quantity left must be loaded up to its expected quantity first — otherwise the "extra"
+      // would just stand in for boxes the order still needs and be counted twice (as Extra and as
+      // loaded). An item not on the order at all is always fine. A replayed offline scan skips
+      // this like the check below does.
+      if (isExtraScan && matchedItem && remainingBefore > 0 && !fromOfflineQueue) {
+        throw Object.assign(new Error(
+          `EXTRA_NOT_ALLOWED: Only ${remainingBefore} left to load for "${matchedItem.itemName ?? barcode}". Load those first, then add the Extra.`,
+        ), { status: 400 });
+      }
 
       // Extra quantity (barcode not on this slip at all, or qty beyond what's still remaining
       // for it) can only be logged through the dedicated Add Extra flow, never a regular scan —

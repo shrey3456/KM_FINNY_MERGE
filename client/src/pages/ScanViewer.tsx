@@ -27,6 +27,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
+import { LoadingViewerSection } from "./ScanViewerLoading";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -379,8 +380,8 @@ export default function ScanViewer() {
   // Order Scan (this page's original scope) vs Unloading — a second, entirely independent
   // picker/table/history flow (see UnloadingViewerSection below), not another mode threaded
   // through the Order Scan state above.
-  const [viewerSource, setViewerSource] = useState<"order-scan" | "unloading">(
-    () => (readSavedViewerFilters().viewerSource as "order-scan" | "unloading") ?? "order-scan",
+  const [viewerSource, setViewerSource] = useState<"order-scan" | "unloading" | "loading">(
+    () => (readSavedViewerFilters().viewerSource as "order-scan" | "unloading" | "loading") ?? "order-scan",
   );
   // Part Order lists each CSV part of this order on its own, expandable to its rows — the
   // read-only counterpart of the Scan Order page's own Part Order tab.
@@ -557,7 +558,7 @@ export default function ScanViewer() {
   const mvSearched = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return allMvItems;
-    return allMvItems.filter((i) => [i.itemName, i.barcode, i.sapCode].some((v) => v?.toLowerCase().includes(q)));
+    return allMvItems.filter((i) => [i.srNo, i.itemName, i.barcode, i.sapCode].some((v) => v?.toLowerCase().includes(q)));
   }, [allMvItems, search]);
   const [mvStatFilter, setMvStatFilter] = useState<"" | "done" | "remaining" | "extra">("");
   const mvStatFiltered = !mvStatFilter
@@ -1672,6 +1673,7 @@ export default function ScanViewer() {
           {([
             { key: "order-scan", label: "Order Scan" },
             { key: "unloading", label: "Unloading" },
+            { key: "loading", label: "Loading" },
           ] as const).map((s) => (
             <button
               key={s.key}
@@ -1690,6 +1692,8 @@ export default function ScanViewer() {
 
         {viewerSource === "unloading" ? (
           <UnloadingViewerSection plantOptions={plantOptions} getPlantColorCfg={getPlantColorCfg} />
+        ) : viewerSource === "loading" ? (
+          <LoadingViewerSection plantOptions={plantOptions} getPlantColorCfg={getPlantColorCfg} />
         ) : (
         <>
         {/* Session header — combines the plant/date/part CONTROLS (always visible, so they're

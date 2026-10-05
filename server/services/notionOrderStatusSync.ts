@@ -16,6 +16,43 @@ import { Client } from '@notionhq/client';
 export const NOTION_LOADING_STATUS = 'LOADING';
 export const NOTION_LOADING_COMPLETE_STATUS = 'READY≈DESP';
 
+// The status options with the colour Notion gives each one, so the app can show a status in the
+// same colour as Notion does. Read from the database schema and cached; if Notion can't be
+// reached (or the property changes shape) the last known list — or the colours confirmed against
+// the live database — is used instead, so a badge is never left uncoloured.
+export type FinnyStatusOption = { name: string; color: string };
+const FALLBACK_STATUS_OPTIONS: FinnyStatusOption[] = [
+  { name: 'ORDER≈GENR', color: 'yellow' }, { name: 'HI-PRIORITY', color: 'red' },
+  { name: 'VEHI≈ASSGN', color: 'orange' }, { name: 'VEHI≈ARRIV', color: 'green' },
+  { name: 'ON HOLD', color: 'red' }, { name: 'IN-PROCESS', color: 'green' },
+  { name: 'SORTING', color: 'pink' }, { name: 'READY≈LOAD', color: 'blue' },
+  { name: 'LOADING', color: 'green' }, { name: 'UNLOADING', color: 'orange' },
+  { name: 'SHORTAGE', color: 'blue' }, { name: 'CANCELLED', color: 'red' },
+  { name: 'READY≈DESP', color: 'brown' }, { name: 'DISPATCHED', color: 'purple' },
+  { name: 'DELIVERED', color: 'default' },
+];
+let statusOptionCache: { options: FinnyStatusOption[]; at: number } | null = null;
+const STATUS_OPTION_TTL_MS = 10 * 60 * 1000;
+
+export async function getFinnyStatusOptions(): Promise<FinnyStatusOption[]> {
+  if (statusOptionCache && Date.now() - statusOptionCache.at < STATUS_OPTION_TTL_MS) return statusOptionCache.options;
+  try {
+    const orderDatabaseId = process.env.ORDER_DATABASE_ID;
+    if (!orderDatabaseId || !process.env.NOTION_INTEGRATION_SECRET) throw new Error('Notion is not configured');
+    const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
+    const db: any = await notion.databases.retrieve({ database_id: orderDatabaseId });
+    const prop = db?.properties?.['Finny Status :'];
+    const raw: any[] = prop?.status?.options ?? prop?.select?.options ?? [];
+    const options = raw.map((o) => ({ name: String(o.name), color: String(o.color ?? 'default') }));
+    if (options.length === 0) throw new Error('No status options found');
+    statusOptionCache = { options, at: Date.now() };
+    return options;
+  } catch (error) {
+    console.error('Could not read Finny Status colours from Notion:', error);
+    return statusOptionCache?.options ?? FALLBACK_STATUS_OPTIONS;
+  }
+}
+
 async function findOrderPageIds(notion: Client, orderDatabaseId: string, orderNumber: string): Promise<string[]> {
   const response = await notion.databases.query({
     database_id: orderDatabaseId,
