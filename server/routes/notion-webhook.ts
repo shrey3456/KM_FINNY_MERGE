@@ -6,6 +6,7 @@ import { extractText } from '../lib/notionProperties';
 import { requireAdminRole } from '../lib/pageAccess';
 import { applyVehiclePageFromNotionWebhook } from '../services/notionVehicleSync';
 import { applyProductPageFromNotionWebhook } from '../services/notionInventorySync';
+import { isNotionStatusGuarded, isLaterStageStatus } from '../services/notionOrderStatusSync';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Notion webhook — Notion calls this the moment a page changes, so the app follows Notion directly
@@ -75,6 +76,12 @@ async function applyOrderStatus(page: any): Promise<string> {
   const orderNumber = extractText(page.properties?.['Order No. :']).trim();
   if (!orderNumber) return 'skipped (no order number)';
   const status = extractText(page.properties?.['Finny Status :']).trim() || null;
+  // Just after a vehicle change from the app, Notion's own automation may flip the status; the app
+  // puts the right one back two minutes later (see watchStatusAfterVehicleChange), so until then
+  // such a change must not overwrite this app's status. A later stage (Dispatched ...) still does.
+  if (isNotionStatusGuarded(orderNumber) && !isLaterStageStatus(status)) {
+    return `ignored (#${orderNumber} → ${status ?? 'empty'} — the app is about to restore its own status after a vehicle change)`;
+  }
   const { rowCount } = await pool.query(
     `UPDATE proforma_slips SET notion_status = $1
      WHERE order_number = $2 AND notion_status IS DISTINCT FROM $1`,

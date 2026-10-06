@@ -8,7 +8,11 @@ import {
   getPooledStock, debitStatePool, reverseStockPullsForEvent, recordStockPulls,
   type StockPullContribution,
 } from '../lib/statePool';
-import { pushOrderStatusToNotion, pushStoreKeeperInfoToNotion, getFinnyStatusOptions, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
+import {
+  pushStoreKeeperInfoToNotion, getFinnyStatusOptions, syncOrderToNotion, settleNotionSync, reconcileOrderWithNotion,
+  watchStatusAfterVehicleChange,
+  NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS, type NotionSyncOutcome,
+} from '../services/notionOrderStatusSync';
 import { searchNotionVehicleByNumber } from '../services/notionVehicleSync';
 import { computeLoadDateReport, computeLoadDateActivity } from '../lib/loadDateReport';
 
@@ -531,9 +535,32 @@ router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async
     const sortSlipRequired = await plantRequiresSortSlipFirst(slip.plant);
     const sortSlipExists = sortSlipRequired ? await orderHasSortSlip(slip.orderNumber) : true;
     res.json({ slip: await withRto(slip), items, allComplete, loadedVolume, sortSlipRequired, sortSlipExists });
+
+    // Opening a load quietly re-checks its vehicle and status in Notion (this app's values win for
+    // Loading / Ready for Dispatch) — catches an earlier update that never got through. Runs after
+    // the reply, only for loads started here, and at most once every 10 minutes per order since
+    // the open page re-fetches this every few seconds. This only ever writes to Notion, never here.
+    void reconcileOrderWithNotion(slip.orderNumber, actor(req), { throttleMs: 10 * 60 * 1000 });
   } catch (error) {
     console.error('Error fetching proforma slip for loading:', error);
     res.status(500).json({ message: 'Failed to fetch proforma slip' });
+  }
+});
+
+// POST /api/loading/proforma/:orderNumber/sync-notion — the "Sync to Notion" button: re-check this
+// one load's vehicle and status in Notion right now and fix whatever differs.
+router.post('/loading/proforma/:orderNumber/sync-notion', requireLoadingWrite, async (req: Request, res: Response) => {
+  try {
+    const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    const outcome = await reconcileOrderWithNotion(slip.orderNumber, actor(req));
+    res.json({
+      notion: outcome ?? { state: 'skipped', message: 'Nothing to sync yet — the load has to be started here first.' },
+    });
+  } catch (error) {
+    console.error('Error syncing load to Notion:', error);
+    res.status(500).json({ message: 'Failed to sync to Notion' });
   }
 });
 
@@ -581,6 +608,7 @@ router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (
       return res.status(400).json({ message: `"${requestedStv}" is not a Dispatch Directory configured for plant ${slip.plant ?? '—'}.` });
     }
 
+    let notionOutcome: NotionSyncOutcome | undefined;
     if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS) {
       // Remember what LOADING replaces, so deleting this load later can put it back.
       const updated = await storage.updateProformaSlip(slip.id, {
@@ -588,7 +616,8 @@ router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (
         statusBeforeLoading: slip.notionStatus ?? '',
       } as any);
       if (updated) slip = updated;
-      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
+      // Compare-then-write with retries; the first try is awaited so the screen can say how it went.
+      notionOutcome = await settleNotionSync(syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_STATUS }, actor(req)));
     }
 
     // First-time owner assignment — whoever runs Create Operation becomes the one allowed to
@@ -671,7 +700,7 @@ router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (
         userCode, userName,
       });
     }
-    res.json({ slip: withVehicle, items, allComplete, loadedVolume, capacityWarning });
+    res.json({ slip: withVehicle, items, allComplete, loadedVolume, capacityWarning, notion: notionOutcome });
   } catch (error) {
     console.error('Error starting load:', error);
     res.status(500).json({ message: 'Failed to start load' });
@@ -1306,7 +1335,17 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requireLoadingWrite, 
        vehicle.volume != null ? String(vehicle.volume) : null, updated.orderNumber],
     );
 
-    res.json({ slip: await withRto(updated), vehicle, capacityWarning });
+    // Notion's Order page: point its vehicle link at this vehicle's Notion page (compare first,
+    // write, confirm, retry). A vehicle that exists only in this app has no Notion page to point at.
+    const notionOutcome: NotionSyncOutcome = (vehicle as any).notionPageId
+      ? await settleNotionSync(syncOrderToNotion(updated.orderNumber, { vehiclePageId: (vehicle as any).notionPageId }, actor(req)))
+      : { state: 'skipped', message: `${vehicle.vehicleNumber} has no Notion page, so Notion was not updated with this vehicle.` };
+
+    // Notion's automation may change the status after a vehicle is set — two minutes from now the
+    // status of a load started here is put back (Loading / Ready for Dispatch).
+    void watchStatusAfterVehicleChange(updated.orderNumber, actor(req));
+
+    res.json({ slip: await withRto(updated), vehicle, capacityWarning, notion: notionOutcome });
   } catch (error) {
     console.error('Error linking vehicle to proforma slip:', error);
     res.status(500).json({ message: 'Failed to link vehicle' });
@@ -1568,7 +1607,7 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
 
     // Best-effort, after the response — only when this scan is what just auto-completed it.
     if (allComplete && finalSlip !== slip) {
-      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
+      void syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_COMPLETE_STATUS }, actor(req));
     }
   } catch (error: any) {
     // A rejection raised from inside the locked transaction above (stock/extra checks re-run
@@ -1716,7 +1755,7 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
       },
     });
     if (allComplete && finalSlip !== slip) {
-      void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
+      void syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_COMPLETE_STATUS }, actor(req));
     }
   } catch (error: any) {
     if (error?.status) {
@@ -1758,9 +1797,25 @@ router.post('/loading/proforma/:orderNumber/complete', requireLoadingWrite, asyn
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(updated, rawItems);
-    res.json({ slip: await withRto(updated), items, allComplete, loadedVolume });
-
-    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_COMPLETE_STATUS);
+    // Completing re-checks BOTH the status and the vehicle in Notion (the app wins for these), so a
+    // load never becomes Ready for Dispatch with an out-of-date vehicle there. The first try is
+    // awaited so the screen can say how it went.
+    const notionOutcome = await settleNotionSync(syncOrderToNotion(
+      updated.orderNumber,
+      {
+        status: NOTION_LOADING_COMPLETE_STATUS,
+        ...(await (async () => {
+          const { rows } = await pool.query(
+            `SELECT v.notion_page_id AS "vehiclePage", ps.vehicle_assigned_by_code AS assigned
+               FROM proforma_slips ps LEFT JOIN vehicle_info v ON v.id = ps.vehicle_info_id WHERE ps.order_number = $1`,
+            [updated.orderNumber],
+          );
+          return rows[0]?.assigned && rows[0]?.vehiclePage ? { vehiclePageId: rows[0].vehiclePage as string } : {};
+        })()),
+      },
+      actor(req),
+    ));
+    res.json({ slip: await withRto(updated), items, allComplete, loadedVolume, notion: notionOutcome });
   } catch (error) {
     console.error('Error completing load:', error);
     res.status(500).json({ message: 'Failed to complete load' });
@@ -1797,10 +1852,9 @@ router.post('/loading/proforma/:orderNumber/reopen', requireLoadingWrite, requir
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(updated, rawItems);
-    res.json({ slip: await withRto(updated), items, allComplete, loadedVolume });
-
     // Symmetric with completing — reopening un-does "DISPATCHED" back to "LOADING" in Notion too.
-    void pushOrderStatusToNotion(updated.orderNumber, NOTION_LOADING_STATUS);
+    const notionOutcome = await settleNotionSync(syncOrderToNotion(updated.orderNumber, { status: NOTION_LOADING_STATUS }, actor(req)));
+    res.json({ slip: await withRto(updated), items, allComplete, loadedVolume, notion: notionOutcome });
   } catch (error) {
     console.error('Error reopening load:', error);
     res.status(500).json({ message: 'Failed to reopen load' });
@@ -1921,7 +1975,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
 
     // Notion follows the app: the status goes back, and StoreKeeper tags the app wrote are cleared
     // (only for loads whose tags the app pushed — hand-typed Notion values on older loads stay).
-    void pushOrderStatusToNotion(slip.orderNumber, restoredStatus);
+    void syncOrderToNotion(slip.orderNumber, { status: restoredStatus }, actor(req));
     if (hadNotionStoreKeeper) void pushStoreKeeperInfoToNotion(slip.orderNumber, '');
 
     if (userCode) {
@@ -2069,7 +2123,7 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
           loadingCompletedAt: null, loadingCompletedByCode: null,
           notionStatus: NOTION_LOADING_STATUS,
         } as any);
-        void pushOrderStatusToNotion(slip.orderNumber, NOTION_LOADING_STATUS);
+        void syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_STATUS }, actor(req));
       }
     }
 

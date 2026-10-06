@@ -33,6 +33,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlantFilter } from "@/components/PlantFilter";
 import { NotionStatusBadge } from "@/components/NotionStatusBadge";
+import { withNotionNotice } from "@/lib/notionSyncNotice";
 import { SingleDateFilter } from "@/components/SingleDateFilter";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -593,7 +594,7 @@ export default function LoadOperation() {
       return res.json();
     },
     onSuccess: (_data, orderNumber) => {
-      toast({ title: "Load reopened" });
+      toast(withNotionNotice({ title: "Load reopened" }, _data));
       recordsQuery.refetch();
       refreshOwnerHistory(orderNumber);
     },
@@ -1001,13 +1002,13 @@ export default function LoadOperation() {
       // The server re-checks the vehicle's capacity too; if it is short, say so again here — the
       // dialog that warned about it has just closed.
       const capacityWarning = (data as any)?.capacityWarning as string | null | undefined;
-      toast({
+      toast(withNotionNotice({
         title: capacityWarning ? "Load created — over capacity" : "Load operation created",
         description: capacityWarning
           ? `${data.slip.orderNumber} — ${capacityWarning}`
           : `${data.slip.orderNumber} — ${data.slip.partyName}`,
         variant: capacityWarning ? "destructive" : undefined,
-      });
+      }, data));
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
     onError: (err: any) => toast({ title: "Could not start load", description: parseApiErrorMessage(err), variant: "destructive" }),
@@ -1243,9 +1244,9 @@ export default function LoadOperation() {
       setVehicleSearch("");
       setVehiclePanelOpen(false);
       if (data.capacityWarning) {
-        toast({ title: "Vehicle linked — over capacity", description: data.capacityWarning, variant: "destructive" });
+        toast(withNotionNotice({ title: "Vehicle linked — over capacity", description: data.capacityWarning ?? undefined, variant: "destructive" }, data));
       } else {
-        toast({ title: "Vehicle linked", description: `${data.vehicle.vehicleNumber} — RTO ${data.vehicle.rtoNumber ?? "—"}` });
+        toast(withNotionNotice({ title: "Vehicle linked", description: `${data.vehicle.vehicleNumber} — RTO ${data.vehicle.rtoNumber ?? "—"}` }, data));
       }
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
     },
@@ -1776,8 +1777,30 @@ export default function LoadOperation() {
       announceLoadComplete(data.slip, data.items, false);
       refreshOwnerHistory(data.slip.orderNumber);
       queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+      // Only speak up when Notion could not be updated — the completion popup covers the rest.
+      const notionNotice = withNotionNotice({ title: "Load complete" }, data);
+      if (notionNotice.description) toast(notionNotice);
     },
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
+  // "Sync to Notion" — re-checks this load's vehicle and status in Notion right now and fixes
+  // whatever differs (the server only writes to Notion here, never to this app).
+  const syncNotionMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/sync-notion`, {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Sync failed");
+      return res.json() as Promise<{ notion: { state: string; message: string } }>;
+    },
+    onSuccess: (data) => {
+      const state = data.notion?.state;
+      toast({
+        title: state === "ok" ? "Notion is up to date" : state === "skipped" ? "Nothing changed in Notion" : "Notion not updated yet",
+        description: data.notion?.message,
+        variant: state === "retrying" || state === "failed" ? "destructive" : undefined,
+      });
+    },
+    onError: (err: any) => toast({ title: "Could not sync to Notion", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // Shift handoff — Pause (current owner/admin steps away) and Claim (anyone with write access
@@ -3515,6 +3538,20 @@ export default function LoadOperation() {
                         <Truck className="mr-1 h-3 w-3" /> Vehicle
                       </Button>
                     )}
+                    {/* Re-checks this load's vehicle and status in Notion and fixes what differs. */}
+                    {canWrite && !!lockedStv && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 rounded-full px-2 text-[11px] sm:h-7 sm:text-xs"
+                        disabled={syncNotionMutation.isPending}
+                        title="Check this load's vehicle and status in Notion and update Notion if it is behind"
+                        onClick={() => syncNotionMutation.mutate()}
+                      >
+                        {syncNotionMutation.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RotateCcw className="mr-1 h-3 w-3" />}
+                        Sync to Notion
+                      </Button>
+                    )}
                     {canComplete && !locked && (
                       <Button
                         size="sm"
@@ -4017,11 +4054,12 @@ export default function LoadOperation() {
                                   Expected <span className="font-bold text-gray-900">{row.expected}</span>
                                   <span className="text-gray-300"> · </span>
                                   Loaded <span className="font-bold text-emerald-600">{row.loaded}</span>
+                                  {/* Extra right after Loaded, only when there is some. */}
+                                  {extra > 0 && <><span className="text-gray-300"> · </span>Extra <span className="font-bold text-amber-600">{extra}</span></>}
                                   <span className="text-gray-300"> · </span>
                                   Remaining <span className="font-bold text-[#001d6e]">{row.remaining}</span>
                                   <span className="text-gray-300"> · </span>
                                   Stock <span className={`font-bold ${noStock ? "text-red-600" : "text-gray-700"}`}>{row.stockAvailable ?? 0}</span>
-                                  {extra > 0 && <span className="ml-1.5 font-bold text-amber-600">+{extra}</span>}
                                   {noStock && <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
                                 </p>
                               </div>

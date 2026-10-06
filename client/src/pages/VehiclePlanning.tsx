@@ -21,6 +21,7 @@ import { parseApiErrorMessage } from "@/lib/apiError";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 import { SyncProgressDialog } from "@/components/SyncProgressDialog";
+import { withNotionNotice } from "@/lib/notionSyncNotice";
 
 // Vehicle Planning: a Gantt-style fleet timeline (rows = Krupa's vehicles, columns = days) plus
 // the assign-a-vehicle-to-an-order workflow. Each vehicle's bar spans its current order's start
@@ -225,8 +226,8 @@ export default function VehiclePlanning() {
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to assign vehicle");
       return res.json();
     },
-    onSuccess: (_, orderNumber) => {
-      toast({ title: "Vehicle assigned", description: `${assignTarget?.vehicleNumber} → order ${orderNumber}` });
+    onSuccess: (data, orderNumber) => {
+      toast(withNotionNotice({ title: "Vehicle assigned", description: `${assignTarget?.vehicleNumber} → order ${orderNumber}` }, data));
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
       setAssignTarget(null);
     },

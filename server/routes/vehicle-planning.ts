@@ -4,6 +4,7 @@ import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
 import { fetchProformaOrdersFromNotion, writeOrderToDb, type OrderData } from '../services/proformaNotionSync';
+import { syncOrderToNotion, settleNotionSync, watchStatusAfterVehicleChange, type NotionSyncOutcome } from '../services/notionOrderStatusSync';
 import type { VehiclePlanningOrderEntry } from '@shared/schema';
 
 // Vehicle Planning — a Gantt-style "when is each vehicle free" view over a configurable slice of
@@ -603,26 +604,15 @@ router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), as
     // own Notion page), not a text field, so this sets a relation rather than pushing a string
     // the way the STV/StoreKeeper pushes elsewhere do. Best-effort: the local assignment above
     // already succeeded and is the source of truth; a Notion hiccup here is logged, not thrown.
-    if (vehicle.notionPageId && ORDER_DATABASE_ID) {
-      try {
-        const resp = await notion.databases.query({
-          database_id: ORDER_DATABASE_ID,
-          filter: { property: 'Order No. :', rich_text: { contains: orderNumber } },
-          page_size: 1,
-        });
-        const page: any = resp.results[0];
-        if (page) {
-          await notion.pages.update({
-            page_id: page.id,
-            properties: { 'Vehi  No. :': { relation: [{ id: vehicle.notionPageId }] } } as any,
-          });
-        } else {
-          console.warn(`[Vehicle Planning] No Order DB page found for order ${orderNumber} — local assignment saved, Notion not updated`);
-        }
-      } catch (notionError) {
-        console.error(`[Vehicle Planning] Failed to push vehicle assignment to Notion for order ${orderNumber}:`, notionError);
-      }
-    }
+    // Same shared update the Loading page uses: compare first, write, read back to confirm, and on
+    // a failure try again every 2 minutes up to 5 tries in total (see notionOrderStatusSync.ts).
+    const notionOutcome: NotionSyncOutcome = vehicle.notionPageId
+      ? await settleNotionSync(syncOrderToNotion(orderNumber, { vehiclePageId: vehicle.notionPageId }, { userCode }))
+      : { state: 'skipped', message: `${vehicle.vehicleNumber} has no Notion page, so Notion was not updated with this vehicle.` };
+
+    // Notion's automation may change the status after a vehicle is set — two minutes from now the
+    // status of a load started in the app is put back (Loading / Ready for Dispatch).
+    void watchStatusAfterVehicleChange(orderNumber, { userCode });
 
     // Reflect the assignment into this vehicle's local history immediately, so the Gantt shows it
     // without waiting for the next Sync — driver/trip fields fill in on the next sync.
@@ -642,7 +632,7 @@ router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), as
       actualCompletedAt: null,
     });
 
-    res.json({ slip: updated });
+    res.json({ slip: updated, notion: notionOutcome });
   } catch (error) {
     console.error('Error assigning vehicle from vehicle planning:', error);
     res.status(500).json({ message: 'Failed to assign vehicle' });
