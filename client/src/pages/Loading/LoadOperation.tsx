@@ -73,6 +73,11 @@ function compareSrNo(a: string | null | undefined, b: string | null | undefined)
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 }
 
+// The item list on small screens: true = the Unloading-style rows (Sr No tag, status tag, a five-column
+// Expected / Loaded / Remaining / Extra / Stock block, whole row coloured, no photo). Set to false to
+// bring the previous one-line rows with the product photo back — nothing else needs to change.
+const USE_GRID_ITEM_ROWS = true;
+
 // Small product picture beside an item name; renders nothing (no gap) when the product has none.
 function ItemRowThumb({ name, className = "h-10 w-10" }: { name: string | null; className?: string }) {
   const [failed, setFailed] = useState(false);
@@ -2389,17 +2394,17 @@ export default function LoadOperation() {
   // since a plain table has no single source of truth tying a header to its own cell.
   const loadingItemHistoryColumns: DataTableColumn<LoadHistoryEvent>[] = [
     {
-      id: "scannedAt", header: "Date & Time", width: 170, minWidth: 120, sortable: false, totalable: false,
+      id: "scannedAt", header: "Date & Time", width: 180, minWidth: 150, sortable: false, totalable: false, headerClassName: "whitespace-nowrap",
       accessor: (ev) => ev.scannedAt,
       render: (ev) => <span className="whitespace-nowrap text-gray-600">{new Date(ev.scannedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}</span>,
     },
     {
-      id: "scannedByName", header: "Scanned By", width: 140, minWidth: 80, totalable: false,
+      id: "scannedByName", header: "Scanned By", width: 140, minWidth: 110, totalable: false, headerClassName: "whitespace-nowrap",
       accessor: (ev) => ev.scannedByName ?? "",
       render: (ev) => <span className="truncate text-gray-600">{ev.scannedByName ?? "—"}</span>,
     },
     {
-      id: "totalQty", header: "Qty", width: 70, minWidth: 50, align: "right", totalable: false,
+      id: "totalQty", header: "Qty", width: 80, minWidth: 64, align: "right", totalable: false, headerClassName: "whitespace-nowrap",
       accessor: (ev) => ev.totalQty,
       render: (ev) => (
         <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
@@ -2408,12 +2413,12 @@ export default function LoadOperation() {
       ),
     },
     {
-      id: "stv", header: "Dispatch Directory", width: 70, minWidth: 50, totalable: false,
+      id: "stv", header: "Dispatch Directory", width: 160, minWidth: 140, totalable: false, headerClassName: "whitespace-nowrap",
       accessor: (ev) => ev.stv ?? "",
       render: (ev) => <span className="text-[11px] text-gray-600">{ev.stv ?? "—"}</span>,
     },
     {
-      id: "status", header: "Status", width: 90, minWidth: 60, totalable: false,
+      id: "status", header: "Status", width: 140, minWidth: 120, totalable: false, headerClassName: "whitespace-nowrap",
       accessor: (ev) => (ev.voided ? "Voided" : ev.isAdjust ? "Loading Adjust" : ev.isExtra ? "Extra" : ""),
       render: (ev) =>
         ev.voided ? (
@@ -2485,14 +2490,14 @@ export default function LoadOperation() {
              a mobile card list below it. Same kiosk-rotate treatment the scan view has, so a
              wall-mounted station can rotate the landing list too, not just an open order. ──── */}
         {view === "list" && (
-          <div className={`space-y-6 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+          <div className={`space-y-3 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
             {/* Page header only on the list — nothing there competes with it for room. The
                 create/scan view (an open order, often with many items to scroll through) skips
                 it entirely instead; that view's only collapsible header now is the global
                 "Welcome" bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
             {/* Same name and icon as this page's sidebar entry ("Load Operations", the factory).
                 Sticky: the header stays at the top while the list scrolls underneath it. */}
-            <div className="-mx-2 bg-white px-2 pt-1 pb-2">
+            <div className="-mx-2 bg-white px-2 pt-1 [&>div]:!mb-1">
             <PageHeader
               icon={Factory}
               iconClassName="h-5 w-5 fill-[#4d7eff]"
@@ -3503,7 +3508,7 @@ export default function LoadOperation() {
                   {/* Actions — Back to List is the primary way out of this page, so it gets a
                       visibly bigger, outlined treatment rather than reading as just another
                       small pill alongside Change Vehicle/Complete. */}
-                  <div className="flex flex-wrap items-center gap-1 shrink-0">
+                  <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1">
                     {/* STV is read-only here by design. It's picked once in the Create Operation
                         dialog and, after that, only an admin can change it — from the Proforma
                         Slips page, not from the scanning screen. */}
@@ -3528,6 +3533,7 @@ export default function LoadOperation() {
                         )}
                       </div>
                     )}
+                    <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
                     {canWrite && !locked && canEditVehicle && (
                       <Button
                         size="sm"
@@ -3598,6 +3604,7 @@ export default function LoadOperation() {
                     >
                       Back to List
                     </Button>
+                    </div>
                   </div>
                 </div>
 
@@ -3975,7 +3982,7 @@ export default function LoadOperation() {
                       type="button"
                       onClick={() => setExtraDialogOpen(true)}
                       title="Add an item not on this slip, or more than what's remaining"
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-2 py-1 text-[11px] font-bold text-white shadow-sm sm:px-2.5 sm:py-1.5 sm:text-xs transition-colors hover:bg-amber-600"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-2 py-1 text-[11px] font-bold text-white shadow-sm lg:px-2.5 lg:py-1.5 lg:text-xs transition-colors hover:bg-amber-600"
                     >
                       <PackagePlus className="h-3.5 w-3.5" /> Add Extra
                     </button>
@@ -3983,7 +3990,7 @@ export default function LoadOperation() {
                   {items.length > 0 && (
                     <button
                       onClick={downloadLoadingItemsCsv}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 shadow-sm sm:px-2.5 sm:py-1.5 sm:text-xs hover:bg-gray-50"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 shadow-sm lg:px-2.5 lg:py-1.5 lg:text-xs hover:bg-gray-50"
                     >
                       <Download className="h-3.5 w-3.5" /> Export
                     </button>
@@ -3993,7 +4000,7 @@ export default function LoadOperation() {
                     conditions={itemColumnConditions}
                     onApply={setItemCondition}
                     onClear={clearItemCondition}
-                    className="h-7 shrink-0 gap-1 rounded-xl border-dashed border-[#001d6e]/40 bg-white text-[11px] font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e] sm:h-8 sm:text-xs"
+                    className="h-6 shrink-0 gap-1 rounded-xl border-dashed border-[#001d6e]/40 bg-white px-2 text-[11px] font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e] lg:h-8 lg:px-3 lg:text-xs"
                   />
                   <CollapsibleSearch value={itemSearchText} onChange={setItemSearchText} placeholder="Search items…" />
                 </div>
@@ -4041,8 +4048,65 @@ export default function LoadOperation() {
                             <div
                               role={row.barcode ? "button" : undefined}
                               onClick={() => row.barcode && setExpandedItemBarcode((cur) => (cur === row.barcode ? null : row.barcode!))}
-                              className={`flex items-center gap-2.5 rounded-lg border border-l-4 border-gray-200 px-2.5 py-2 text-left shadow-sm transition hover:shadow ${extra > 0 ? "bg-amber-50" : row.isComplete ? "bg-emerald-50" : "bg-white"} ${tone.edge}`}
+                              className={`${USE_GRID_ITEM_ROWS ? "block px-3" : "flex items-center gap-2.5 px-2.5"} rounded-lg border border-l-4 border-gray-200 py-2 text-left shadow-sm transition hover:shadow ${extra > 0 ? "bg-amber-50" : row.isComplete ? "bg-emerald-50" : USE_GRID_ITEM_ROWS && row.loaded > 0 ? "bg-yellow-50/70" : "bg-white"} ${tone.edge}`}
                             >
+                              {USE_GRID_ITEM_ROWS ? (
+                                <div className="flex w-full items-stretch gap-2.5">
+                                  {/* The product photo fills the row's full height — tap it to enlarge; the row
+                                      itself opens the history. */}
+                                  <ItemRowThumb name={row.itemName} className="w-16 self-stretch" />
+                                  <div className="min-w-0 flex-1">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <p className="break-words text-sm font-semibold leading-snug text-gray-900">
+                                        {row.srNo && <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 align-middle font-mono text-[10px] font-bold text-gray-600 ring-1 ring-inset ring-gray-200">{row.srNo}</span>}
+                                        {row.itemName ?? "—"}
+                                      </p>
+                                      <p className="truncate font-mono text-[11px] text-gray-400">
+                                        {row.barcode || "—"}{row.sapCode ? ` · SAP ${row.sapCode}` : ""}{(row.itemsPerPallet ?? 0) > 0 ? ` · ${row.itemsPerPallet}/plt` : ""}
+                                      </p>
+                                    </div>
+                                    <div className="flex shrink-0 flex-col items-end gap-1">
+                                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${tone.badge}`}>{extra > 0 ? "Extra" : tone.label}</span>
+                                      {noStock && <span className="rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
+                                    </div>
+                                  </div>
+                                  {/* Same four-column block the Unloading list uses (plus Stock): each number sits
+                                      in the same place on every row, and the whole row takes the colour. */}
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <div className="grid min-w-0 flex-1 grid-cols-5 divide-x divide-black/10 rounded-md bg-white/70 py-1 ring-1 ring-black/5">
+                                      {([
+                                        { label: "Expected", value: row.expected, cls: "text-gray-900" },
+                                        { label: "Loaded", value: row.loaded, cls: "text-emerald-600" },
+                                        { label: "Remaining", value: row.remaining, cls: "text-[#001d6e]" },
+                                        { label: "Extra", value: extra > 0 ? `${extra}` : "—", cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
+                                        { label: "Stock", value: row.stockAvailable ?? 0, cls: noStock ? "text-red-600" : "text-gray-700" },
+                                      ] as const).map((cell) => (
+                                        <div key={cell.label} className="min-w-0 px-1 text-center">
+                                          <p className="truncate text-[9px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</p>
+                                          <p className={`text-base font-bold leading-tight tabular-nums ${cell.cls}`}>{cell.value}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                    {canScanThisLoad && row.barcode && (
+                                      <div className="flex shrink-0 items-center gap-1">
+                                        <Button size="sm" variant="ghost" disabled={row.loaded <= 0}
+                                          className="h-7 w-7 rounded-full bg-red-100 p-0 text-sm font-bold text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+                                          title="Remove from loaded quantity"
+                                          onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}>−</Button>
+                                        {/* The loaded quantity, between − and +. */}
+                                        <span className="min-w-[2rem] text-center text-sm font-bold tabular-nums text-gray-900" title="Current loaded quantity">{row.loaded}</span>
+                                        <Button size="sm" variant="ghost"
+                                          className="h-7 w-7 rounded-full bg-emerald-100 p-0 text-sm font-bold text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
+                                          title="Add to loaded quantity"
+                                          onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  </div>
+                                </div>
+                              ) : (
+                              <>
                               {/* Tap the picture to enlarge it (zoomable); the row itself toggles the history. */}
                               <ItemRowThumb name={row.itemName} className="h-10 w-10 shrink-0" />
                               <div className="min-w-0 flex-1">
@@ -4078,6 +4142,8 @@ export default function LoadOperation() {
                                     onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
                                 </div>
                               )}
+                              </>
+                              )}
                             </div>
                             {expanded && <div className="mt-1 rounded-xl border border-gray-200 bg-white">{renderLoadingItemHistoryPanel(row)}</div>}
                           </div>
@@ -4091,7 +4157,7 @@ export default function LoadOperation() {
               <DataTable<ProformaItem>
                 className="min-h-0 flex-1"
                 containerClassName="rounded-none border-0"
-                headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-xs"
+                headerClassName={`bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white ${USE_GRID_ITEM_ROWS ? "text-[11px] font-semibold uppercase tracking-wide sm:text-xs" : "text-xs sm:text-xs"}`}
                 columns={loadingItemColumns}
                 data={filteredItems}
                 getRowId={(row) => row.barcode ?? `row-${row.id}`}

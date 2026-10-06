@@ -1,4 +1,4 @@
-import { Router, Request, Response, NextFunction } from 'express';
+﻿import { Router, Request, Response, NextFunction } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer } from 'http';
 import passport from 'passport';
@@ -2330,6 +2330,54 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       [userCode, reason, eventId],
     );
 
+    // Undoing an Exchange (see POST /exchange/events/:id/reassign-product): the entry being voided
+    // here is the NEW product's entry, linked back to what it was exchanged from through
+    // credit_source_event_id (a non-credit row, so none of the credit logic above touched it — its
+    // own stock was reversed by the generic path). Now give the boxes back to the old product:
+    // un-void a fully exchanged entry, or add the boxes back onto the entry that kept the rest.
+    if (event.is_extra && !event.is_credit && event.credit_source_event_id && plant) {
+      const qty = Number(event.total_qty ?? 0);
+      const { rows: srcRows } = await client.query(
+        `SELECT * FROM order_scan_events WHERE id = $1 FOR UPDATE`,
+        [event.credit_source_event_id],
+      );
+      const src = srcRows[0];
+      if (src && src.voided && /^Exchanged to /i.test(String(src.void_reason ?? ''))) {
+        const note = `${String(src.void_reason)} — exchange undone`;
+        if (!src.credit_source_event_id) {
+          // Full exchange: the original entry itself was voided — bring it back as it was.
+          await client.query(
+            `UPDATE order_scan_events SET voided = false, voided_by_code = NULL, voided_at = NULL, void_reason = NULL WHERE id = $1`,
+            [src.id],
+          );
+        } else {
+          // Partial exchange: src is the voided "exchanged out" copy; the original kept the rest.
+          const { rows: origRows } = await client.query(
+            `SELECT * FROM order_scan_events WHERE id = $1 FOR UPDATE`,
+            [src.credit_source_event_id],
+          );
+          const orig = origRows[0];
+          if (orig && !orig.voided) {
+            const restored = Number(orig.total_qty ?? 0) + Number(src.total_qty ?? 0);
+            const ipp = Number(orig.items_per_pallet ?? 0);
+            await client.query(
+              `UPDATE order_scan_events SET total_qty = $1, pallets = $2, loose_qty = $3 WHERE id = $4`,
+              [restored, ipp > 0 ? Math.floor(restored / ipp) : 0, ipp > 0 ? restored % ipp : restored, orig.id],
+            );
+            await client.query(`UPDATE order_scan_events SET void_reason = $1 WHERE id = $2`, [note, src.id]);
+          } else {
+            // The entry that kept the rest is gone or voided — bring the exchanged-out boxes back as their own entry.
+            await client.query(
+              `UPDATE order_scan_events SET voided = false, voided_by_code = NULL, voided_at = NULL, void_reason = NULL WHERE id = $1`,
+              [src.id],
+            );
+          }
+        }
+        // The boxes are the old product's again — put them back on its stock (in stock + Extra).
+        await applyLiveScanStock(client, plant, src.barcode, 0, qty, event.session_id);
+      }
+    }
+
     await client.query('COMMIT');
     res.json({ event: voidResult.rows[0], updatedItem });
   } catch (err) {
@@ -2643,18 +2691,49 @@ router.post('/order-scan/exchange/events/:id/delete-permanent', requirePageWrite
   }
 });
 
-// POST /api/order-scan/exchange/events/:id/reassign-product — body: { newBarcode }. "Exchange":
-// this Extra was scanned as the wrong product — it's re-labelled to whatever product it actually
-// is, ANY product in Product Master (not limited to this order's own items — a box can turn out
-// to be something this order never even expected), and its stock moves with it: the qty this scan
-// already added to the old barcode's stock is taken back and given to the new barcode instead —
-// the same physical boxes, just correctly identified now. Stays an Extra under its new identity;
-// if it also happens to be an item genuinely expected on this same order, its scan_item_id links
-// to that row too (so its own Adjust button can credit a shortfall afterwards) — otherwise it's
-// simply an Extra for that product with no particular order tying it down, same as any other.
+// GET /api/order-scan/exchange/stock?plant=&barcodes=a,b — current stock at that plant for up to a
+// handful of barcodes (in stock, and how much of it is Extra), so the Exchange confirmation can show
+// both products' stock before and after. Plant-scoped to the caller.
+router.get('/order-scan/exchange/stock', requirePageAccess('adjust-exchange'), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const barcodes = String(req.query.barcodes ?? '').split(',').map((b) => b.trim().toLowerCase()).filter(Boolean).slice(0, 10);
+    if (!plant || barcodes.length === 0) return res.status(400).json({ message: 'plant and barcodes are required' });
+    const userPlants = getUserPlants(req.user);
+    if (userPlants !== null && !userPlants.includes(plant.toLowerCase())) {
+      return res.status(403).json({ message: 'Access denied for this plant' });
+    }
+    const { rows } = await pool.query(
+      `SELECT LOWER(barcode) AS "bkey", COALESCE(SUM(in_stock), 0)::int AS "inStock", COALESCE(SUM(extra_qty), 0)::int AS "extraQty"
+         FROM product_plant_stock
+        WHERE LOWER(plant) = LOWER($1) AND LOWER(barcode) = ANY($2::text[])
+        GROUP BY LOWER(barcode)`,
+      [plant, barcodes],
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Error reading exchange stock:', error);
+    res.status(500).json({ message: 'Failed to read stock' });
+  }
+});
+
+// POST /api/order-scan/exchange/events/:id/reassign-product — body: { newBarcode, qty?, reason? }.
+// "Exchange": this Extra was scanned as the wrong product — some or all of its boxes turn out to be
+// ANY other product in Product Master (not limited to this order's items). What happens, in one
+// transaction:
+//   - stock moves: the exchanged qty comes off the old barcode (in stock and its Extra figure) and
+//     goes onto the new one — the same physical boxes, correctly identified now;
+//   - the old entry keeps its original time and scanner. A FULL exchange marks it voided with the
+//     reason "Exchanged to …". A PARTIAL one reduces it to what stays, and a voided "exchanged out"
+//     copy (original time and scanner) records the boxes that left it;
+//   - a NEW Extra entry is written for the new product at the CURRENT time, by the person
+//     exchanging, linked back to the old/exchanged-out entry through credit_source_event_id (a
+//     non-credit row — the credit logic only ever reads that column together with is_credit).
+// Voiding that new entry later undoes all of it (see the exchange-undo block in the void route).
 router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite('adjust-exchange'), async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   const newBarcode = String(req.body?.newBarcode ?? '').trim();
+  const reason = String(req.body?.reason ?? '').trim().slice(0, 300);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
   if (!newBarcode) return res.status(400).json({ message: 'newBarcode is required' });
 
@@ -2670,6 +2749,10 @@ router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite
     const event = eventRows[0];
     if (!event || !event.is_extra) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Extra scan not found' }); }
     if (event.voided) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'This Extra is voided — nothing to exchange.' }); }
+    if (Number(event.credited_qty ?? 0) > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'Part of this Extra has already been given to an earlier shortfall — undo that first.' });
+    }
 
     const userPlants = getUserPlants(req.user);
     if (userPlants !== null && !userPlants.includes(String(event.plant ?? '').toLowerCase())) {
@@ -2681,65 +2764,108 @@ router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite
       return res.status(400).json({ message: 'That is already this Extra\'s product.' });
     }
 
+    const total = Number(event.total_qty ?? 0);
+    const qty = req.body?.qty != null ? Number(req.body.qty) : total;
+    if (!Number.isInteger(qty) || qty < 1 || qty > total) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: `How many boxes must be a whole number from 1 to ${total}.` });
+    }
+
     // Must be a real product (Product Master) — a plain sanity check against a typo'd barcode,
     // not a restriction on which order it belongs to.
-    const { rows: productRows } = await client.query(
-      `SELECT name FROM products WHERE LOWER(barcode) = LOWER($1) LIMIT 1`,
-      [newBarcode],
-    );
-    if (!productRows[0]) {
+    const newProduct = await storage.getProductByBarcode(newBarcode, event.plant);
+    if (!newProduct) {
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'That barcode is not in Product Master — check it and try again.' });
     }
-    const newItemName = productRows[0].name;
+    const newItemName = newProduct.name ?? newBarcode;
+    const newBarcodeExact = newProduct.barcode ?? newBarcode;
 
     // Opportunistic link: if this barcode is ALSO genuinely expected on this same order, tie the
-    // event to that row so its own shortfall can be credited afterwards. Not required otherwise.
+    // new entry to that row so its own shortfall can be credited afterwards. Not required otherwise.
     const { rows: sameOrderItemRows } = await client.query(
       `SELECT id FROM order_scan_items WHERE session_id = $1 AND LOWER(barcode) = LOWER($2) FOR UPDATE`,
-      [event.session_id, newBarcode],
+      [event.session_id, newBarcodeExact],
     );
     const newScanItemId = sameOrderItemRows[0]?.id ?? null;
 
-    const qty = Number(event.total_qty ?? 0);
-    if (qty > 0 && event.plant) {
-      await reverseLiveScanStock(client, event.plant, event.barcode, 0, qty, event.session_id);
-      await applyLiveScanStock(client, event.plant, newBarcode, 0, qty, event.session_id);
+    // The boxes must still be in stock to move — the same rule voiding a scan has.
+    const { rows: stockRows } = await client.query(
+      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
+      [event.barcode, event.plant],
+    );
+    const currentStock = Number(stockRows[0]?.inStock ?? 0);
+    if (currentStock < qty) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        message: `Can't exchange ${qty} — only ${currentStock} of "${event.item_name ?? event.barcode}" are still in stock; the rest are already used elsewhere.`,
+      });
     }
 
-    const { rows: updatedRows } = await client.query(
-      `UPDATE order_scan_events SET barcode = $1, item_name = $2, scan_item_id = $3 WHERE id = $4 RETURNING *`,
-      [newBarcode, newItemName, newScanItemId, eventId],
-    );
+    await reverseLiveScanStock(client, event.plant, event.barcode, 0, qty, event.session_id);
+    await applyLiveScanStock(client, event.plant, newBarcodeExact, 0, qty, event.session_id);
 
-    const { userCode, userName } = { userCode: (req.user as any)?.userCode ?? null, userName: (req.user as any)?.name ?? null };
+    const userCode = (req.user as any)?.userCode ?? null;
+    const userName = (req.user as any)?.name ?? null;
+    const who = userName ?? userCode ?? 'Someone';
+    const stamp = (d: Date | string) => new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const exchangeNote = `Exchanged to ${newItemName} (${qty} of ${total}) by ${who} on ${stamp(new Date())}${reason ? ` — ${reason}` : ''}`;
+    const split = (q: number, ipp: number) => ({ pallets: ipp > 0 ? Math.floor(q / ipp) : 0, loose: ipp > 0 ? q % ipp : q });
+    const oldIpp = Number(event.items_per_pallet ?? 0);
 
-    // Audit trail: the original scan's identity is rewritten in place above, so leave a voided
-    // copy under the OLD product — Scan History then shows what it was changed from, and the old
-    // product no longer counts it (voided rows are excluded from totals and stock).
-    await client.query(
+    // The OLD entry: kept, with its original time and scanner.
+    let exchangedOutId: number;
+    if (qty === total) {
+      await client.query(
+        `UPDATE order_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
+        [userCode, exchangeNote, eventId],
+      );
+      exchangedOutId = eventId;
+    } else {
+      const keep = split(total - qty, oldIpp);
+      await client.query(
+        `UPDATE order_scan_events SET total_qty = $1, pallets = $2, loose_qty = $3 WHERE id = $4`,
+        [total - qty, keep.pallets, keep.loose, eventId],
+      );
+      const out = split(qty, oldIpp);
+      const { rows: outRows } = await client.query(
+        `INSERT INTO order_scan_events
+           (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty, items_per_pallet,
+            is_extra, stv, scanned_by_code, scanned_by_name, scanned_at,
+            voided, voided_by_code, voided_at, void_reason, credit_source_event_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,true,$13,NOW(),$14,$15)
+         RETURNING id`,
+        [event.session_id, event.scan_item_id, event.barcode, event.item_name, out.pallets, out.loose, qty, oldIpp,
+         event.stv, event.scanned_by_code, event.scanned_by_name, event.scanned_at, userCode, exchangeNote, eventId],
+      );
+      exchangedOutId = outRows[0].id;
+    }
+
+    // The NEW entry: the new product, stamped now, by the person exchanging.
+    const state = await getPlantStateCode(client, event.plant ?? '');
+    const newIpp = resolvePalletSizeOrQty(newProduct ?? null, state, qty);
+    const inSplit = split(qty, newIpp);
+    const { rows: newRows } = await client.query(
       `INSERT INTO order_scan_events
-         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-          items_per_pallet, is_extra, stv, scanned_by_code, scanned_by_name, scanned_at,
-          voided, voided_by_code, voided_at, void_reason)
-       SELECT session_id, $6::int, $2, $3, pallets, loose_qty, total_qty,
-              items_per_pallet, true, stv, scanned_by_code, scanned_by_name, scanned_at,
-              true, $4, NOW(), $5
-         FROM order_scan_events WHERE id = $1`,
-      [eventId, event.barcode, event.item_name, userCode,
-       `Product changed via Adjust Exchange Extra: ${event.item_name ?? event.barcode} → ${newItemName ?? newBarcode}`,
-       event.scan_item_id ?? null],
+         (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty, items_per_pallet,
+          is_extra, stv, scanned_by_code, scanned_by_name, scanned_at, credit_source_event_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,NOW(),$12)
+       RETURNING *`,
+      [event.session_id, newScanItemId, newBarcodeExact, newItemName, inSplit.pallets, inSplit.loose, qty, newIpp,
+       event.stv, userCode,
+       `${who} (Exchanged from ${event.item_name ?? event.barcode} — scan of ${stamp(event.scanned_at)} by ${event.scanned_by_name ?? event.scanned_by_code ?? '—'})`,
+       exchangedOutId],
     );
 
     await storage.logActivity({
       pageName: 'Adjust Exchange Extra', action: 'update', entityType: 'order_scan_event', entityId: eventId,
-      details: `Exchanged Extra scan from barcode ${event.barcode} to ${newBarcode} (${newItemName ?? ''}) — qty ${qty}`,
-      userCode, userName,
+      details: `Exchanged ${qty} of ${total} boxes from ${event.item_name ?? event.barcode} (${event.barcode}) to ${newItemName} (${newBarcodeExact})${reason ? ` — ${reason}` : ''}`,
+      userCode: userCode ?? undefined, userName: userName ?? undefined,
     });
 
     await client.query('COMMIT');
     broadcastOrderImportUpdate();
-    res.json({ event: updatedRows[0] });
+    res.json({ exchanged: qty, from: event.item_name ?? event.barcode, to: newItemName, event: newRows[0] });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error exchanging product:', error);

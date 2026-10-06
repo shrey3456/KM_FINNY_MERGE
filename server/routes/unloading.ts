@@ -126,6 +126,8 @@ async function withProgress(session: any) {
     return {
       ...item, expected, scanned, remaining: Math.max(0, expected - scanned),
       itemsPerPallet,
+      // Inventory Sr. No from Product Master (products.new_sr) — what the item lists are numbered by.
+      srNo: (product as any)?.newSr ?? null,
       // Real Product Master pallet size (0 when GJ/MP PLT is blank) — itemsPerPallet falls back to
       // the line quantity, so this is what tells the page a size was never set.
       realPackSize: getPalletSize(product ?? null, state),

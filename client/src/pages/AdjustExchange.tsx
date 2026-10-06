@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+﻿import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/use-auth";
@@ -84,7 +84,9 @@ const fmtPallets = (n: number) => (Math.round(n * 100) / 100).toLocaleString(und
 
 export default function AdjustExchange() {
   const [rootRef, pageWidth] = usePageWidth();
-  const useCards = pageWidth > 0 ? pageWidth < TABLE_MIN_PAGE_WIDTH : false;
+  // Always the table (list) view — the card grid is no longer used on this page, at any width; a narrow
+  // screen scrolls the table sideways instead. (GroupedExtraCards stays in the file, unused.)
+  const useCards = false;
   const { user } = useAuth();
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -201,9 +203,23 @@ export default function AdjustExchange() {
   // search Loading's own Add Extra uses (GET /api/products?all=true, filtered client-side).
   const [exchangeTarget, setExchangeTarget] = useState<ExtraRow | null>(null);
   const [exchangeSearch, setExchangeSearch] = useState("");
+  // Step 2 of the exchange: the product picked, how many boxes, and an optional reason.
+  const [exchangePick, setExchangePick] = useState<{ id: number; barcode: string; name: string | null } | null>(null);
+  const [exchangeQty, setExchangeQty] = useState(0);
+  const [exchangeReason, setExchangeReason] = useState("");
+  function closeExchangeDialog() {
+    setExchangeTarget(null);
+    setExchangeSearch("");
+    setExchangePick(null);
+    setExchangeQty(0);
+    setExchangeReason("");
+  }
   function openExchangeDialog(row: ExtraRow) {
     setExchangeTarget(row);
     setExchangeSearch("");
+    setExchangePick(null);
+    setExchangeQty(row.totalQty);
+    setExchangeReason("");
   }
   const allProductsQuery = useQuery<Array<{ id: number; barcode: string; name: string | null }>>({
     queryKey: ["/api/products", "all", "adjust-exchange"],
@@ -220,17 +236,34 @@ export default function AdjustExchange() {
       .slice(0, 30);
   })();
 
-  const exchangeMutation = useMutation({
-    mutationFn: async (payload: { eventId: number; newBarcode: string }) => {
-      const res = await apiRequest("POST", `/api/order-scan/exchange/events/${payload.eventId}/reassign-product`, { newBarcode: payload.newBarcode });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to exchange this product");
+  // Current stock of BOTH products at this plant — shown in the confirmation, with what it becomes.
+  const exchangeStockQuery = useQuery<Array<{ bkey: string; inStock: number; extraQty: number }>>({
+    queryKey: ["/api/order-scan/exchange/stock", exchangeTarget?.plant, exchangeTarget?.barcode, exchangePick?.barcode],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/order-scan/exchange/stock?plant=${encodeURIComponent(exchangeTarget!.plant)}&barcodes=${encodeURIComponent(`${exchangeTarget!.barcode},${exchangePick!.barcode}`)}`);
+      if (!res.ok) throw new Error("Failed to read stock");
       return res.json();
     },
-    onSuccess: () => {
-      toast({ title: "Product exchanged", description: "This Extra now counts toward the item you picked; its stock moved with it." });
+    enabled: !!exchangeTarget && !!exchangePick,
+  });
+  const stockOf = (barcode: string) =>
+    (exchangeStockQuery.data ?? []).find((s) => s.bkey === barcode.trim().toLowerCase()) ?? { inStock: 0, extraQty: 0 };
+
+  const exchangeMutation = useMutation({
+    mutationFn: async (payload: { eventId: number; newBarcode: string; qty: number; reason: string }) => {
+      const res = await apiRequest("POST", `/api/order-scan/exchange/events/${payload.eventId}/reassign-product`, {
+        newBarcode: payload.newBarcode, qty: payload.qty, reason: payload.reason || undefined,
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to exchange this product");
+      return res.json() as Promise<{ exchanged: number; from: string; to: string }>;
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Product exchanged",
+        description: `${data.exchanged} boxes: ${data.from} → ${data.to}. Stock moved with them, and Scan History now shows the exchange.`,
+      });
       invalidateExchangeQueries();
-      setExchangeTarget(null);
-      setExchangeSearch("");
+      closeExchangeDialog();
       // Collapse whatever product was open, so the move does not leave another one expanded.
       setExpandedGroupKey(null);
     },
@@ -331,6 +364,25 @@ export default function AdjustExchange() {
     // moved to another product) comes off it straight away. Full history stays in the expanded rows.
     { id: "extraQty", header: "Extra Qty", align: "center", width: 90, sortable: true, accessor: (r) => r.totalAvailable, cellClassName: "tabular-nums text-amber-600 font-medium" },
     { id: "extraPallets", header: "Extra Plt", align: "right", width: 90, sortable: true, accessor: (r) => Math.round(r.availablePallets * 100) / 100, render: (r) => fmtPallets(r.availablePallets), cellClassName: "tabular-nums text-amber-600" },
+    {
+      // The same two buttons the product has when opened — on the row itself, for the oldest entry
+      // that still has something left to give.
+      id: "actions", header: "", width: 270, fixedWidth: true, sortable: false, totalable: false, preventRowClick: true,
+      render: (r) => {
+        const entry = bestEntryFor(r.key);
+        if (!canWrite || !entry) return null;
+        return (
+          <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" className="h-7 gap-1 bg-[#001d6e] px-2 text-xs hover:bg-[#001552]" onClick={() => openPanel(entry)}>
+              <ArrowLeftRight className="h-3.5 w-3.5" /> Close earlier shortfall
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs text-[#001d6e] hover:bg-[#001d6e]/5" onClick={() => openExchangeDialog(entry)}>
+              <Repeat className="h-3.5 w-3.5" /> Change product
+            </Button>
+          </div>
+        );
+      },
+    },
     {
       // "Status": whether every scan of this product on this date is still a normal, active
       // Extra ("Active"), or whether at least one of them has been Voided ("Includes voided") —
@@ -708,14 +760,16 @@ export default function AdjustExchange() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Exchange — relabel this Extra to a different item on the same order ────────────── */}
-      <Dialog open={!!exchangeTarget} onOpenChange={(o) => { if (!o) { setExchangeTarget(null); setExchangeSearch(""); } }}>
+      {/* ── Exchange — some or all of this Extra turns out to be a different product ───────────
+          Step 1: search and pick the right product. Step 2: a confirmation (how many boxes, an
+          optional reason, exactly what will change) — nothing is saved until "Confirm exchange". */}
+      <Dialog open={!!exchangeTarget} onOpenChange={(o) => { if (!o) closeExchangeDialog(); }}>
         <DialogContent className="max-h-[90vh] w-[calc(100vw-1rem)] max-w-lg overflow-y-auto sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-[#001d6e]"><Repeat className="h-5 w-5" /> Exchange this Extra's product</DialogTitle>
+            <DialogTitle className="flex items-center gap-2 text-[#001d6e]"><Repeat className="h-5 w-5" /> {exchangePick ? "Confirm exchange" : "Exchange this Extra's product"}</DialogTitle>
           </DialogHeader>
 
-          {exchangeTarget && (
+          {exchangeTarget && !exchangePick && (
             <div className="space-y-4">
               <div className="rounded-lg border border-[#001d6e]/20 bg-[#001d6e]/5 p-3 text-sm">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-[#001d6e]">Currently scanned as</p>
@@ -747,9 +801,8 @@ export default function AdjustExchange() {
                     {exchangeCandidates.map((p) => (
                       <button
                         key={p.id} type="button"
-                        disabled={exchangeMutation.isPending}
-                        onClick={() => exchangeMutation.mutate({ eventId: exchangeTarget.id, newBarcode: p.barcode })}
-                        className="flex w-full items-center gap-2.5 rounded-lg border border-gray-200 p-2.5 text-left text-sm hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 disabled:opacity-50"
+                        onClick={() => { setExchangePick(p); setExchangeQty(exchangeTarget.totalQty); setExchangeReason(""); }}
+                        className="flex w-full items-center gap-2.5 rounded-lg border border-gray-200 p-2.5 text-left text-sm hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5"
                       >
                         <ProductPhoto name={p.name} className="h-9 w-9 shrink-0 rounded border bg-white object-contain" />
                         <span className="min-w-0 flex-1">
@@ -765,8 +818,107 @@ export default function AdjustExchange() {
             </div>
           )}
 
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setExchangeTarget(null); setExchangeSearch(""); }} disabled={exchangeMutation.isPending}>Cancel</Button>
+          {exchangeTarget && exchangePick && (() => {
+            const total = exchangeTarget.totalQty;
+            const qty = Math.max(0, Math.min(total, exchangeQty));
+            const partial = qty > 0 && qty < total;
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 text-sm">
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-2.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">From (scanned as)</p>
+                    <p className="mt-0.5 font-semibold leading-snug text-gray-900">{exchangeTarget.itemName || "—"}</p>
+                    <p className="font-mono text-[11px] text-gray-500">{exchangeTarget.barcode}</p>
+                  </div>
+                  <ArrowRight className="h-5 w-5 text-[#001d6e]" />
+                  <div className="rounded-lg border border-[#001d6e]/30 bg-[#001d6e]/5 p-2.5">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-[#001d6e]">To (what it really is)</p>
+                    <p className="mt-0.5 font-semibold leading-snug text-gray-900">{exchangePick.name || "—"}</p>
+                    <p className="font-mono text-[11px] text-gray-500">{exchangePick.barcode}</p>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">How many boxes are the wrong product? <span className="font-normal text-gray-400">(this scan has {total})</span></Label>
+                    {qty !== total && (
+                      <button type="button" className="text-xs font-medium text-[#001d6e] underline" onClick={() => setExchangeQty(total)}>All {total}</button>
+                    )}
+                  </div>
+                  <Input
+                    type="number" min={1} max={total} value={exchangeQty || ""}
+                    onChange={(e) => setExchangeQty(Math.max(0, Math.min(total, Math.floor(Number(e.target.value) || 0))))}
+                    placeholder={`1 to ${total}`}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-sm">Reason <span className="font-normal text-gray-400">(optional)</span></Label>
+                  <Input value={exchangeReason} onChange={(e) => setExchangeReason(e.target.value)} placeholder="e.g. wrong barcode scanned" maxLength={300} />
+                </div>
+
+                {/* Current stock of both products at this plant, and what it becomes. */}
+                {(() => {
+                  const from = stockOf(exchangeTarget.barcode);
+                  const to = stockOf(exchangePick.barcode);
+                  const cell = (label: string, name: string, now: number, after: number, extraNow: number, extraAfter: number) => (
+                    <div className="rounded-lg border border-gray-200 bg-white p-2.5">
+                      <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-gray-500" title={name}>{label} · {name}</p>
+                      {exchangeStockQuery.isLoading ? (
+                        <p className="mt-1 text-xs text-gray-400">Loading stock…</p>
+                      ) : (
+                        <>
+                          <p className="mt-1 text-sm text-gray-600">In stock now <strong className="text-gray-900">{now}</strong> → <strong className="text-[#001d6e]">{after}</strong></p>
+                          <p className="text-xs text-gray-500">of which Extra <strong>{extraNow}</strong> → <strong>{extraAfter}</strong></p>
+                        </>
+                      )}
+                    </div>
+                  );
+                  return (
+                    <div className="space-y-1.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Stock at {exchangeTarget.plant}</p>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {cell("From", exchangeTarget.itemName || exchangeTarget.barcode, from.inStock, Math.max(0, from.inStock - qty), from.extraQty, Math.max(0, from.extraQty - qty))}
+                        {cell("To", exchangePick.name || exchangePick.barcode, to.inStock, to.inStock + qty, to.extraQty, to.extraQty + qty)}
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        Both stock changes are dated to this CSV's order date, <strong className="text-gray-700">{fmtDate(exchangeTarget.orderDate)}</strong> — the same day the boxes were originally received — not to today.
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900">
+                  <p className="mb-1 font-semibold">What will happen</p>
+                  <ul className="list-disc space-y-0.5 pl-4">
+                    <li><strong>{exchangeTarget.itemName || exchangeTarget.barcode}</strong> stock goes down by <strong>{qty}</strong>; <strong>{exchangePick.name || exchangePick.barcode}</strong> stock goes up by <strong>{qty}</strong>.</li>
+                    <li>Scan History keeps the original scan — {partial ? <>reduced to <strong>{total - qty}</strong>, with the <strong>{qty}</strong> that left it shown as Exchanged</> : <>marked <strong>Exchanged</strong></>} — with its original time and scanner.</li>
+                    <li>A <strong>new entry</strong> for {exchangePick.name || exchangePick.barcode} ({qty} boxes) is added at the <strong>current time</strong>, under your name.</li>
+                    <li>Voiding that new entry later undoes the exchange.</li>
+                  </ul>
+                </div>
+              </div>
+            );
+          })()}
+
+          <DialogFooter className="gap-2">
+            {exchangePick ? (
+              <>
+                <Button variant="outline" onClick={() => setExchangePick(null)} disabled={exchangeMutation.isPending}>Back</Button>
+                <Button
+                  className="bg-[#001d6e] hover:bg-[#001552]"
+                  disabled={!exchangeTarget || exchangeQty < 1 || exchangeQty > (exchangeTarget?.totalQty ?? 0) || exchangeMutation.isPending}
+                  onClick={() => exchangeTarget && exchangeMutation.mutate({
+                    eventId: exchangeTarget.id, newBarcode: exchangePick.barcode, qty: exchangeQty, reason: exchangeReason.trim(),
+                  })}
+                >
+                  {exchangeMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Confirm exchange
+                </Button>
+              </>
+            ) : (
+              <Button variant="outline" onClick={closeExchangeDialog}>Cancel</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { Fragment, useEffect, useRef, useState } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import { useSidebarContext } from "@/lib/sidebarContext";
@@ -21,6 +21,7 @@ import { PlantBadge } from "@/components/PlantBadge";
 import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { DateInput } from "@/components/ui/date-input";
 import { Label } from "@/components/ui/label";
@@ -59,6 +60,8 @@ type SessionListItem = {
 type SessionItem = {
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null; quantity: number;
   expected: number; scanned: number; remaining: number; itemsPerPallet: number; isComplete: boolean;
+  // Product Master's Sr. No (products.new_sr) — what the item lists show instead of 1, 2, 3.
+  srNo?: string | null;
   // The pallet size actually set in Product Master for this plant's state (GJ PLT / MP PLT),
   // 0 when nobody set one. itemsPerPallet falls back to the line quantity, so only this field
   // can answer "is a real pallet size set?".
@@ -130,11 +133,11 @@ const LAST_SESSION_KEY = "unloading_active_session_id";
 // Remembers the totals / Scan Items split width, per browser, so a dragged layout survives a
 // refresh.
 const LEFT_COL_WIDTH_KEY = "unloading_left_col_width";
-const LEFT_COL_MIN = 320;
-const LEFT_COL_MAX = 760;
+const LEFT_COL_MIN = 200;
+const LEFT_COL_MAX = 1000;
 // Below this the four totals tiles stop fitting on one row and fold to 2x2 — a 4-digit box
 // count at text-2xl plus its "1136.79 plt" line needs ~115px of tile to itself.
-const TOTALS_ONE_ROW_MIN = 460;
+const TOTALS_ONE_ROW_MIN = 340;
 
 // Remembers the operator's STV pick across page navigations — same reasoning and key pattern as
 // Order Scan's OS_STV_STORAGE_KEY (client/src/pages/Scanning/Scan.tsx): this page unmounts on
@@ -272,7 +275,33 @@ export default function Unloading() {
   ];
   // The server already applied these (see sessionFiltersJson) — the rows that arrive are the
   // filtered ones, and re-filtering here would only risk the two disagreeing.
-  const sessions = allSessions;
+  // The Available tab holds two kinds of batch — ones already being scanned ("active") and ones
+  // still waiting to start — shown as two sections in the SAME list: in-progress first.
+  const isInProgressSession = (s: { scanStatus: string }) => s.scanStatus === "active";
+  const sessions = statusTab === "available"
+    ? [...allSessions.filter(isInProgressSession), ...allSessions.filter((s) => !isInProgressSession(s))]
+    : allSessions;
+  const inProgressCount = sessions.filter(isInProgressSession).length;
+  // A thin heading shown before the first batch of each section (Available tab only).
+  const sectionHeading = (index: number, colSpan?: number) => {
+    if (statusTab !== "available" || sessions.length === 0) return null;
+    const section = isInProgressSession(sessions[index]) ? "active" : "waiting";
+    const previous = index > 0 ? (isInProgressSession(sessions[index - 1]) ? "active" : "waiting") : null;
+    if (previous === section) return null;
+    const label = section === "active" ? "In progress" : "Ready to start";
+    const count = section === "active" ? inProgressCount : sessions.length - inProgressCount;
+    const heading = (
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 rounded-full ${section === "active" ? "bg-emerald-500" : "bg-amber-400"}`} />
+        <span className="text-xs font-bold uppercase tracking-wide text-gray-600">{label}</span>
+        <span className="text-xs text-gray-400">({count})</span>
+        <span className="h-px flex-1 bg-gray-200" />
+      </div>
+    );
+    return colSpan
+      ? <tr key={`section-${section}`}><td colSpan={colSpan} className="border-b border-gray-200 bg-gray-50 px-3 py-1.5">{heading}</td></tr>
+      : <div key={`section-${section}`} className="col-span-full pt-1">{heading}</div>;
+  };
   const setSessionCondition = (id: string, condition: FilterCondition) =>
     setSessionColumnConditions((prev) => ({ ...prev, [id]: condition }));
   const clearSessionCondition = (id: string) =>
@@ -372,6 +401,9 @@ export default function Unloading() {
       return Number.isFinite(saved) ? Math.min(LEFT_COL_MAX, Math.max(LEFT_COL_MIN, saved)) : 520;
     } catch { return 520; }
   });
+  // Small screens only: which of the Total / Scanner panels is showing (tap a tab to show it, tap it
+  // again to hide it). Starts on the scanner so a barcode gun / the camera works straight away.
+  const [smallPanel, setSmallPanel] = useState<"total" | "scanner" | null>("scanner");
   const [isDesktop, setIsDesktop] = useState(false);
   useEffect(() => {
     const mq = window.matchMedia("(min-width: 1024px)");
@@ -522,6 +554,8 @@ export default function Unloading() {
   // toggles an inline input, and the array is pre-filtered here rather than via DataTable's own
   // (always-open, non-collapsible) enableSearch prop.
   const [itemSearchOpen, setItemSearchOpen] = useState(false);
+  // Vehicle list search bar on smaller screens (always visible from large screens up).
+  const [vehicleSearchOpen, setVehicleSearchOpen] = useState(false);
   const [itemSearchText, setItemSearchText] = useState("");
   const itemSearchRef = useOutsideClick(itemSearchOpen, () => setItemSearchOpen(false));
 
@@ -547,7 +581,7 @@ export default function Unloading() {
       }
       if (itemSearchText.trim()) {
         const q = itemSearchText.trim().toLowerCase();
-        const hay = `${item.itemName ?? ""} ${item.barcode ?? ""} ${item.sapCode ?? ""}`.toLowerCase();
+        const hay = `${item.srNo ?? ""} ${item.itemName ?? ""} ${item.barcode ?? ""} ${item.sapCode ?? ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -1098,20 +1132,13 @@ export default function Unloading() {
 
   const itemColumns: DataTableColumn<SessionItem>[] = [
     {
-      id: "pct",
-      header: <CircularProgress percent={unloadPct} size={20} strokeWidth={2} color="#38bdf8" textColor="#ffffff" />,
-      // align-top: the Item column next to this one stacks 2-3 lines, which sets this row's
-      // height — align-middle's default then centered the ring in all that leftover space,
-      // reading as too much empty space around a tiny ring. Top-aligning it (matching where the
-      // Item column's own text starts) puts the slack below the ring instead of around it.
-      // px-0.5 on both header and cell: the ring is only 20px wide, so DataTable's default
-      // horizontal cell padding was costing more width than the ring itself.
-      width: 24, minWidth: 24, align: "center",
-      headerClassName: "px-0.5", cellClassName: "align-top px-0.5", sortable: false, totalable: false,
-      render: (row) => {
-        const pct = row.expected > 0 ? Math.min(100, Math.round((row.scanned / row.expected) * 100)) : (row.scanned > 0 ? 100 : 0);
-        return <CircularProgress percent={pct} size={20} strokeWidth={2} />;
-      },
+      // Product Master's Sr. No (not a running 1, 2, 3) — the number this item has everywhere else.
+      id: "srNo",
+      header: "Sr No",
+      accessor: (row) => row.srNo ?? "",
+      width: 64, minWidth: 52, align: "center", fixedWidth: true, sortable: true, totalable: false,
+      headerClassName: "px-1", cellClassName: "align-middle px-1 font-mono text-xs font-bold text-gray-600",
+      render: (row) => row.srNo || <span className="text-gray-300">—</span>,
     },
     {
       id: "item",
@@ -1196,54 +1223,73 @@ export default function Unloading() {
 
   const itemRowClassName = (row: SessionItem) => {
     const extra = Math.max(0, row.scanned - row.expected);
-    if (extra > 0) return "bg-orange-50/40";
-    if (row.isComplete) return "bg-emerald-50/40";
-    if (row.scanned > 0) return "bg-amber-50/30";
+    // Whole-row tints, same idea as the Loading items table: amber when there is an Extra, green
+    // when everything expected has been received, pale yellow while only part is in.
+    if (extra > 0) return "bg-amber-50 hover:bg-amber-50/80";
+    if (row.isComplete) return "bg-emerald-50 hover:bg-emerald-50/80";
+    if (row.scanned > 0) return "bg-yellow-50/70 hover:bg-yellow-50";
     return undefined;
   };
 
   function renderItemHistoryPanel(row: SessionItem) {
     const rowEvents = (itemHistoryQuery.data?.events ?? []).filter((ev) => normalize(ev.barcode) === normalize(row.barcode));
     return (
-      <div className="bg-gray-50 px-4 py-3">
+      <div className="bg-gray-50 px-3 py-3 sm:px-4">
         {itemHistoryQuery.isLoading ? (
           <SectionSkeleton lines={2} />
         ) : rowEvents.length === 0 ? (
           <div className="py-2 text-xs text-gray-400">No scan history for this item yet.</div>
         ) : (
-          <table className="w-full text-[11px]">
-            <thead>
-              <tr className="text-left text-gray-500">
-                <th className="py-1 pr-3">Qty</th>
-                <th className="py-1 pr-3">By</th>
-                <th className="py-1 pr-3">At</th>
-                <th className="py-1 pr-3">Status</th>
-                {canWrite && <th className="py-1 pr-3"></th>}
-              </tr>
-            </thead>
-            <tbody>
-              {rowEvents.map((ev) => (
-                <tr key={ev.id} className={ev.voided ? "opacity-50" : ""}>
-                  <td className="py-1 pr-3 tabular-nums">
-                    {ev.totalQty}{ev.isExtra ? " (extra)" : ""}{ev.isCredit ? " (credit)" : ""}
-                    {ev.stv && <span className="ml-1 text-gray-400">· {ev.stv}</span>}
-                  </td>
-                  <td className="py-1 pr-3">{ev.scannedByName ?? ev.scannedByCode ?? "—"}</td>
-                  <td className="py-1 pr-3">{new Date(ev.scannedAt).toLocaleString()}</td>
-                  <td className="py-1 pr-3">{ev.voided ? <span className="text-red-500">Voided</span> : <span className="text-green-600">OK</span>}</td>
-                  {canWrite && (
-                    <td className="py-1 pr-3">
-                      {!ev.voided && (
-                        <button className="text-red-500 hover:underline" onClick={() => voidMutation.mutate(ev.id)} disabled={voidMutation.isPending}>
-                          Void
-                        </button>
+          // Same shape as the Loading page's item history: date & time, who, quantity, dispatch
+          // directory, status — with a tinted header row and every column name written out in full.
+          <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+            <table className="w-full min-w-[540px] text-xs">
+              <thead>
+                <tr className="bg-gray-100 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+                  <th className="whitespace-nowrap px-3 py-2">Date &amp; Time</th>
+                  <th className="whitespace-nowrap px-3 py-2">Scanned By</th>
+                  <th className="whitespace-nowrap px-3 py-2 text-center">Qty</th>
+                  <th className="whitespace-nowrap px-3 py-2">Dispatch Directory</th>
+                  <th className="whitespace-nowrap px-3 py-2">Status</th>
+                  {canWrite && <th className="w-16 px-3 py-2"></th>}
+                </tr>
+              </thead>
+              <tbody>
+                {rowEvents.map((ev, i) => (
+                  <tr key={ev.id} className={`border-t border-gray-100 ${i % 2 === 1 ? "bg-slate-50" : "bg-white"} ${ev.voided ? "opacity-50" : ""}`}>
+                    <td className="whitespace-nowrap px-3 py-2 text-gray-600">{new Date(ev.scannedAt).toLocaleString()}</td>
+                    <td className="whitespace-nowrap px-3 py-2 text-gray-700">{ev.scannedByName ?? ev.scannedByCode ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">
+                      <span className={`inline-flex min-w-[2rem] items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold tabular-nums ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
+                        {ev.isExtra ? "+" : ""}{ev.totalQty}
+                      </span>
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-gray-600">{ev.stv ?? "—"}</td>
+                    <td className="whitespace-nowrap px-3 py-2">
+                      {ev.voided ? (
+                        <span className="font-semibold text-red-500">Voided</span>
+                      ) : ev.isCredit ? (
+                        <span className="font-semibold text-blue-700">Credit</span>
+                      ) : ev.isExtra ? (
+                        <span className="font-semibold text-amber-700">Extra</span>
+                      ) : (
+                        <span className="font-semibold text-emerald-600">OK</span>
                       )}
                     </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    {canWrite && (
+                      <td className="px-3 py-2 text-right">
+                        {!ev.voided && (
+                          <button className="text-xs font-medium text-red-500 hover:underline" onClick={() => voidMutation.mutate(ev.id)} disabled={voidMutation.isPending}>
+                            Void
+                          </button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     );
@@ -1259,18 +1305,25 @@ export default function Unloading() {
   // Navigation only, never a write action — a read-only user needs this exactly as much as
   // anyone else to get off the scan view.
   const scanBackButton = (
-    <Button variant="outline" size="sm" onClick={backToList}>&larr; Back</Button>
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-7 border-[#001d6e]/40 bg-[#001d6e]/5 px-2.5 text-xs font-semibold text-[#001d6e] hover:bg-[#001d6e]/10 hover:text-[#001d6e] sm:h-8"
+      onClick={backToList}
+    >
+      &larr; Back
+    </Button>
   );
 
   // While a vehicle is on the bay it IS the page — so the truck and its number take the title
   // slot where "Unloading" sits on the list, and this carries the rest of the identity beside it.
   const scanVehicleTitle = scanSession ? (
-    <div className="flex shrink-0 items-center gap-1.5 text-[#001d6e]">
+    <div className="flex min-w-0 shrink items-center gap-1.5 text-[#001d6e]">
       {/* Same icon as "Unload Operations" in the sidebar, in the navy badge every page uses. */}
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e]">
-        <PackageOpen className="h-5 w-5 text-white" />
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] sm:h-9 sm:w-9">
+        <PackageOpen className="h-4 w-4 text-white sm:h-5 sm:w-5" />
       </span>
-      <span className="text-2xl font-bold">{scanSession.vehicleNumber}</span>
+      <span className="truncate text-lg font-bold sm:text-xl">{scanSession.vehicleNumber}</span>
     </div>
   ) : null;
 
@@ -1289,7 +1342,7 @@ export default function Unloading() {
   // own it just read as one stray dropdown floating in whitespace.
   const scanStvControl = canWrite && !locked ? (
     <div className="flex items-center gap-2">
-      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Dispatch Directory</span>
+      <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-gray-400 2xl:inline">Dispatch Directory</span>
       {stvs.length > 0 ? (
           // Same dropdown rotated or not. It used to swap to a native <select> when rotated, because
           // rotating the popup in place mis-positioned it — but a native select's list is drawn by
@@ -1299,7 +1352,7 @@ export default function Unloading() {
             {/* Amber when nothing is picked — scanning is blocked until it is (see
                 handleItemBarcode's "Select an STV before scanning" toast), so the control has to
                 read as needing attention, not as an idle dropdown. */}
-            <SelectTrigger className={`h-7 w-36 justify-center rounded-full text-center text-xs font-semibold ${
+            <SelectTrigger className={`h-6 w-28 justify-center rounded-full text-center text-[11px] font-semibold sm:h-7 sm:w-36 sm:text-xs ${
               selectedStv
                 ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e] ring-1 ring-[#001d6e]/20"
                 : "border-amber-400 bg-amber-50 text-amber-800 ring-1 ring-amber-300"
@@ -1342,7 +1395,7 @@ export default function Unloading() {
       {canWrite && scanSession.scanStatus !== "completed" && (
         <Button
           size="sm"
-          className="h-8 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
+          className="h-7 rounded-full bg-emerald-600 px-2.5 text-[11px] text-white hover:bg-emerald-700 sm:h-8 sm:px-3 sm:text-xs"
           onClick={() => setShowCompleteConfirm(true)}
         >
           Complete
@@ -1390,11 +1443,15 @@ export default function Unloading() {
             same compact single-row header the Loading page's own scan view uses — instead of
             a navigation action sitting alone on a line above it. */}
         {!rotated && view === "scan" && scanSession && (
-          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 shadow-sm">
-            {scanBackButton}
+          <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm sm:mb-4 sm:px-4">
             {scanVehicleTitle}
             {scanVehicleSummary}
-            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
+            {/* Status, Dispatch Directory and Complete, then Back at the far right corner. Left-aligned
+                (and wrapping) only when the screen is too narrow to hold them in one row. */}
+            <div className="flex flex-wrap items-center gap-1.5 lg:ml-auto lg:justify-end">
+              {scanStatusActions}
+              {scanBackButton}
+            </div>
           </div>
         )}
 
@@ -1422,26 +1479,35 @@ export default function Unloading() {
               </div>
             )}
           <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
-            <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
-              {/* Header only ABOVE this card (rotated included) — a second copy inside it pushed
-                  the table down and read as a duplicate. Plant is a column filter now, so the
-                  old All Plants dropdown that used to sit here is gone. */}
-              <div>
+            {/* Filters — vehicle number search (debounced) + Order Date, both supported
+                server-side (see /unloading/sessions), plus the shared column filters. */}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-2 border-b border-gray-100 px-4 py-3 sm:px-5">
+              <div className="mr-2 shrink-0">
                 <div className="text-lg font-bold text-[#001d6e]">Vehicles</div>
                 <div className="text-xs text-gray-400">{total} part(s)</div>
               </div>
-            </div>
-
-            {/* Filters — vehicle number search (debounced) + Order Date, both supported
-                server-side (see /unloading/sessions), plus the shared column filters. */}
-            <div className="flex flex-wrap items-center gap-2 px-4 sm:px-5 py-3 border-b border-gray-100">
-              <div className="relative w-full sm:w-56">
+              {/* Smaller screens: just a search button — it opens the bar and the same button hides it
+                  again (clearing what was typed). From large screens up the bar is always shown. */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (vehicleSearchOpen) { setVehicleSearchOpen(false); setSessionVehicleFilter(""); setOffset(0); }
+                  else setVehicleSearchOpen(true);
+                }}
+                title={vehicleSearchOpen ? "Close search" : "Search vehicle number"}
+                className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border xl:hidden ${
+                  vehicleSearchOpen ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-200 bg-white text-gray-500 hover:bg-gray-50"
+                }`}
+              >
+                <Search className="h-4 w-4" />
+              </button>
+              <div className={`relative w-full sm:w-56 xl:block ${vehicleSearchOpen || sessionVehicleFilter ? "block" : "hidden"}`}>
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
                 <Input
                   value={sessionVehicleFilter}
                   onChange={(e) => { setSessionVehicleFilter(e.target.value); setOffset(0); }}
                   placeholder="Search vehicle number…"
-                  className="h-9 pl-8 pr-7 text-sm"
+                  className="h-8 pl-8 pr-7 text-sm"
                 />
                 {sessionVehicleFilter && (
                   <button
@@ -1457,19 +1523,48 @@ export default function Unloading() {
                 value={sessionDateFilter}
                 onChange={(v) => { setSessionDateFilter(v); setOffset(0); }}
                 clearable={false}
-                className="h-9 text-sm"
+                className="h-8 text-sm"
               />
-              {sessionDateFilter !== getLocalISODate() && (
-                <Button
-                  size="sm" variant="ghost" className="h-9 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
-                  onClick={() => { setSessionDateFilter(getLocalISODate()); setOffset(0); }}
-                >
-                  Today
-                </Button>
-              )}
+              {/* Quick dates — one small button that opens a list (Today / Tomorrow / Yesterday), the
+                  same way the Loading page's date filter does. It names the day when the picked
+                  date is one of the three, so it stays one compact control in the row. */}
+              {(() => {
+                const dayValue = (offset: number) => { const t = new Date(); t.setDate(t.getDate() + offset); return getLocalISODate(t); };
+                const quick = [
+                  { label: "Today", value: dayValue(0) },
+                  { label: "Tomorrow", value: dayValue(1) },
+                  { label: "Yesterday", value: dayValue(-1) },
+                ];
+                const current = quick.find((q) => q.value === sessionDateFilter);
+                return (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className={`h-8 gap-1 px-2.5 text-xs font-semibold ${current ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "text-gray-600"}`}
+                      >
+                        {current ? current.label : "Quick date"}
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start" className="w-40">
+                      {quick.map((q) => (
+                        <DropdownMenuItem
+                          key={q.label}
+                          onClick={() => { setSessionDateFilter(q.value); setOffset(0); }}
+                          className={sessionDateFilter === q.value ? "font-semibold text-[#001d6e]" : ""}
+                        >
+                          {q.label}
+                        </DropdownMenuItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                );
+              })()}
               {sessionDateFilter && (
                 <Button
-                  size="sm" variant="ghost" className="h-9 w-9 p-0 text-gray-400 hover:text-red-500"
+                  size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
                   onClick={() => { setSessionDateFilter(""); setOffset(0); }}
                 >
                   <X className="h-3.5 w-3.5" />
@@ -1481,7 +1576,7 @@ export default function Unloading() {
                 conditions={sessionColumnConditions}
                 onApply={setSessionCondition}
                 onClear={clearSessionCondition}
-                className="h-9 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                className="h-8 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
               />
               {Object.entries(sessionColumnConditions).map(([id, condition]) => (
                 <ColumnFilterChipView
@@ -1495,21 +1590,18 @@ export default function Unloading() {
               ))}
               {Object.keys(sessionColumnConditions).length > 1 && (
                 <Button
-                  size="sm" variant="ghost" className="h-9 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
+                  size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e]"
                   onClick={() => setSessionColumnConditions({})}
                 >
                   Clear all
                 </Button>
               )}
-            </div>
-
             {/* Status tab strip — Available/History (no separate Active or Completed tab: an
                 in-progress batch stays in Available, just marked green in the Status column
                 so it's easy to spot — see statusBadge's "active" case below — and History
                 already includes every completed batch, same reasoning Order Management's own
                 Completed tab didn't need duplicating there either). */}
-            <div className="px-4 sm:px-5 py-3 border-b border-gray-100">
-              <div className="flex gap-1 flex-wrap">
+              <div className="ml-auto flex flex-wrap gap-1">
                 {(
                   [
                     { key: "available", label: "Available", count: statusCounts.available + statusCounts.active },
@@ -1522,13 +1614,13 @@ export default function Unloading() {
                     onClick={() => selectStatusTab(tab.key)}
                     className={
                       statusTab === tab.key
-                        ? "rounded-full bg-[#001d6e] text-white px-4 py-1.5 text-sm font-medium"
-                        : "rounded-full bg-white border border-gray-200 text-gray-600 px-4 py-1.5 text-sm font-medium hover:bg-gray-50"
+                        ? "rounded-full bg-[#001d6e] text-white px-3 py-1 text-xs font-medium"
+                        : "rounded-full bg-white border border-gray-200 text-gray-600 px-3 py-1 text-xs font-medium hover:bg-gray-50"
                     }
                   >
                     {tab.label}
                     {tab.count > 0 && (
-                      <span className={`ml-1.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1 text-xs font-semibold ${
+                      <span className={`ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full px-1 text-[10px] font-semibold ${
                         statusTab === tab.key ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
                       }`}>
                         {tab.count}
@@ -1616,8 +1708,8 @@ export default function Unloading() {
               </div>
             ) : (
               <>
-              <div className="grid grid-cols-1 gap-3 p-3 md:grid-cols-2 2xl:grid-cols-3 xl:hidden">
-                {sessions.map((s) => {
+              <div className="grid grid-cols-1 gap-2 p-2.5 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 xl:hidden">
+                {sessions.map((s, idx) => {
                   const isLockedSession = s.scanStatus === "available" && !s.canActivate;
                   const openLabel = s.scanStatus === "completed"
                     ? "View"
@@ -1625,8 +1717,9 @@ export default function Unloading() {
                       ? "Continue"
                       : s.canActivate ? "Start" : "Locked";
                   return (
+                    <Fragment key={s.id}>
+                    {sectionHeading(idx)}
                     <article
-                      key={s.id}
                       role="button"
                       tabIndex={0}
                       aria-label={`${openLabel} unload operation for ${s.vehicleNumber}`}
@@ -1638,51 +1731,56 @@ export default function Unloading() {
                           if (!isLockedSession) openSession(s);
                         }
                       }}
-                      className={`rounded-lg border px-3 py-3.5 shadow-sm transition-colors ${
+                      // Same card shape as the Load Operations list: a coloured strip on the left
+                      // (green = active, amber = ready to start, grey = locked/completed) and
+                      // compact spacing.
+                      className={`overflow-hidden rounded-lg border border-l-4 px-2.5 py-2 shadow-sm transition-colors ${
                         isLockedSession
-                          ? "cursor-not-allowed border-gray-200 bg-gray-50 opacity-65"
+                          ? "cursor-not-allowed border-gray-200 border-l-gray-300 bg-gray-50 opacity-65"
                           : s.scanStatus === "active"
-                            ? "cursor-pointer border-emerald-200 bg-emerald-50/40 hover:border-emerald-300"
-                            : "cursor-pointer border-gray-200 bg-white hover:border-[#001d6e]/30 hover:bg-[#001d6e]/[0.02]"
+                            ? "cursor-pointer border-emerald-200 border-l-emerald-500 bg-emerald-50/40 hover:border-emerald-300"
+                            : s.scanStatus === "completed"
+                              ? "cursor-pointer border-gray-200 border-l-gray-400 bg-white hover:bg-gray-50"
+                              : "cursor-pointer border-gray-200 border-l-amber-400 bg-white hover:border-[#001d6e]/30 hover:bg-[#001d6e]/[0.02]"
                       }`}
                     >
-                      <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-lg font-bold leading-none text-gray-900">#{s.id}</span>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-base font-bold leading-none text-gray-900">#{s.id}</span>
                             <PlantBadge plant={s.plant} />
                             {s.partsCount > 1 && (
-                              <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[11px] font-semibold text-indigo-700">
+                              <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
                                 Batch {s.partIndex}/{s.partsCount}
                               </span>
                             )}
                           </div>
-                          <p className="mt-2 truncate text-base font-medium text-gray-600">{s.vehicleNumber}</p>
-                          {s.rtoNumber && <p className="mt-0.5 truncate text-xs text-gray-400">RTO: {s.rtoNumber}</p>}
+                          <p className="mt-0.5 truncate text-[13px] font-medium text-gray-600">{s.vehicleNumber}</p>
+                          {s.rtoNumber && <p className="truncate text-[11px] text-gray-400">RTO: {s.rtoNumber}</p>}
                         </div>
                         <div className="shrink-0">{statusBadge(s.scanStatus, s.canActivate)}</div>
                       </div>
 
-                      <div className="mt-4 flex items-center gap-2">
+                      <div className="mt-1.5 flex items-center gap-1.5">
                         <span
                           title="Received quantity"
-                          className="inline-flex h-11 min-w-11 items-center justify-center rounded-full bg-amber-50 px-2 text-sm font-semibold tabular-nums text-amber-700"
+                          className="inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-amber-50 px-2 text-[11px] font-semibold tabular-nums text-amber-700"
                         >
                           {String(s.scannedQty).padStart(2, "0")}
                         </span>
                         <button
                           type="button"
-                          className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100"
                           title="Reports"
                           aria-label={`View reports for ${s.vehicleNumber}`}
                           onClick={(e) => { e.stopPropagation(); openReports(s); }}
                         >
-                          <FileBarChart className="h-5 w-5" />
+                          <FileBarChart className="h-3.5 w-3.5" />
                         </button>
                         {canWrite && (
                           <button
                             type="button"
-                            className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-red-50 text-red-500 hover:bg-red-100"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-red-50 text-red-500 hover:bg-red-100"
                             title="Delete"
                             aria-label={`Delete unload operation for ${s.vehicleNumber}`}
                             onClick={(e) => {
@@ -1691,39 +1789,43 @@ export default function Unloading() {
                               setDeleteMode("replace");
                             }}
                           >
-                            <Trash2 className="h-5 w-5" />
+                            <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         )}
                         <button
                           type="button"
-                          className="ml-auto inline-flex h-11 w-11 items-center justify-center rounded-full bg-[#001d6e] text-white hover:bg-[#00154b] disabled:cursor-not-allowed disabled:bg-gray-300"
+                          className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-full bg-[#001d6e] text-white hover:bg-[#00154b] disabled:cursor-not-allowed disabled:bg-gray-300"
                           title={openLabel}
                           aria-label={`${openLabel} unload operation for ${s.vehicleNumber}`}
                           disabled={isLockedSession}
                           onClick={(e) => { e.stopPropagation(); openSession(s); }}
                         >
-                          <ChevronRight className="h-5 w-5" />
+                          <ChevronRight className="h-3.5 w-3.5" />
                         </button>
                       </div>
 
-                      <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-gray-100 pt-2 text-xs text-gray-500">
-                        <span>Order <span className="font-semibold text-gray-700">{s.orderDate}</span></span>
-                        <span className="text-gray-300">|</span>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
+                        <span className="flex items-center whitespace-nowrap">
+                          <Calendar className="mr-1 h-3 w-3 shrink-0" />
+                          Ord <span className="ml-1 font-medium text-gray-700">{s.orderDate}</span>
+                        </span>
+                        <span className="text-gray-300">·</span>
                         <span>Expected <span className="font-semibold tabular-nums text-gray-700">{s.expectedQty}</span></span>
                         {s.extraQty > 0 && (
                           <>
-                            <span className="text-gray-300">|</span>
+                            <span className="text-gray-300">·</span>
                             <span className="font-medium text-amber-600">{s.extraQty} extra</span>
                           </>
                         )}
                         {statusTab === "history" && formatDuration(s.scanActivatedAt, s.scanCompletedAt) && (
                           <>
-                            <span className="text-gray-300">|</span>
+                            <span className="text-gray-300">·</span>
                             <span>{formatDuration(s.scanActivatedAt, s.scanCompletedAt)}</span>
                           </>
                         )}
                       </div>
                     </article>
+                    </Fragment>
                   );
                 })}
               </div>
@@ -1751,8 +1853,9 @@ export default function Unloading() {
                   <tbody>
                     {sessions.map((s, i) => {
                       return (
+                        <Fragment key={s.id}>
+                          {sectionHeading(i, 9)}
                           <tr
-                            key={s.id}
                             onClick={() => openSession(s)}
                             className={`transition-colors hover:bg-[#001d6e]/[0.06] ${s.scanStatus === "available" && !s.canActivate ? "cursor-not-allowed opacity-60" : "cursor-pointer"} ${s.scanStatus === "active" ? "bg-emerald-50/60" : i % 2 !== 0 ? "bg-slate-50" : "bg-white"}`}
                           >
@@ -1809,6 +1912,7 @@ export default function Unloading() {
                               </div>
                             </td>
                           </tr>
+                        </Fragment>
                       );
                     })}
                   </tbody>
@@ -1896,11 +2000,11 @@ export default function Unloading() {
                 the same pieces fold into a card here instead — same single merged row, so the
                 two orientations read the same. ── */}
             {rotated && (
-              <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
+              <div className="flex flex-nowrap items-center gap-2 overflow-hidden rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
                 {scanBackButton}
                 {scanVehicleTitle}
                 {scanVehicleSummary}
-                <div className="ml-auto flex flex-wrap items-center justify-end gap-2">{scanStatusActions}</div>
+                <div className="ml-auto flex shrink-0 flex-nowrap items-center justify-end gap-1.5">{scanStatusActions}</div>
               </div>
             )}
 
@@ -1918,17 +2022,45 @@ export default function Unloading() {
                   // nothing. Full-width stacked cards give both the room they need.
                   style={
                     !bigView && isDesktop && canWrite && !locked
-                      ? { gridTemplateColumns: `${leftColWidth}px 10px 1fr` }
+                      // The left panel keeps the width you dragged it to, but never takes more than 60% of
+                      // the page (and never less than 240px) — so the scanner next to it always stays
+                      // visible, even when the sidebar is open or the window is narrow.
+                      ? { gridTemplateColumns: `minmax(240px, min(${leftColWidth}px, 60%)) 10px minmax(0, 1fr)` }
                       : undefined
                   }
                 >
+                  {/* Small screens: Total and Scanner are tabs, like on the Loading page — tap one
+                      to show its panel, tap it again to hide it. The scanner stays mounted while
+                      hidden, so the camera and the barcode box keep working. */}
+                  {bigView && !rotated && (
+                    <div className="order-0 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSmallPanel((cur) => (cur === "total" ? null : "total"))}
+                        aria-pressed={smallPanel === "total"}
+                        className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${smallPanel === "total" ? "border-[#001d6e] bg-[#001d6e] text-white" : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}
+                      >
+                        Total
+                      </button>
+                      {canWrite && !locked && (
+                        <button
+                          type="button"
+                          onClick={() => setSmallPanel((cur) => (cur === "scanner" ? null : "scanner"))}
+                          aria-pressed={smallPanel === "scanner"}
+                          className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${smallPanel === "scanner" ? "border-[#001d6e] bg-[#001d6e] text-white" : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}
+                        >
+                          Scanner
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {/* ── Batch totals — the left column of the split (where Vehicle Details used to
                       be, now summarised up in the header). Same card Order Scan builds for its
                       own Order Totals (client/src/pages/Scanning/Scan.tsx): a percent on the
                       right, four dotted stat boxes on one row, and a progress bar with
                       received/remaining under it. Each box filters the item table below to
                       its own rows; Total is the "show everything" box, so it doubles as Clear. ── */}
-                  <div className={`flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm ${bigView ? "order-2" : ""}`}>
+                  <div className={`flex min-w-0 flex-col gap-1.5 rounded-xl border bg-white p-2.5 shadow-sm ${bigView ? "order-2" : ""} ${bigView && !rotated && smallPanel !== "total" ? "hidden" : ""}`}>
                     {/* No title — the four labelled tiles under it already say what this is. */}
                     <div className="flex items-baseline justify-end gap-2">
                       {itemTotals.expected <= 0 ? (
@@ -1968,18 +2100,18 @@ export default function Unloading() {
                             onClick={() => setItemStatusFilter(isActive ? "" : s.key)}
                             aria-pressed={isActive}
                             title={s.key ? `Show only ${s.label.toLowerCase()} items` : "Show all items"}
-                            className={`rounded-xl border px-2.5 py-1 text-center transition-colors ${
+                            className={`min-w-0 rounded-xl border px-1.5 py-1 text-center transition-colors ${
                               isActive
                                 ? "border-[#001d6e] bg-[#001d6e]/[0.06] ring-1 ring-[#001d6e]/30"
                                 : "border-gray-100 bg-gray-50/70 hover:bg-gray-100"
                             }`}
                           >
-                            <div className="flex items-center justify-center gap-1.5">
-                              <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-                              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
+                            <div className="flex items-center justify-center gap-1">
+                              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${s.dot}`} />
+                              <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-gray-500">{s.label}</p>
                             </div>
-                            <p className={`text-2xl font-bold leading-tight ${s.text}`}>{s.value}</p>
-                            <p className={`text-lg font-bold ${s.text}`}>{s.plt.toFixed(2)} plt</p>
+                            <p className={`text-xl font-bold leading-tight tabular-nums ${s.text}`}>{s.value}</p>
+                            <p className={`whitespace-nowrap text-[11px] font-semibold tabular-nums ${s.text}`}>{s.plt.toFixed(2)} plt</p>
                           </button>
                         );
                       })}
@@ -2016,7 +2148,7 @@ export default function Unloading() {
                     // order-1 stacked: the barcode box is what the operator reaches for first, so
                     // it leads and the totals read as the result underneath. Side by side the
                     // source order already puts totals on the left, so no ordering is needed.
-                    <div className={`rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden ${bigView ? "order-1" : ""}`}>
+                    <div className={`min-w-0 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden ${bigView ? "order-1" : ""} ${bigView && !rotated && smallPanel !== "scanner" ? "hidden" : ""}`}>
                       <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
                         <ScanLine className="h-4 w-4 text-[#001d6e]" />
                         <span className="text-sm font-semibold text-gray-900">Scan Items</span>
@@ -2078,11 +2210,20 @@ export default function Unloading() {
                       as Order Scan (osSearchOpen in Scan.tsx). ref wraps this header AND the
                       DataTable below it, not just the header, so clicking a row isn't misread as
                       "outside" and doesn't clear the search (same bug class fixed before). */}
-                  <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2.5 bg-white">
-                    <span className="text-xs font-medium text-gray-500">{filteredItems.length} item{filteredItems.length === 1 ? "" : "s"}</span>
+                  <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 bg-gray-50/70 px-4 py-3">
+                    <Package className="h-4 w-4 shrink-0 text-[#001d6e]" />
+                    <span className="text-sm font-semibold text-gray-900">Items on this Vehicle</span>
+                    <span className="text-xs text-gray-400">
+                      {itemStatusFilter || itemSearchText ? `(${filteredItems.length} of ${(detail?.items ?? []).length})` : `(${filteredItems.length})`}
+                    </span>
+                    {/* A toggle: the first press opens the search bar, the next one closes it (and
+                        clears what was typed, the same as clicking outside does). */}
                     <button
-                      onClick={() => setItemSearchOpen(true)}
-                      title="Search items"
+                      onClick={() => {
+                        if (itemSearchOpen) { setItemSearchOpen(false); setItemSearchText(""); }
+                        else setItemSearchOpen(true);
+                      }}
+                      title={itemSearchOpen ? "Close search" : "Search items"}
                       className={`ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${
                         itemSearchOpen
                           ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]"
@@ -2116,7 +2257,8 @@ export default function Unloading() {
                   <div className={rotated ? "" : bigView ? "hidden" : "hidden xl:block"}>
                   <DataTable<SessionItem>
                     containerClassName="rounded-none border-0"
-                    headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-sm"
+                    headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-[11px] font-semibold uppercase tracking-wide sm:text-xs"
+                    enableZebraStripes
                     columns={itemColumns}
                     data={filteredItems}
                     getRowId={(row) => String(row.id)}
@@ -2134,55 +2276,63 @@ export default function Unloading() {
                     maxHeight={bigView ? (quarterTurn ? "62vw" : "62vh") : undefined}
                   />
                   </div>
-                  {/* Two cards per row from sm (tablet) up — a single full-width card per row left most of
-                      a tablet's width empty. Phones stay one per row. */}
-                  <div className={rotated ? "hidden" : bigView ? "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2" : "grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 xl:hidden"}>
+                  {/* Small screens: the same one-line-per-item list the Load Operations page uses —
+                      name, barcode · SAP, then Expected / Received / Extra / Remaining as plain text,
+                      the status at the right and a coloured strip on the left. No photo. Tapping a
+                      row opens that item's scan history underneath, same as the table. */}
+                  <div className={rotated ? "hidden" : bigView ? "space-y-1.5 p-3" : "space-y-1.5 p-3 xl:hidden"}>
                     {filteredItems.length === 0 ? (
-                      <p className="col-span-full py-8 text-center text-sm text-gray-400">{itemSearchText || itemStatusFilter ? "No items match your filters." : "No items on this batch."}</p>
+                      <p className="py-8 text-center text-sm text-gray-400">{itemSearchText || itemStatusFilter ? "No items match your filters." : "No items on this batch."}</p>
                     ) : filteredItems.map((item) => {
                       const extra = Math.max(0, item.scanned - item.expected);
                       const pct = item.expected > 0 ? Math.min(100, Math.round((Math.min(item.scanned, item.expected) / item.expected) * 100)) : (item.scanned > 0 ? 100 : 0);
-                      const tone = item.isComplete
-                        ? { bar: "bg-emerald-500", edge: "border-l-emerald-500", badge: "bg-emerald-50 text-emerald-700 ring-emerald-200", label: "Received" }
-                        : item.scanned > 0
-                          ? { bar: "bg-amber-500", edge: "border-l-amber-400", badge: "bg-amber-50 text-amber-700 ring-amber-200", label: "Partial" }
-                          : { bar: "bg-gray-300", edge: "border-l-gray-300", badge: "bg-gray-50 text-gray-500 ring-gray-200", label: "Pending" };
-                      const stat = (label: string, value: number, valueClass: string) => (
-                        <div className="rounded-lg bg-gray-50 px-2 py-1.5 text-center">
-                          <p className="text-[10px] font-medium uppercase tracking-wide text-gray-500">{label}</p>
-                          <p className={`text-base font-bold tabular-nums leading-tight ${valueClass}`}>{value}</p>
-                        </div>
-                      );
+                      // The whole row takes the colour: green = fully received, amber = has an Extra,
+                      // pale yellow = part received, white = nothing yet.
+                      const tone = extra > 0
+                        ? { row: "border-amber-200 bg-amber-50", edge: "border-l-amber-500", bar: "bg-amber-500", badge: "bg-amber-100 text-amber-800 ring-amber-300", label: "Extra" }
+                        : item.isComplete
+                          ? { row: "border-emerald-200 bg-emerald-50", edge: "border-l-emerald-500", bar: "bg-emerald-500", badge: "bg-emerald-100 text-emerald-800 ring-emerald-300", label: "Received" }
+                          : item.scanned > 0
+                            ? { row: "border-yellow-200 bg-yellow-50/70", edge: "border-l-yellow-400", bar: "bg-yellow-400", badge: "bg-yellow-100 text-yellow-800 ring-yellow-300", label: "Partial" }
+                            : { row: "border-gray-200 bg-white", edge: "border-l-gray-300", bar: "bg-gray-300", badge: "bg-gray-100 text-gray-500 ring-gray-200", label: "Pending" };
+                      const expanded = expandedItemId === item.id;
                       return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => setExpandedItemId((cur) => (cur === item.id ? null : item.id))}
-                          className={`flex h-full w-full flex-col rounded-xl border border-l-4 border-gray-200 bg-white p-3 text-left shadow-sm transition hover:shadow-md active:scale-[0.99] ${tone.edge}`}
-                        >
-                          <div className="flex min-w-0 items-start justify-between gap-2">
-                            <p className="min-w-0 break-words text-sm font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</p>
-                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${tone.badge}`}>{tone.label}</span>
-                          </div>
-                          <p className="mt-0.5 break-all font-mono text-[11px] text-gray-400">{item.barcode ?? "—"}{item.sapCode ? ` · SAP ${item.sapCode}` : ""}</p>
-
-                          <div className="mt-3 grid grid-cols-4 gap-1.5">
-                            {stat("Expected", item.expected, "text-gray-900")}
-                            {stat("Received", item.scanned, "text-emerald-600")}
-                            {stat("Remaining", item.remaining, "text-[#001d6e]")}
-                            {stat("Extra", extra, extra > 0 ? "text-amber-600" : "text-gray-300")}
-                          </div>
-
-                          <div className="mt-auto pt-3">
-                            <div className="h-1.5 overflow-hidden rounded-full bg-gray-100">
-                              <div className={`h-full rounded-full ${tone.bar}`} style={{ width: `${pct}%` }} />
+                        <div key={item.id}>
+                          <button
+                            type="button"
+                            onClick={() => setExpandedItemId((cur) => (cur === item.id ? null : item.id))}
+                            className={`block w-full rounded-lg border border-l-4 px-3 py-2 text-left shadow-sm transition hover:shadow ${tone.row} ${tone.edge}`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="break-words text-sm font-semibold leading-snug text-gray-900">
+                                  {item.srNo && <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 align-middle font-mono text-[10px] font-bold text-gray-600 ring-1 ring-inset ring-gray-200">{item.srNo}</span>}
+                                  {item.itemName ?? "—"}
+                                </p>
+                                <p className="truncate font-mono text-[11px] text-gray-400">
+                                  {item.barcode ?? "—"}{item.sapCode ? ` · SAP ${item.sapCode}` : ""}{(item.itemsPerPallet ?? 0) > 0 ? ` · ${item.itemsPerPallet}/plt` : ""}
+                                </p>
+                              </div>
+                              <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${tone.badge}`}>{tone.label}</span>
                             </div>
-                            <div className="mt-1.5 flex items-center justify-between text-[11px] text-gray-500">
-                              <span className="font-semibold">{pct}%</span>
-                              {(item.itemsPerPallet ?? 0) > 0 && <span className="font-medium">{item.itemsPerPallet} per pallet</span>}
+                            {/* Four equal columns — the same four numbers sit in the same place on every
+                                row, so the list reads like a table. Extra shows a dash when there is none. */}
+                            <div className="mt-2 grid grid-cols-4 divide-x divide-black/10 rounded-md bg-white/70 py-1 ring-1 ring-black/5">
+                              {([
+                                { label: "Expected", value: item.expected, cls: "text-gray-900" },
+                                { label: "Received", value: item.scanned, cls: "text-emerald-600" },
+                                { label: "Remaining", value: item.remaining, cls: "text-[#001d6e]" },
+                                { label: "Extra", value: extra > 0 ? `+${extra}` : "—", cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
+                              ] as const).map((cell) => (
+                                <div key={cell.label} className="min-w-0 px-1 text-center">
+                                  <p className="truncate text-[9px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</p>
+                                  <p className={`text-base font-bold leading-tight tabular-nums ${cell.cls}`}>{cell.value}</p>
+                                </div>
+                              ))}
                             </div>
-                          </div>
-                        </button>
+                          </button>
+                          {expanded && !!item.barcode && <div className="mt-1 rounded-xl border border-gray-200 bg-white">{renderItemHistoryPanel(item)}</div>}
+                        </div>
                       );
                     })}
                   </div>
