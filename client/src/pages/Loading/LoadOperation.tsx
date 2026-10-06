@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+﻿import { Fragment, useEffect, useRef, useState } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
@@ -764,8 +764,8 @@ export default function LoadOperation() {
   // Item cards (two per row) replace the items table on tablets: from sm up in natural portrait
   // (an upright tablet is bigView here, at any width), and sm..xl in landscape where xl+ is
   // desktop. A manually rotated kiosk keeps the table.
-  const itemCardsShow = isPortrait ? "sm:block" : "sm:max-xl:block";
-  const itemTableHide = isPortrait ? "sm:hidden" : "sm:max-xl:hidden";
+  const itemCardsShow = isPortrait ? "block" : "hidden max-xl:block";
+  const itemTableHide = isPortrait ? "hidden" : "max-xl:hidden";
   const kioskTableMaxHeight = bigView ? (quarterTurn ? "62vw" : "62vh") : "65vh";
   // With an order open, the summary is fixed and the items grid owns the remaining viewport.
   // This keeps a long item list from scrolling the summary out of view.
@@ -3486,7 +3486,7 @@ export default function LoadOperation() {
                         Slips page, not from the scanning screen. */}
                     {lockedStv && (
                       <div className="flex items-center gap-1">
-                        <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Dispatch Directory</span>
+                        <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-gray-400 sm:inline">Dispatch Directory</span>
                         <span className="inline-flex h-6 items-center gap-1 rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-3 text-xs font-semibold text-[#001d6e]">
                           <Lock className="h-3 w-3" />{lockedStv}
                         </span>
@@ -3518,7 +3518,7 @@ export default function LoadOperation() {
                     {canComplete && !locked && (
                       <Button
                         size="sm"
-                        className="h-7 rounded-full bg-emerald-600 px-3 text-xs text-white hover:bg-emerald-700"
+                        className="h-6 rounded-full bg-emerald-600 px-2 text-[11px] text-white hover:bg-emerald-700 sm:h-7 sm:px-3 sm:text-xs"
                         disabled={completeMutation.isPending}
                         onClick={() => setConfirmCompleteOpen(true)}
                       >
@@ -3533,7 +3533,7 @@ export default function LoadOperation() {
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-7 rounded-full border-amber-300 px-3 text-xs text-amber-700 hover:bg-amber-50"
+                        className="h-6 rounded-full border-amber-300 px-2 text-[11px] text-amber-700 hover:bg-amber-50 sm:h-7 sm:px-3 sm:text-xs"
                         disabled={pauseLoadMutation.isPending}
                         title="Step away from this load — anyone with write access can then claim it"
                         onClick={() => pauseLoadMutation.mutate()}
@@ -3545,7 +3545,7 @@ export default function LoadOperation() {
                     {canWrite && !locked && isLoadPaused && (
                       <Button
                         size="sm"
-                        className="h-7 rounded-full bg-amber-500 px-3 text-xs text-white hover:bg-amber-600"
+                        className="h-6 rounded-full bg-amber-500 px-2 text-[11px] text-white hover:bg-amber-600 sm:h-7 sm:px-3 sm:text-xs"
                         disabled={claimLoadMutation.isPending}
                         onClick={() => setClaimTarget(slip.orderNumber)}
                       >
@@ -3557,7 +3557,7 @@ export default function LoadOperation() {
                       size="sm"
                       variant="outline"
                       onClick={backToList}
-                      className="h-8 px-3.5 text-xs font-semibold border-[#001d6e]/30 text-[#001d6e] hover:bg-[#001d6e]/5"
+                      className="h-6 px-2 text-[11px] font-semibold border-[#001d6e]/30 text-[#001d6e] hover:bg-[#001d6e]/5 sm:h-8 sm:px-3.5 sm:text-xs"
                     >
                       Back to List
                     </Button>
@@ -3931,14 +3931,14 @@ export default function LoadOperation() {
                     Loose
                   </button>
                 </div>
-                <div className="ml-auto flex items-center gap-2">
+                <div className="flex w-full flex-wrap items-center justify-start gap-1.5 sm:ml-auto sm:w-auto sm:gap-2">
                   {allComplete && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">ALL LOADED</span>}
                   {canScanThisLoad && (
                     <button
                       type="button"
                       onClick={() => setExtraDialogOpen(true)}
                       title="Add an item not on this slip, or more than what's remaining"
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-2.5 py-1.5 text-xs font-bold text-white shadow-sm transition-colors hover:bg-amber-600"
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-2 py-1 text-[11px] font-bold text-white shadow-sm sm:px-2.5 sm:py-1.5 sm:text-xs transition-colors hover:bg-amber-600"
                     >
                       <PackagePlus className="h-3.5 w-3.5" /> Add Extra
                     </button>
@@ -3946,7 +3946,7 @@ export default function LoadOperation() {
                   {items.length > 0 && (
                     <button
                       onClick={downloadLoadingItemsCsv}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 shadow-sm sm:px-2.5 sm:py-1.5 sm:text-xs hover:bg-gray-50"
                     >
                       <Download className="h-3.5 w-3.5" /> Export
                     </button>
@@ -3956,7 +3956,7 @@ export default function LoadOperation() {
                     conditions={itemColumnConditions}
                     onApply={setItemCondition}
                     onClear={clearItemCondition}
-                    className="h-8 shrink-0 gap-1 rounded-xl border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+                    className="h-7 shrink-0 gap-1 rounded-xl border-dashed border-[#001d6e]/40 bg-white text-[11px] font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e] sm:h-8 sm:text-xs"
                   />
                   <CollapsibleSearch value={itemSearchText} onChange={setItemSearchText} placeholder="Search items…" />
                 </div>
@@ -3985,7 +3985,7 @@ export default function LoadOperation() {
                   to a row, since the 5-column table leaves a tablet cramped. Phones keep the
                   table above, desktop keeps it too, and so does the rotated kiosk view. */}
               {!rotated && (
-                <div className={`hidden min-h-0 overflow-y-auto p-3 ${itemCardsShow}`} style={panelsOpen ? { maxHeight: openSlipTableMaxHeight } : undefined}>
+                <div className={`min-h-0 overflow-y-auto p-3 ${itemCardsShow}`} style={panelsOpen ? { maxHeight: openSlipTableMaxHeight } : undefined}>
                   {filteredItems.length === 0 ? (
                     <p className="py-8 text-center text-sm text-gray-400">{itemStatusFilter || itemSearchText || itemConditionList.length > 0 ? "No items match this filter." : "No items on this slip."}</p>
                   ) : (
@@ -4426,93 +4426,126 @@ export default function LoadOperation() {
           to look it up by here (ProformaItem carries no productId), so it goes by name, same as
           the box-image-by-name/image-by-name fallback ProductPhoto already supports. */}
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
-        <DialogContent className="overflow-x-hidden overflow-y-auto p-0 sm:max-w-lg">
+        <DialogContent className="overflow-x-hidden overflow-y-auto p-0 sm:max-w-3xl">
           <div className="flex flex-col sm:flex-row">
-            <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-48 sm:border-b-0 sm:border-r">
+            <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-5 sm:w-64 sm:border-b-0 sm:border-r">
               <ProductPhoto
                 name={pending?.item?.itemName ?? pending?.barcode}
-                className="max-h-48 w-full object-contain"
+                className="max-h-64 w-full object-contain"
                 zoomable
               />
             </div>
-            <div className="min-w-0 flex-1 p-6">
-          <DialogHeader>
-            <DialogTitle>{pending?.item?.itemName ?? pending?.barcode ?? "Confirm scan"}</DialogTitle>
-            <DialogDescription>
-              Expected {pending?.item?.expected} · Loaded {pending?.item?.loaded} · Remaining {pending?.item?.remaining}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            {pending?.item && !((pending.item.realPackSize ?? 0) > 0) && (
-              <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">
-                Pallet size is not set for this item in Product Master — enter the quantity you are loading.
-              </p>
-            )}
-            {pending?.item && (pending.item.realPackSize ?? 0) > 0 && pending.item.itemsPerPallet > 0 ? (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <Label className="text-xs">Pallets</Label>
-                  <Input
-                    value={dialogPalletsInput}
-                    onChange={(e) => {
-                      setDialogPalletsInput(e.target.value);
-                      const p = parseFloat(e.target.value);
-                      if (Number.isFinite(p)) setDialogQty(Math.round(p * (pending.item!.itemsPerPallet)));
-                    }}
-                    type="number" step="0.01" min="0"
-                  />
+            <div className="min-w-0 flex-1 space-y-4 p-6">
+              <DialogHeader className="space-y-1 text-left">
+                <DialogTitle className="pr-6 text-xl font-bold leading-snug text-gray-900">
+                  {pending?.item?.itemName ?? pending?.barcode ?? "Confirm scan"}
+                </DialogTitle>
+                <DialogDescription className="font-mono text-xs text-gray-400">{pending?.barcode}</DialogDescription>
+              </DialogHeader>
+
+              {/* Where this item stands, as three tiles instead of one run-on line. */}
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="rounded-lg bg-gray-50 px-2 py-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Expected</p>
+                  <p className="text-2xl font-bold tabular-nums text-gray-800">{pending?.item?.expected ?? 0}</p>
                 </div>
-                <div>
-                  <Label className="text-xs">Qty</Label>
-                  <Input
-                    value={dialogQty === 0 ? "" : dialogQty}
-                    onChange={(e) => {
-                      const q = parseInt(e.target.value, 10) || 0;
-                      setDialogQty(q);
-                      setDialogPalletsInput((q / pending.item!.itemsPerPallet).toFixed(2));
-                    }}
-                    type="number" min="0"
-                  />
+                <div className="rounded-lg bg-emerald-50 px-2 py-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">Loaded</p>
+                  <p className="text-2xl font-bold tabular-nums text-emerald-700">{pending?.item?.loaded ?? 0}</p>
+                </div>
+                <div className="rounded-lg bg-blue-50 px-2 py-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-[#001d6e]">Remaining</p>
+                  <p className="text-2xl font-bold tabular-nums text-[#001d6e]">{pending?.item?.remaining ?? 0}</p>
                 </div>
               </div>
-            ) : (
-              <div>
-                <Label className="text-xs">Qty</Label>
-                <Input value={dialogQty === 0 ? "" : dialogQty} onChange={(e) => setDialogQty(parseInt(e.target.value, 10) || 0)} type="number" min="1" autoFocus />
+
+              {pending?.item && !((pending.item.realPackSize ?? 0) > 0) && (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">
+                  Pallet size is not set for this item in Product Master � enter the quantity you are loading.
+                </p>
+              )}
+
+              {/* Qty and Pallets as -/+ steppers (same as the Add Extra dialog) so each box has room
+                  and one tap changes it by one box / one pallet. */}
+              {(() => {
+                const ipp = pending?.item?.itemsPerPallet ?? 0;
+                const hasPallets = !!pending?.item && (pending.item.realPackSize ?? 0) > 0 && ipp > 0;
+                const setBoth = (q: number) => {
+                  const next = Math.max(0, q);
+                  setDialogQty(next);
+                  if (hasPallets) setDialogPalletsInput((next / ipp).toFixed(2));
+                };
+                const stepBtn = "h-14 w-14 shrink-0 rounded-none text-3xl font-bold text-gray-500 hover:bg-gray-100";
+                return (
+                  <div className={`grid gap-3 ${hasPallets ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+                    <div className="space-y-1">
+                      <Label className="text-sm">Qty (boxes)</Label>
+                      <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
+                        <Button type="button" variant="ghost" className={`${stepBtn} border-r border-gray-200`} onClick={() => setBoth(dialogQty - 1)} aria-label="Decrease quantity">-</Button>
+                        <Input
+                          value={dialogQty === 0 ? "" : dialogQty}
+                          onChange={(e) => setBoth(parseInt(e.target.value, 10) || 0)}
+                          type="number" min="0" autoFocus
+                          className="h-12 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-xl font-bold focus-visible:ring-0 focus-visible:ring-offset-0"
+                        />
+                        <Button type="button" variant="ghost" className={`${stepBtn} border-l border-gray-200`} onClick={() => setBoth(dialogQty + 1)} aria-label="Increase quantity">+</Button>
+                      </div>
+                    </div>
+                    {hasPallets && (
+                      <div className="space-y-1">
+                        <Label className="text-sm">Pallets <span className="font-normal text-gray-400">� {ipp}/pallet</span></Label>
+                        <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-violet-300 bg-white focus-within:border-violet-500">
+                          <Button type="button" variant="ghost" className={`${stepBtn} border-r border-violet-100 text-violet-700 hover:bg-violet-50`} onClick={() => setBoth(dialogQty - ipp)} aria-label="Decrease pallets">-</Button>
+                          <Input
+                            value={dialogPalletsInput}
+                            onChange={(e) => {
+                              setDialogPalletsInput(e.target.value);
+                              const p = parseFloat(e.target.value);
+                              if (Number.isFinite(p)) setDialogQty(Math.round(p * ipp));
+                            }}
+                            type="number" step="0.01" min="0"
+                            className="h-14 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-2xl font-bold text-violet-700 focus-visible:ring-0 focus-visible:ring-offset-0"
+                          />
+                          <Button type="button" variant="ghost" className={`${stepBtn} border-l border-violet-100 text-violet-700 hover:bg-violet-50`} onClick={() => setBoth(dialogQty + ipp)} aria-label="Increase pallets">+</Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {pending && (pending.item?.stockAvailable ?? Infinity) < dialogQty && (
+                <p className="text-sm text-red-600">Only {pending.item?.stockAvailable} in stock � reduce the quantity.</p>
+              )}
+              {/* Can never submit a qty beyond what's remaining � same rule the server enforces
+                  (EXTRA_NOT_ALLOWED in loading.ts's /scan); Cancel and use "Add Extra" for the
+                  amount beyond this. */}
+              {pending && pending.item && dialogQty > pending.item.remaining && (
+                <p className="text-sm text-amber-600">
+                  Only {pending.item.remaining} remaining � the rest would be extra. Cancel and use "Add Extra" instead.
+                </p>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <Button variant="outline" className="h-12 text-base" onClick={() => setPending(null)}>Cancel</Button>
+                <Button
+                  className="h-11 bg-[#001d6e] text-white hover:bg-[#001552]"
+                  disabled={
+                    dialogQty <= 0 || scanItemMutation.isPending
+                    || (pending?.item?.stockAvailable ?? Infinity) < dialogQty
+                    || (!!pending && !!pending.item && dialogQty > pending.item.remaining)
+                  }
+                  onClick={() => {
+                    if (!pending) return;
+                    scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty }, {
+                      onSuccess: () => setPending(null),
+                    });
+                  }}
+                >
+                  {scanItemMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+                  Confirm
+                </Button>
               </div>
-            )}
-            {pending && (pending.item?.stockAvailable ?? Infinity) < dialogQty && (
-              <p className="text-xs text-red-600">Only {pending.item?.stockAvailable} in stock — reduce the quantity.</p>
-            )}
-            {/* Can never submit a qty beyond what's remaining — same rule the server enforces
-                (EXTRA_NOT_ALLOWED in loading.ts's /scan); Cancel and use "Add Extra" for the
-                amount beyond this. */}
-            {pending && pending.item && dialogQty > pending.item.remaining && (
-              <p className="text-xs text-amber-600">
-                Only {pending.item.remaining} remaining — the rest would be extra. Cancel and use "Add Extra" instead.
-              </p>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPending(null)}>Cancel</Button>
-            <Button
-              className="bg-[#001d6e] text-white hover:bg-[#001552]"
-              disabled={
-                dialogQty <= 0 || scanItemMutation.isPending
-                || (pending?.item?.stockAvailable ?? Infinity) < dialogQty
-                || (!!pending && !!pending.item && dialogQty > pending.item.remaining)
-              }
-              onClick={() => {
-                if (!pending) return;
-                scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty }, {
-                  onSuccess: () => setPending(null),
-                });
-              }}
-            >
-              {scanItemMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
-              Confirm
-            </Button>
-          </DialogFooter>
             </div>
           </div>
         </DialogContent>
@@ -4531,19 +4564,19 @@ export default function LoadOperation() {
             is constrained computes x to auto per spec, which is exactly what put a horizontal
             scrollbar under the search view (same fix as the page-level scroll container's own
             comment about this elsewhere in this file). */}
-        <DialogContent className={`overflow-x-hidden overflow-y-auto p-0 ${extraTarget ? "sm:max-w-3xl" : "max-w-xl"}`}>
+        <DialogContent className={`overflow-x-hidden overflow-y-auto p-0 ${extraTarget ? "sm:max-w-5xl" : "max-w-xl"}`}>
           <div className={extraTarget ? "flex flex-col sm:flex-row" : ""}>
             {extraTarget && (
-              <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-56 sm:border-b-0 sm:border-r">
+              <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-2 sm:w-72 md:w-80 lg:w-[26rem] sm:border-b-0 sm:border-r">
                 <ProductPhoto
                   productId={extraTarget.id}
-                  className="max-h-56 w-full object-contain sm:max-h-64"
+                  className="max-h-48 w-full object-contain sm:max-h-72 lg:max-h-[28rem]"
                   name={extraTarget.name}
                   zoomable
                 />
               </div>
             )}
-            <div className="min-w-0 flex-1 p-6">
+            <div className="min-w-0 flex-1 p-4 sm:p-5 lg:p-6">
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2 text-amber-700">
                   <PackagePlus className="h-4 w-4" /> Add Extra
@@ -4560,9 +4593,9 @@ export default function LoadOperation() {
                 // is "Packets" in the Product Master UI, a different concept.
                 const extraIpp = extraProductPalletSize(extraTarget);
                 return (
-                <div className="space-y-4 pt-3">
+                <div className="space-y-2.5 pt-2 lg:space-y-4 lg:pt-3">
                   <div className="flex items-start justify-between gap-2">
-                    <p className="text-lg font-bold leading-snug text-gray-900">{extraTarget.name}</p>
+                    <p className="text-base font-bold leading-snug text-gray-900 lg:text-lg">{extraTarget.name}</p>
                     <button
                       type="button"
                       onClick={() => setExtraTarget(null)}
@@ -4573,13 +4606,48 @@ export default function LoadOperation() {
                   </div>
                   <p className="font-mono text-sm text-gray-400">{extraTarget.barcode}</p>
 
+                  {/* How much of this product is already on the truck for this order — highlighted
+                      tiles so it can't be missed before adding more. */}
+                  {(() => {
+                    const onSlip = items.find((i) => normalize(i.barcode) === normalize(extraTarget.barcode));
+                    if (!onSlip) {
+                      return (
+                        <div className="rounded-xl border-2 border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800 lg:px-4 lg:py-3 lg:text-sm">
+                          Not on this order — nothing loaded yet
+                        </div>
+                      );
+                    }
+                    const extraSoFar = extraOf(onSlip);
+                    return (
+                      <div className="grid grid-cols-4 gap-1.5 rounded-xl border-2 border-[#001d6e]/30 bg-[#001d6e]/5 p-1.5 text-center lg:gap-2 lg:p-2">
+                        <div className="rounded-lg bg-white px-1 py-1 lg:py-1.5">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Expected</p>
+                          <p className="text-lg font-bold leading-tight tabular-nums lg:text-xl text-gray-800">{onSlip.expected}</p>
+                        </div>
+                        <div className="rounded-lg bg-emerald-100 px-1 py-1 lg:py-1.5 ring-2 ring-emerald-400">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700">Loaded</p>
+                          <p className="text-lg font-bold leading-tight tabular-nums lg:text-xl text-emerald-700">{onSlip.loaded}</p>
+                        </div>
+                        <div className="rounded-lg bg-white px-1 py-1 lg:py-1.5">
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-[#001d6e]">Remaining</p>
+                          <p className="text-lg font-bold leading-tight tabular-nums lg:text-xl text-[#001d6e]">{onSlip.remaining}</p>
+                        </div>
+                        <div className={`rounded-lg px-1 py-1 lg:py-1.5 ${extraSoFar > 0 ? "bg-amber-100 ring-2 ring-amber-400" : "bg-white"}`}>
+                          <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">Extra</p>
+                          <p className={`text-lg font-bold leading-tight tabular-nums lg:text-xl ${extraSoFar > 0 ? "text-amber-600" : "text-gray-300"}`}>{extraSoFar > 0 ? `+${extraSoFar}` : "0"}</p>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Same info-box treatment Order Scan's own confirm dialog uses for SAP/pallet
                       size, instead of small inline text. */}
-                  <div className="space-y-1 rounded-xl bg-gray-50 px-4 py-3 text-sm text-gray-600">
-                    {extraTarget.sapCode && <p>SAP: <span className="font-mono font-bold text-gray-700">{extraTarget.sapCode}</span></p>}
-                    {extraIpp > 0 && <p>Items per pallet: <strong>{extraIpp}</strong></p>}
+                  {/* One short line instead of a three-line box: SAP · pallet size · stock. */}
+                  <div className="text-xs text-gray-500">
                     <p>
-                      In stock:{" "}
+                      {extraTarget.sapCode && <>SAP <span className="font-mono font-semibold text-gray-700">{extraTarget.sapCode}</span>{" · "}</>}
+                      {extraIpp > 0 && <>{extraIpp}/plt{" · "}</>}
+                      Stock{" "}
                       {extraStockQuery.isLoading ? <span className="text-gray-400">…</span> : extraStockQuery.data ? (
                         <strong className={extraStockQuery.data.stock <= 0 ? "text-red-600" : "text-gray-800"}>
                           {extraStockQuery.data.stock}
@@ -4593,7 +4661,7 @@ export default function LoadOperation() {
                   {/* Extra only after the item is complete: this product is on the order and still
                       has quantity left, so it has to be loaded normally first. */}
                   {extraBlockedBy && (
-                    <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+                    <div className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 lg:px-4 lg:py-3 lg:text-sm">
                       Only {extraBlockedBy.remaining} left to load for this item on the order. Load those first, then add the Extra.
                     </div>
                   )}
@@ -4601,13 +4669,13 @@ export default function LoadOperation() {
                   {/* Same −/+ stepper boxes Order Scan's own confirm dialog uses for Qty/Pallets,
                       instead of plain number inputs — easy to nudge by one box/pallet without
                       having to type. */}
-                  <div className={`grid gap-3 ${extraIpp > 0 ? "sm:grid-cols-2" : "grid-cols-1"}`}>
+                  <div className={`grid gap-2 sm:gap-3 ${extraIpp > 0 ? "grid-cols-2" : "grid-cols-1"}`}>
                     <div className="space-y-1">
                       <Label className="text-sm">Qty (boxes)</Label>
                       <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-amber-500">
                         <Button
                           type="button" variant="ghost"
-                          className="h-12 w-11 shrink-0 rounded-none border-r border-gray-200 text-2xl font-bold text-gray-500 hover:bg-gray-100"
+                          className="h-10 w-10 shrink-0 lg:h-12 lg:w-11 rounded-none border-r border-gray-200 text-2xl font-bold text-gray-500 hover:bg-gray-100"
                           onClick={() => changeExtraQty(String(Math.max(1, extraQty - 1)))}
                           aria-label="Decrease quantity"
                         >
@@ -4617,11 +4685,11 @@ export default function LoadOperation() {
                           type="number" min={1}
                           value={extraQty === 0 ? "" : extraQty}
                           onChange={(e) => changeExtraQty(e.target.value)}
-                          className="h-12 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-xl font-bold focus-visible:ring-0 focus-visible:ring-offset-0"
+                          className="h-10 min-w-0 flex-1 lg:h-12 rounded-none border-0 px-1 text-center text-xl font-bold focus-visible:ring-0 focus-visible:ring-offset-0"
                         />
                         <Button
                           type="button" variant="ghost"
-                          className="h-12 w-11 shrink-0 rounded-none border-l border-gray-200 text-2xl font-bold text-gray-500 hover:bg-gray-100"
+                          className="h-10 w-10 shrink-0 lg:h-12 lg:w-11 rounded-none border-l border-gray-200 text-2xl font-bold text-gray-500 hover:bg-gray-100"
                           onClick={() => changeExtraQty(String(extraQty + 1))}
                           aria-label="Increase quantity"
                         >
@@ -4636,7 +4704,7 @@ export default function LoadOperation() {
                         <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-amber-300 bg-white focus-within:border-amber-500">
                           <Button
                             type="button" variant="ghost"
-                            className="h-12 w-11 shrink-0 rounded-none border-r border-amber-100 text-2xl font-bold text-amber-700 hover:bg-amber-50"
+                            className="h-10 w-10 shrink-0 lg:h-12 lg:w-11 rounded-none border-r border-amber-100 text-2xl font-bold text-amber-700 hover:bg-amber-50"
                             onClick={() => changeExtraPallets(String(Math.max(0, Math.round(((parseFloat(extraPalletsInput) || 0) - 1) * 100) / 100)))}
                             aria-label="Decrease pallets"
                           >
@@ -4646,11 +4714,11 @@ export default function LoadOperation() {
                             type="number" min={0} step="0.01"
                             value={extraPalletsInput}
                             onChange={(e) => changeExtraPallets(e.target.value)}
-                            className="h-12 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-xl font-bold text-amber-700 focus-visible:ring-0 focus-visible:ring-offset-0"
+                            className="h-10 min-w-0 flex-1 lg:h-12 rounded-none border-0 px-1 text-center text-xl font-bold text-amber-700 focus-visible:ring-0 focus-visible:ring-offset-0"
                           />
                           <Button
                             type="button" variant="ghost"
-                            className="h-12 w-11 shrink-0 rounded-none border-l border-amber-100 text-2xl font-bold text-amber-700 hover:bg-amber-50"
+                            className="h-10 w-10 shrink-0 lg:h-12 lg:w-11 rounded-none border-l border-amber-100 text-2xl font-bold text-amber-700 hover:bg-amber-50"
                             onClick={() => changeExtraPallets(String(Math.round(((parseFloat(extraPalletsInput) || 0) + 1) * 100) / 100))}
                             aria-label="Increase pallets"
                           >
@@ -4747,10 +4815,10 @@ export default function LoadOperation() {
                 </div>
               )}
 
-              <DialogFooter className="mt-5">
-                <Button variant="outline" onClick={resetExtraDialog} disabled={extraMutation.isPending}>Cancel</Button>
+              <DialogFooter className="mt-3 !flex-row gap-2 sm:mt-5">
+                <Button variant="outline" className="flex-1 sm:flex-none" onClick={resetExtraDialog} disabled={extraMutation.isPending}>Cancel</Button>
                 <Button
-                  className="bg-amber-600 text-white hover:bg-amber-700"
+                  className="flex-1 bg-amber-600 text-white hover:bg-amber-700 sm:flex-none"
                   disabled={!extraTarget || extraQty <= 0 || extraMutation.isPending || !!extraBlockedBy}
                   onClick={() => extraMutation.mutate()}
                 >
@@ -5038,7 +5106,7 @@ export default function LoadOperation() {
           <div className="flex flex-col sm:flex-row">
             {adjustTarget && (
               <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-64 sm:border-b-0 sm:border-r">
-                <ProductPhoto name={adjustTarget.item.itemName} className="max-h-48 w-full object-contain" zoomable />
+                <ProductPhoto name={adjustTarget.item.itemName} className="max-h-64 w-full object-contain" zoomable />
               </div>
             )}
             <div className="min-w-0 flex-1 space-y-4 p-6">
