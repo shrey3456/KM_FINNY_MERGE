@@ -146,10 +146,17 @@ self.addEventListener('fetch', event => {
             .catch(err => console.error('[Service Worker] API caching error:', err));
           return response;
         })
-        .catch(() => {
-          // Network failed (offline) — fall back to the last-known response.
-          return caches.match(cacheKey);
-        })
+        .catch(() =>
+          // Network failed (offline) — fall back to the last-known response. With nothing saved for
+          // this address, answer with a clear 503 instead of nothing (nothing made the page throw a
+          // bare network error, and screens waited on it).
+          caches.match(cacheKey).then(
+            (saved) => saved || new Response(
+              JSON.stringify({ message: "You are offline and this has not been opened on this device before." }),
+              { status: 503, headers: { "Content-Type": "application/json" } },
+            ),
+          )
+        )
     );
     return;
   }

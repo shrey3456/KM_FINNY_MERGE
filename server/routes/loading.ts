@@ -1,11 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { storage } from '../storage';
-import { pool } from '../db';
+import { pool, db } from '../db';
+import { products as productsTable } from '@shared/schema';
+import { inArray } from 'drizzle-orm';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 import {
-  getPooledStock, debitStatePool, reverseStockPullsForEvent, recordStockPulls,
+  getPooledStock, getStatePlantNames, debitStatePool, reverseStockPullsForEvent, recordStockPulls,
   type StockPullContribution,
 } from '../lib/statePool';
 import {
@@ -393,8 +395,43 @@ async function withProgress(slip: any, items: any[]) {
   );
   const loadedByBarcode = new Map<string, number>(loadedRows.map((r: any) => [normalize(r.barcode), r.loadedQty]));
 
+  // Everything this response needs from Product Master and stock is read in TWO queries up front
+  // (it used to be 1 product query + 3 stock queries PER ITEM — ~280 queries for a 70-item order on
+  // every scan and every refetch, which queued behind the pool and made scans take seconds).
+  const wantedBarcodes = Array.from(new Set([
+    ...items.map((it) => String(it.barcode ?? '').trim()),
+    ...loadedRows.map((r: any) => String(r.barcode ?? '').trim()),
+  ].filter(Boolean)));
+  const productsByBarcode = new Map<string, any[]>();
+  const stockByBarcode = new Map<string, number>();
+  if (wantedBarcodes.length > 0) {
+    const productRows = await db.select().from(productsTable).where(inArray(productsTable.barcode, wantedBarcodes));
+    for (const pr of productRows) {
+      const key = String(pr.barcode ?? '').trim();
+      if (!productsByBarcode.has(key)) productsByBarcode.set(key, []);
+      productsByBarcode.get(key)!.push(pr);
+    }
+    const statePlants = await getStatePlantNames(pool, slip.plant ?? '');
+    const { rows: stockRows } = await pool.query(
+      `SELECT barcode, COALESCE(SUM(in_stock), 0)::int AS total FROM product_plant_stock
+       WHERE barcode = ANY($1::text[]) AND plant = ANY($2::text[]) GROUP BY barcode`,
+      [wantedBarcodes, statePlants],
+    );
+    for (const r of stockRows as any[]) stockByBarcode.set(String(r.barcode), r.total);
+  }
+  // One row per barcode is the normal case; a barcode that sits on several product rows (one per
+  // plant/state) still goes through the plant-aware lookup so the right row is picked.
+  const productFor = async (barcode: string) => {
+    const key = String(barcode ?? '').trim();
+    const matches = productsByBarcode.get(key);
+    if (!matches || matches.length === 0) return undefined;
+    if (matches.length === 1) return matches[0];
+    return storage.getProductByBarcode(key, slip.plant);
+  };
+  const stockFor = (barcode: string) => stockByBarcode.get(String(barcode ?? '').trim()) ?? 0;
+
   const progressItems = await Promise.all(items.map(async (item) => {
-    const product = item.barcode ? await storage.getProductByBarcode(item.barcode, slip.plant) : undefined;
+    const product = item.barcode ? await productFor(item.barcode) : undefined;
     const expected = item.quantity ?? 0;
     const loaded = loadedByBarcode.get(normalize(item.barcode)) ?? 0;
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
@@ -407,8 +444,7 @@ async function withProgress(slip: any, items: any[]) {
       // server/routes/scan-sessions.ts) shows stock for the same plant. Pooled across every
       // plant in slip.plant's state (server/lib/statePool.ts) — matches what debitStatePool
       // will actually allow a scan to draw on, so this figure and a real scan never disagree.
-      const { total } = await getPooledStock(pool, item.barcode, slip.plant ?? '');
-      stockAvailable = total;
+      stockAvailable = stockFor(item.barcode);
     }
     return {
       ...item, expected, loaded, remaining: Math.max(0, expected - loaded),
@@ -440,11 +476,11 @@ async function withProgress(slip: any, items: any[]) {
   // letter barcodes exist (e.g. "A01" advertisement stands) — look up by the barcode as scanned.
   const originalBarcode = new Map<string, string>(loadedRows.map((r: any) => [normalize(r.barcode), String(r.barcode).trim()]));
   const offOrderItems = (await Promise.all(offOrderBarcodes.map(async (bc) => {
-    const product = await storage.getProductByBarcode(originalBarcode.get(bc) ?? bc, slip.plant);
+    const product = await productFor(originalBarcode.get(bc) ?? bc);
     if (!product) return null; // shouldn't happen — /scan already requires Product Master to have it — but never render junk if it somehow does
     const loaded = loadedByBarcode.get(bc) ?? 0;
     const itemsPerPallet = resolvePalletSizeOrQty(product, state, 0);
-    const { total: stockAvailable } = await getPooledStock(pool, product.barcode ?? bc, slip.plant ?? '');
+    const stockAvailable = stockFor(product.barcode ?? bc);
     return {
       id: -product.id, // negative so it can never collide with a real proforma_slip_items.id
       barcode: product.barcode ?? bc, itemName: product.name ?? bc, sapCode: product.sapCode ?? null,
@@ -1209,7 +1245,20 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 ps.loading_paused_at AS "loadingPausedAt",
                 ps.loading_stv AS "loadingStv",
                 COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0)::int AS "totalQty",
-                COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0)::int AS "loadedQty"
+                COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0)::int AS "loadedQty",
+                -- The order's own cargo volume, and how much of it is on the vehicle so far: each
+                -- barcode's loaded quantity times that item's own volume (same sum the open load
+                -- screen shows). Non-numeric/blank volumes count as 0.
+                CASE WHEN ps.total_volume ~ '^[0-9]+([.][0-9]+)?$' THEN ps.total_volume::numeric ELSE NULL END::float AS "orderVolume",
+                COALESCE((
+                  SELECT SUM(ev.q * iv.vol)
+                  FROM (SELECT barcode, SUM(total_qty) AS q FROM loading_scan_events
+                         WHERE order_number = lr.order_number AND voided IS NOT TRUE GROUP BY barcode) ev
+                  JOIN LATERAL (
+                    SELECT CASE WHEN i.volume_in_cu_ft ~ '^[0-9]+([.][0-9]+)?$' THEN i.volume_in_cu_ft::numeric ELSE 0 END AS vol
+                    FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id AND i.barcode = ev.barcode LIMIT 1
+                  ) iv ON TRUE
+                ), 0)::float AS "loadedVolume"
          FROM loading_records lr
          LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
          ${listWhere}
@@ -2034,7 +2083,9 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
     void syncOrderToNotion(slip.orderNumber, { status: restoredStatus }, actor(req));
     if (hadNotionStoreKeeper) void pushStoreKeeperInfoToNotion(slip.orderNumber, '');
 
-    if (userCode) {
+    // Always logged (even without a user code) and never allowed to fail the request: the delete
+    // has already been committed above.
+    try {
       await storage.logActivity({
         pageName: 'Loading', action: 'delete', entityType: 'proforma_slip', entityId: slip.id,
         details: mode === 'remove'
@@ -2042,6 +2093,8 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
           : `Loading reset for order ${slip.orderNumber} by ${userName ?? userCode} — ${events.length} scan(s) voided, vehicle un-assigned, status back to ${restoredStatus}`,
         userCode, userName,
       });
+    } catch (activityError) {
+      console.error('[Loading] Could not write the delete Activity entry:', activityError instanceof Error ? activityError.message : activityError);
     }
 
     res.json({ success: true, mode, reversedEvents: events.length, removedEvents, restoredStatus });

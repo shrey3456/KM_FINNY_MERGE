@@ -331,36 +331,48 @@ const OfflineBanner = ({ isOnline }: { isOnline: boolean }) => {
 // globally (not per-page) since a scan queued on one page should stay visible while navigating
 // elsewhere, right up until it actually sends.
 function OfflineQueueBadge() {
-  const [state, setState] = useState<QueueState>({ pending: 0, flushing: false, lastMessage: null });
+  const [state, setState] = useState<QueueState>({ pending: 0, flushing: false, lastMessage: null, offline: false, slow: false });
 
   useEffect(() => {
     getQueueState().then(setState);
     return onQueueChange(setState);
   }, []);
 
-  if (state.pending === 0 && !state.flushing && !state.lastMessage) return null;
+  // Also shown with nothing waiting when the connection is down or poor, so the operator knows why a
+  // scan may take long or be held back — not only once something is already queued.
+  if (state.pending === 0 && !state.flushing && !state.lastMessage && !state.offline && !state.slow) return null;
 
+  // Lifted above the bottom Home / Messages / Profile bar on small screens, where it used to sit
+  // underneath it.
   return (
-    <div className="fixed bottom-3 right-3 z-50 flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-lg">
-      {state.flushing ? (
-        <Loader2Icon className="h-3.5 w-3.5 animate-spin text-[#001d6e]" />
-      ) : state.pending > 0 ? (
-        <CloudOffIcon className="h-3.5 w-3.5 text-amber-600" />
+    <div className="fixed bottom-20 right-3 z-[70] flex max-w-[calc(100vw-1.5rem)] flex-wrap items-center gap-2 rounded-2xl border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 shadow-lg lg:bottom-3">
+      {state.offline ? (
+        <CloudOffIcon className="h-4 w-4 shrink-0 text-red-600" />
+      ) : state.flushing ? (
+        <Loader2Icon className="h-4 w-4 shrink-0 animate-spin text-[#001d6e]" />
+      ) : state.pending > 0 || state.slow ? (
+        <CloudOffIcon className="h-4 w-4 shrink-0 text-amber-600" />
       ) : (
-        <CloudIcon className="h-3.5 w-3.5 text-emerald-600" />
+        <CloudIcon className="h-4 w-4 shrink-0 text-emerald-600" />
       )}
+      {state.offline && <span className="rounded-full bg-red-100 px-2 py-0.5 font-bold text-red-700">Offline</span>}
+      {!state.offline && state.slow && <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold text-amber-800">Slow network</span>}
       <span>
         {state.flushing
           ? `Syncing… (${state.pending} left)`
           : state.pending > 0
             ? `${state.pending} scan${state.pending === 1 ? "" : "s"} waiting to sync`
-            : (state.lastMessage ?? "Synced")}
+            : state.offline
+              ? "Scans are saved on this device and sent when you are back online."
+              : state.slow
+                ? "Scans may take longer — they are kept if the connection drops."
+                : (state.lastMessage ?? "Synced")}
       </span>
       {state.pending > 0 && !state.flushing && (
         <button
           type="button"
           onClick={() => void flushQueue()}
-          className="rounded-full bg-[#001d6e] px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-[#00154b]"
+          className="rounded-full bg-[#001d6e] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#00154b]"
         >
           Sync now
         </button>
@@ -368,7 +380,6 @@ function OfflineQueueBadge() {
     </div>
   );
 }
-
 function App() {
   // Track online status
   const [isOnline, setIsOnline] = useState(navigator.onLine);

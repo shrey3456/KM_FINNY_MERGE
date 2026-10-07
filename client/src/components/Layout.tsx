@@ -190,7 +190,9 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
         {/* Mobile Header with tribe logo, welcome text and (on non-home pages) a home icon - Hidden on messages and profile */}
         {/* Mobile Sidebar Drawer */}
         {mobileMenuOpen && (
-          <div className="lg:hidden fixed inset-0 z-50 flex">
+          // z-[60]: the bottom Home/Messages/Profile bar is z-50 and comes later in the page, so at
+          // the same level it sat on top of the drawer and hid its last items and Log Out.
+          <div className="lg:hidden fixed inset-0 z-[60] flex">
             <div
               className="fixed inset-0 bg-black bg-opacity-50"
               onClick={() => setMobileMenuOpen(false)}

@@ -138,9 +138,17 @@ export const queryClient = new QueryClient({
       refetchOnWindowFocus: false,
       staleTime: 30000, // 30 seconds instead of Infinity
       retry: false,
+      // React Query's default ("online") PAUSES every request while the browser reports offline: a
+      // slip being opened sat on its loading spinner for ever, and nothing ran at all. "always" lets the
+      // request go out; offline it fails at once (or is answered from the service worker's saved copy)
+      // and the page can say so.
+      networkMode: "always",
     },
     mutations: {
       retry: false,
+      // Same reason — and a scan must actually RUN while offline, so that scanOrQueue
+      // (lib/offlineQueue.ts) can save it on this device. A paused mutation never reached it.
+      networkMode: "always",
     },
   },
 });

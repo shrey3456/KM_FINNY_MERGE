@@ -4518,15 +4518,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Log activity for deleting the proforma slip
         try {
           // Find the user who is deleting the slip
-          const userId = req.session?.user?.id || slip.createdById;
-          let userName = "Unknown User";
-
-          if (userId) {
-            const user = await storage.getUser(userId);
-            if (user) {
-              userName = user.name || user.username || "Unknown User";
-            }
-          }
+          // The signed-in user (passport puts them on req.user) — req.session.user is never set, so
+          // this used to fall back to whoever CREATED the slip and log the delete under their name.
+          const actingUser = req.user as any;
+          const userId = actingUser?.id ?? null;
+          const userName = actingUser?.name || actingUser?.username || actingUser?.userCode || "Unknown User";
 
           const activityDetails = JSON.stringify({
             orderNumber: slip.orderNumber,
@@ -4543,7 +4539,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             entityType: "proformaSlip",
             entityId: String(id),
             details: activityDetails,
-            userId: userId || null,
+            userCode: actingUser?.userCode ?? null,
             userName: userName,
           });
 

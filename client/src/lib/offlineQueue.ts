@@ -14,7 +14,11 @@ import { handleUnauthorized, queryClient } from "./queryClient";
 const DB_NAME = "kmfinny-offline-queue";
 const DB_VERSION = 1;
 const STORE_NAME = "pending-requests";
-const NETWORK_TIMEOUT_MS = 5000;
+// How long one scan request may take before it is treated as "network unreachable" and queued. At 5 s
+// a slow connection (or a server busy for 6-7 s) was cut off and queued as "saved offline" even though
+// the server went on and saved it — and a queue flush over the same slow link timed out every time and
+// never emptied. A resend is safe either way: the server skips a repeated clientRequestId.
+const NETWORK_TIMEOUT_MS = 20000;
 
 export type QueuedRequest = {
   localId: number; // IndexedDB auto-increment key — also the FIFO send order, since it only grows.
@@ -74,7 +78,7 @@ function newClientRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export type QueueState = { pending: number; flushing: boolean; lastMessage: string | null };
+export type QueueState = { pending: number; flushing: boolean; lastMessage: string | null; offline: boolean; slow: boolean };
 const listeners = new Set<(state: QueueState) => void>();
 let flushing = false;
 let lastMessage: string | null = null;
@@ -84,15 +88,46 @@ export function onQueueChange(listener: (state: QueueState) => void): () => void
   return () => listeners.delete(listener);
 }
 
+// ── Network quality ──────────────────────────────────────────────────────────────────────────────
+// "Slow" = the connection is up but poor: the browser itself reports a 2G-class link / very high
+// round-trip time (Chrome and Android only), or the scan requests this page actually made recently
+// were slow (average of the last 3 over 3 s) or timed out. Only samples from the last 90 s count, so
+// the warning goes away by itself once requests are quick again.
+const SLOW_SAMPLE_WINDOW_MS = 90_000;
+const SLOW_AVG_MS = 3000;
+type NetSample = { at: number; ms: number; timedOut: boolean };
+let samples: NetSample[] = [];
+
+function recordSample(ms: number, timedOut: boolean) {
+  samples.push({ at: Date.now(), ms, timedOut });
+  if (samples.length > 10) samples = samples.slice(-10);
+}
+
+function isOffline(): boolean {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+function isSlow(): boolean {
+  if (isOffline()) return false;
+  const conn = typeof navigator !== "undefined" ? (navigator as any).connection : null;
+  if (conn && (["slow-2g", "2g"].includes(conn.effectiveType) || (typeof conn.rtt === "number" && conn.rtt > 1500))) return true;
+  const recent = samples.filter((s) => Date.now() - s.at < SLOW_SAMPLE_WINDOW_MS);
+  if (recent.some((s) => s.timedOut)) return true;
+  const last = recent.slice(-3);
+  return last.length > 0 && last.reduce((sum, s) => sum + s.ms, 0) / last.length > SLOW_AVG_MS;
+}
+
 async function notify() {
   const pending = await count();
-  const state: QueueState = { pending, flushing, lastMessage };
+  const state: QueueState = { pending, flushing, lastMessage, offline: isOffline(), slow: isSlow() };
   listeners.forEach((l) => l(state));
 }
 
 async function sendNow(url: string, body: Record<string, unknown>): Promise<Response> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
+  const startedAt = Date.now();
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, NETWORK_TIMEOUT_MS);
   return fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -100,7 +135,11 @@ async function sendNow(url: string, body: Record<string, unknown>): Promise<Resp
     cache: "no-store",
     body: JSON.stringify(body),
     signal: controller.signal,
-  }).finally(() => clearTimeout(timeout));
+  }).finally(() => {
+    clearTimeout(timeout);
+    recordSample(Date.now() - startedAt, timedOut);
+    void notify();
+  });
 }
 
 // Sends every queued request ONE AT A TIME, in the order they were made — never in parallel, and
@@ -204,7 +243,27 @@ export async function scanOrQueue(
 }
 
 export async function getQueueState(): Promise<QueueState> {
-  return { pending: await count(), flushing, lastMessage };
+  return { pending: await count(), flushing, lastMessage, offline: isOffline(), slow: isSlow() };
+}
+
+// ── Automatic retry ──────────────────────────────────────────────────────────────────────────────
+// The queue used to send only on the browser's "online" event or the Sync now button — on a weak
+// connection that never fully drops, scans could sit waiting for ever. Now, every 20 s while anything
+// is waiting (and the browser thinks it is online), the queue tries again; every 10 s the badge
+// re-reads the network state so a "Slow network" notice clears on its own.
+const AUTO_RETRY_MS = 20_000;
+const STATE_REFRESH_MS = 10_000;
+if (typeof window !== "undefined") {
+  setInterval(async () => {
+    try {
+      if (!flushing && !isOffline() && (await count()) > 0) await flushQueue();
+    } catch { /* try again on the next tick */ }
+  }, AUTO_RETRY_MS);
+  setInterval(() => { void notify(); }, STATE_REFRESH_MS);
+  // Offline/online and connection-quality changes show on the badge straight away.
+  window.addEventListener("offline", () => { void notify(); });
+  window.addEventListener("online", () => { void notify(); });
+  (navigator as any).connection?.addEventListener?.("change", () => { void notify(); });
 }
 
 export async function listQueued(): Promise<QueuedRequest[]> {

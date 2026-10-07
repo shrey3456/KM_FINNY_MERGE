@@ -96,7 +96,9 @@ export default function Activities() {
     queryKey: ["activities", limit, offset],
     queryFn: async () => {
       try {
-        const res = await apiRequest("GET", `/api/activities`);
+        // The server defaults to the newest 100 — busy pages (Notion sync, scans) pushed older entries
+        // such as a delete out of that window, so they never showed. Ask for a much wider one.
+        const res = await apiRequest("GET", `/api/activities?limit=2000`);
         if (!res.ok) {
           throw new Error(`Failed to fetch activities: ${res.status}`);
         }

@@ -1,4 +1,4 @@
-﻿import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
@@ -83,9 +83,19 @@ const USE_GRID_ITEM_ROWS = true;
 // Small product picture beside an item name; renders nothing (no gap) when the product has none.
 function ItemRowThumb({ name, className = "h-10 w-10" }: { name: string | null; className?: string }) {
   const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  // A photo that failed to load is tried again a couple of times (after 5 s, then 10 s). On a weak
+  // connection or a busy server the first requests simply time out, and giving up for good left the
+  // row without its picture until the page was reloaded — even though the picture exists.
+  useEffect(() => {
+    if (!failed || attempt >= 2) return;
+    const timer = setTimeout(() => { setAttempt((n) => n + 1); setFailed(false); }, 5000 * (attempt + 1));
+    return () => clearTimeout(timer);
+  }, [failed, attempt]);
   if (!name || failed) return null;
   return (
     <ProductPhoto
+      key={attempt}
       name={name}
       zoomable
       onLoadState={setFailed}
@@ -162,6 +172,8 @@ type LoadingRecord = {
   createdAt: string; orderDate: string | null;
   // Order's total quantity and how much of it is loaded so far (non-voided scans).
   totalQty?: number; loadedQty?: number;
+  // The order's own cargo volume and how much of it is loaded so far (cu ft).
+  orderVolume?: number | null; loadedVolume?: number;
   loadingCompletedAt: string | null;
   // Who completed the load (Complete button or the scan that finished it) — a name, or null.
   loadingCompletedByCode?: string | null; loadingCompletedByName?: string | null;
@@ -1907,6 +1919,11 @@ export default function LoadOperation() {
     const nb = normalize(barcode);
     const last = lastScanRef.current;
     if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) {
+      toast({
+        title: "Same barcode scanned again — ignored",
+        description: `Wait ${Math.max(1, Math.ceil((SAME_BARCODE_COOLDOWN_MS - (Date.now() - last.at)) / 1000))} s to scan the same item again.`,
+        duration: 2500,
+      });
       return;
     }
     lastScanRef.current = { barcode, at: Date.now() };
@@ -2901,6 +2918,7 @@ export default function LoadOperation() {
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Quantity loaded so far out of the order's total quantity">Loaded / Total</TableHead>
+                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Volume loaded so far out of the order's total volume">Volume</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>
                         <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("creator", "Creator")}</TableHead>
@@ -2963,6 +2981,11 @@ export default function LoadOperation() {
                                 )}
                               </TableCell>
                               <TableCell className="whitespace-nowrap tabular-nums"><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></TableCell>
+                              <TableCell className="whitespace-nowrap tabular-nums">
+                                {r.orderVolume != null
+                                  ? <><span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.orderVolume.toFixed(2)}</span></>
+                                  : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>}
+                              </TableCell>
                               <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
                               <TableCell>
                                 {r.loadingCompletedAt ? (
@@ -3121,6 +3144,7 @@ export default function LoadOperation() {
                               </span>
                             </span>
                             <span className="whitespace-nowrap tabular-nums">Qty <span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> / <span className="font-semibold text-gray-700">{r.totalQty ?? 0}</span></span>
+                            <span className="whitespace-nowrap tabular-nums">Vol <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>{r.orderVolume != null && <> / <span className="font-semibold text-gray-700">{r.orderVolume.toFixed(2)}</span></>}</span>
                             <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>
                             {r.loadingCompletedAt && (r.loadingCompletedByName || r.loadingCompletedByCode) && (
                               <span className="whitespace-nowrap text-emerald-700">Completed by {r.loadingCompletedByName ?? r.loadingCompletedByCode}</span>
@@ -4051,7 +4075,7 @@ export default function LoadOperation() {
                                 <div className="flex w-full items-stretch gap-2.5">
                                   {/* The product photo fills the row's full height — tap it to enlarge; the row
                                       itself opens the history. */}
-                                  <ItemRowThumb name={row.itemName} className="w-16 self-stretch" />
+                                  <ItemRowThumb name={row.itemName} className="w-14 self-stretch" />
                                   <div className="min-w-0 flex-1">
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0">
@@ -4070,31 +4094,42 @@ export default function LoadOperation() {
                                   </div>
                                   {/* Same four-column block the Unloading list uses (plus Stock): each number sits
                                       in the same place on every row, and the whole row takes the colour. */}
-                                  <div className="mt-2 flex items-center gap-2">
-                                    <div className="grid min-w-0 flex-1 grid-cols-5 divide-x divide-black/10 rounded-md bg-white/70 py-1 ring-1 ring-black/5">
+                                  <div className="mt-1.5 flex items-center gap-2">
+                                    <div className="grid min-w-0 flex-1 grid-cols-5 divide-x divide-black/10 rounded-md bg-white/70 py-0.5 ring-1 ring-black/5">
                                       {([
-                                        { label: "Expected", value: row.expected, cls: "text-gray-900" },
-                                        { label: "Loaded", value: row.loaded, cls: "text-emerald-600" },
-                                        { label: "Remaining", value: row.remaining, cls: "text-[#001d6e]" },
-                                        { label: "Extra", value: extra > 0 ? `${extra}` : "—", cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
-                                        { label: "Stock", value: row.stockAvailable ?? 0, cls: noStock ? "text-red-600" : "text-gray-700" },
-                                      ] as const).map((cell) => (
-                                        <div key={cell.label} className="min-w-0 px-1 text-center">
-                                          <p className="truncate text-[9px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</p>
-                                          <p className={`text-base font-bold leading-tight tabular-nums ${cell.cls}`}>{cell.value}</p>
-                                        </div>
-                                      ))}
+                                        { label: "Expected", value: row.expected, qty: row.expected, cls: "text-gray-900" },
+                                        { label: "Loaded", value: row.loaded, qty: row.loaded, cls: "text-emerald-600" },
+                                        { label: "Remaining", value: row.remaining, qty: row.remaining, cls: "text-[#001d6e]" },
+                                        { label: "Extra", value: extra > 0 ? `${extra}` : "—", qty: extra, cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
+                                        { label: "Stock", value: row.stockAvailable ?? 0, qty: row.stockAvailable ?? 0, cls: noStock ? "text-red-600" : "text-gray-700" },
+                                      ] as const).map((cell) => {
+                                        // Pallets and loose boxes under the number, honouring the All / Pallet / Loose tab.
+                                        const ipp = row.itemsPerPallet ?? 0;
+                                        const pallets = ipp > 0 ? Math.floor(cell.qty / ipp) : 0;
+                                        const loose = ipp > 0 ? cell.qty % ipp : 0;
+                                        const bits = [
+                                          itemUnitTab !== "loose" && pallets > 0 ? `${pallets} plt` : null,
+                                          itemUnitTab !== "pallet" && loose > 0 ? `${loose} loose` : null,
+                                        ].filter(Boolean);
+                                        return (
+                                          <div key={cell.label} className="min-w-0 px-0.5 text-center">
+                                            <p className="truncate text-[8px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</p>
+                                            <p className={`text-sm font-bold leading-none tabular-nums ${cell.cls}`}>{cell.value}</p>
+                                            <p className="truncate text-[11px] font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : " "}</p>
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                     {canScanThisLoad && row.barcode && (
-                                      <div className="flex shrink-0 items-center gap-1">
+                                      <div className="flex shrink-0 items-center gap-1.5">
                                         <Button size="sm" variant="ghost" disabled={row.loaded <= 0}
-                                          className="h-7 w-7 rounded-full bg-red-100 p-0 text-sm font-bold text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+                                          className="h-9 w-9 rounded-full bg-red-100 p-0 text-xl font-bold leading-none text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
                                           title="Remove from loaded quantity"
                                           onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}>−</Button>
                                         {/* The loaded quantity, between − and +. */}
-                                        <span className="min-w-[2rem] text-center text-sm font-bold tabular-nums text-gray-900" title="Current loaded quantity">{row.loaded}</span>
+                                        <span className="min-w-[2.25rem] text-center text-xl font-bold tabular-nums text-gray-900" title="Current loaded quantity">{row.loaded}</span>
                                         <Button size="sm" variant="ghost"
-                                          className="h-7 w-7 rounded-full bg-emerald-100 p-0 text-sm font-bold text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
+                                          className="h-9 w-9 rounded-full bg-emerald-100 p-0 text-xl font-bold leading-none text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
                                           title="Add to loaded quantity"
                                           onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
                                       </div>
