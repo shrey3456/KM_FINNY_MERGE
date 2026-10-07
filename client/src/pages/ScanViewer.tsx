@@ -16,6 +16,7 @@ import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton, ColumnFilterPopoverContent } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, conditionSummary, matchAllConditions } from "@/lib/columnFilters";
 import { Button } from "@/components/ui/button";
+import { HistoryStatus } from "@/components/HistoryStatus";
 import { Input } from "@/components/ui/input";
 import { DateInput } from "@/components/ui/date-input";
 import { Label } from "@/components/ui/label";
@@ -27,7 +28,6 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
-import { LoadingViewerSection } from "./ScanViewerLoading";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -381,7 +381,8 @@ export default function ScanViewer() {
   // picker/table/history flow (see UnloadingViewerSection below), not another mode threaded
   // through the Order Scan state above.
   const [viewerSource, setViewerSource] = useState<"order-scan" | "unloading" | "loading">(
-    () => (readSavedViewerFilters().viewerSource as "order-scan" | "unloading" | "loading") ?? "order-scan",
+    // A saved "loading" (that view now lives on the Loading Overview page) falls back to Order Scan.
+    () => (readSavedViewerFilters().viewerSource === "unloading" ? "unloading" : "order-scan"),
   );
   // Part Order lists each CSV part of this order on its own, expandable to its rows — the
   // read-only counterpart of the Scan Order page's own Part Order tab.
@@ -1200,17 +1201,7 @@ export default function ScanViewer() {
                     </span>
                   </td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-[11px]">
-                    {ev.voided ? (
-                      <span className="font-medium text-red-500" title={ev.voidReason ?? undefined}>Voided</span>
-                    ) : ev.isExtra ? (
-                      <span className="font-semibold uppercase text-amber-700">Extra</span>
-                    ) : (
-                      // A plain, still-valid scan — every row landed here before (the only two
-                      // states this column ever distinguished were Voided and Extra), which is
-                      // indistinguishable from missing data at a glance. Label the normal case
-                      // instead of leaving it blank.
-                      <span className="font-medium text-emerald-600">Received</span>
-                    )}
+                    <HistoryStatus source="scan" isExtra={ev.isExtra} voided={ev.voided} voidReason={ev.voidReason} />
                   </td>
                   {canVoidScan && (
                     <td className="px-2 py-2 text-right">
@@ -1673,7 +1664,6 @@ export default function ScanViewer() {
           {([
             { key: "order-scan", label: "Order Scan" },
             { key: "unloading", label: "Unloading" },
-            { key: "loading", label: "Loading" },
           ] as const).map((s) => (
             <button
               key={s.key}
@@ -1692,8 +1682,6 @@ export default function ScanViewer() {
 
         {viewerSource === "unloading" ? (
           <UnloadingViewerSection plantOptions={plantOptions} getPlantColorCfg={getPlantColorCfg} />
-        ) : viewerSource === "loading" ? (
-          <LoadingViewerSection plantOptions={plantOptions} getPlantColorCfg={getPlantColorCfg} />
         ) : (
         <>
         {/* Session header — combines the plant/date/part CONTROLS (always visible, so they're
@@ -3341,13 +3329,7 @@ function UnloadingViewerSection({
                       </span>
                     </td>
                     <td className={`truncate px-2 py-2 text-[11px] ${canVoidUnloadEvent ? "border-r border-gray-100" : ""}`}>
-                      {m.voided ? (
-                        <span className="font-medium text-red-500" title={m.voidReason ?? undefined}>Voided</span>
-                      ) : m.isExtra ? (
-                        <span className="font-semibold uppercase text-amber-700">Extra</span>
-                      ) : (
-                        <span className="font-semibold uppercase text-emerald-700">Received</span>
-                      )}
+                      <HistoryStatus source="unloading" isExtra={m.isExtra} voided={m.voided} voidReason={m.voidReason} />
                     </td>
                     {canVoidUnloadEvent && (
                       <td className="px-2 py-2 text-right">

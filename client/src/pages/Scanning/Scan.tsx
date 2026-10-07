@@ -46,6 +46,7 @@ import { useUser } from "@/hooks/use-user";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import { HistoryStatus } from "@/components/HistoryStatus";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { DataTable, DATA_TABLE_TOTALS_ROW, type DataTableColumn } from "@/components/ui/data-table";
@@ -1936,23 +1937,23 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // so a plain 100%-width block here would inherit that full width. "sticky left:0" pins it
     // to the visible left edge of whatever ancestor is actually scrolled; capping the width
     // well under any realistic viewport keeps the whole thing on-screen at that position.
-    <div className="sticky left-0 w-full max-w-2xl bg-gray-50 p-3">
+    <div className="sticky left-0 w-full max-w-5xl bg-gray-50 p-3">
       {mvHistoryQuery.isLoading ? (
         <SectionSkeleton lines={3} />
       ) : (mvHistoryQuery.data?.items?.length ?? 0) === 0 ? (
         <p className="py-4 text-center text-xs text-gray-400">No scans yet for this item in this order.</p>
       ) : (
         <div className="max-h-72 overflow-y-auto border border-gray-200">
-          <table className="w-full table-fixed border-collapse text-xs">
+          <table className="w-full table-fixed border-collapse text-sm">
             <thead>
               <tr className="border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600 sticky top-0 z-10">
-                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-7">#</th>
-                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-[122px]">Date &amp; Time</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2.5 w-9">#</th>
+                <th className="font-semibold border-r border-gray-200 px-2 py-2.5 w-[170px]">Date &amp; Time</th>
                 <th className="font-semibold border-r border-gray-200 px-2 py-2">Scanned By</th>
                 <th className="font-semibold border-r border-gray-200 px-2 py-2">Order</th>
                 <th className="font-semibold text-center border-r border-gray-200 px-2 py-2 w-14">Qty</th>
-                <th className="font-semibold border-r border-gray-200 px-2 py-2 w-16">Status</th>
-                {canVoidScan && <th className="font-semibold text-right px-2 py-2 w-14">Action</th>}
+                <th className="font-semibold border-r border-gray-200 px-2 py-2.5 w-[130px]">Status</th>
+                {canVoidScan && <th className="font-semibold text-right px-2 py-2.5 w-16">Action</th>}
               </tr>
             </thead>
             <tbody>
@@ -1977,15 +1978,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </span>
                     </td>
                     <td className="px-2 py-2 text-[11px] border-r border-gray-100 truncate">
-                      {ev.voided ? (
-                        <span className="font-medium text-red-500" title={ev.voidReason ?? undefined}>Voided</span>
-                      ) : ev.isExtra ? (
-                        <span className="font-semibold uppercase text-amber-700">Extra</span>
-                      ) : (
-                        // Same fix as ScanViewer.tsx's identical panel: label the normal,
-                        // still-valid case instead of leaving the column blank for it.
-                        <span className="font-medium text-emerald-600">Received</span>
-                      )}
+                      <HistoryStatus source="scan" isExtra={ev.isExtra} voided={ev.voided} voidReason={ev.voidReason} />
                     </td>
                     {canVoidScan && (
                       <td className="px-2 py-2 text-right">
@@ -2038,13 +2031,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               <p className="text-xs text-gray-400">
                 {stripCsvExt(ev.orderName)}
               </p>
-              {(ev.voided || ev.isExtra || canVoidScan) && (
+              {(
                 <div className="mt-1.5 flex items-center justify-between">
-                  {ev.voided ? (
-                    <span className="text-[11px] font-medium text-red-500" title={ev.voidReason ?? undefined}>Voided</span>
-                  ) : ev.isExtra ? (
-                    <span className="text-[11px] font-semibold uppercase text-amber-700">Extra</span>
-                  ) : <span />}
+                  <HistoryStatus source="scan" isExtra={ev.isExtra} voided={ev.voided} voidReason={ev.voidReason} />
                   {canVoidScan && !ev.voided && (
                     <Button
                       size="sm" variant="ghost"

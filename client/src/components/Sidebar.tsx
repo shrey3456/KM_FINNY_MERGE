@@ -195,6 +195,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "print-operations",
         },
         {
+          label: "Sort Slip",
+          icon: <ClipboardList className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/sort-slip",
+          pageKey: "sort-slip",
+        },
+        {
           label: "Load Operations",
           icon: (
             <Factory
@@ -204,6 +210,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           ),
           path: "/loading",
           pageKey: "loading",
+        },
+        {
+          label: "Loading Overview",
+          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/loading-overview",
+          pageKey: "loading-overview",
         },
         {
           label: "Unload Operations",
@@ -219,18 +231,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "scan-order",
         },
         {
-          label: "Sort Slip",
-          icon: <ClipboardList className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/sort-slip",
-          pageKey: "sort-slip",
-        },
-        {
-          label: "Reports",
-          icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/daily-reports",
-          pageKey: "daily-reports",
-        },
-        {
           label: "Overall Scan Ops",
           icon: <Eye className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/scan-viewer",
@@ -243,16 +243,16 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "scan-history",
         },
         {
-          label: "Adjust Exchange Extra",
-          icon: <ArrowLeftRight className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/adjust-exchange",
-          pageKey: "adjust-exchange",
-        },
-        {
           label: "Stock Overview",
           icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/overall-stock",
           pageKey: "overall-stock",
+        },
+        {
+          label: "Reports",
+          icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/daily-reports",
+          pageKey: "daily-reports",
         },
       ],
     },
@@ -275,6 +275,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/proforma-slips",
           pageKey: "proforma",
+        },
+        {
+          label: "Adjust Exchange Extra",
+          icon: <ArrowLeftRight className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/adjust-exchange",
+          pageKey: "adjust-exchange",
         },
         {
           label: "Order Management",

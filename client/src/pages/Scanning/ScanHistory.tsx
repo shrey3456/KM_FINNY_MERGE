@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
@@ -46,7 +46,8 @@ import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/
 // that also goes past the expected qty reads "Load Adjust", not "Load Extra".
 type ScanTypeLabel = { source: string; kind: string; label: string; className: string };
 
-function scanTypeLabel(row: {
+// Exported so the Loading page's item history labels its entries with exactly the same words.
+export function scanTypeLabel(row: {
   isExtra?: boolean; isEmptyBox?: boolean; isExchange?: boolean;
   isDispatch?: boolean; isUnload?: boolean; isAdjust?: boolean;
   sourceKind?: string; orderName?: string | null;
@@ -646,7 +647,11 @@ const ScanHistory = () => {
     { id: "time", label: "Time", filterType: "date", options: filterValues.time ?? [], accessor: (r) => r.scannedAt },
     { id: "orderDate", label: "Order Date", filterType: "date", options: filterValues.orderDate ?? [], accessor: (r) => r.orderDate },
     { id: "plant", label: "Plant", filterType: "enum", options: filterValues.plant ?? [], accessor: (r) => r.plant },
-  ], [filterValues]);
+    // Load Event tab only — Scan/Unload Event keep Order No. as a plain column.
+    ...(historySource === "dispatch"
+      ? [{ id: "orderNumber", label: "Order", filterType: "text" as const, options: filterValues.orderNumber ?? [], accessor: (r: ScanHistoryItem) => r.orderName }]
+      : []),
+  ], [filterValues, historySource]);
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
     () => readSavedHistoryFilters().conditions ?? {},
   );
@@ -1064,7 +1069,7 @@ const ScanHistory = () => {
       // row, or the proforma slip's order number for a Load Event row (see "orderName" in
       // SCAN_HISTORY_COMBINED_SOURCE, server/routes/scan-sessions.ts).
       id: "orderNumber",
-      header: "Order No.",
+      header: historySource === "dispatch" ? columnHeader("orderNumber", "Order") : "Order No.",
       width: 130,
       accessor: (row) => row.orderName,
       totalable: false,

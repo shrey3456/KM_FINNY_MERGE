@@ -1194,6 +1194,8 @@ const SCAN_HISTORY_FILTER_COLUMNS: Record<string, SqlFilterColumn> = {
   barcode:   { sql: 'barcode',     type: 'text' },
   qty:       { sql: '"totalQty"',  type: 'number' },
   pallets:   { sql: 'pallets',     type: 'number' },
+  // Load Event tab only (the client offers it nowhere else): the proforma slip's order number.
+  orderNumber: { sql: '"orderName"', type: 'text' },
 };
 
 // The names offered in the page's "Scanned by" dropdown. Three tables, scanned end to end with a

@@ -9,18 +9,19 @@
 export const CONTROLLABLE_PAGES = [
   // OPERATIONS
   { key: "print-operations", label: "Print Operations" },
+  { key: "sort-slip", label: "Sort Slip" },
   { key: "loading", label: "Load Operations" },
+  { key: "loading-overview", label: "Loading Overview" },
   { key: "unloading", label: "Unload Operations" },
   { key: "scan-order", label: "Scan Operations" },
-  { key: "sort-slip", label: "Sort Slip" },
-  { key: "daily-reports", label: "Reports" },
   { key: "scan-viewer", label: "Overall Scan Ops" },
   { key: "scan-history", label: "Scan History" },
-  { key: "adjust-exchange", label: "Adjust Exchange Extra" },
   { key: "overall-stock", label: "Stock Overview" },
+  { key: "daily-reports", label: "Reports" },
   // SALES
   { key: "dispatch", label: "Dispatch" },
   { key: "proforma", label: "Proforma Slips" },
+  { key: "adjust-exchange", label: "Adjust Exchange Extra" },
   { key: "order-import", label: "Order Management" },
   // INVENTORY
   { key: "notion-inventory", label: "Product Master" },

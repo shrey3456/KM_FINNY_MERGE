@@ -21,6 +21,7 @@ import { PlantBadge } from "@/components/PlantBadge";
 import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { Button } from "@/components/ui/button";
+import { HistoryStatus } from "@/components/HistoryStatus";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { DateInput } from "@/components/ui/date-input";
@@ -1198,7 +1199,7 @@ export default function Unloading() {
         const extra = Math.max(0, row.scanned - row.expected);
         return (
           <>
-            <span className={`block text-base ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `+${extra}` : "—"}</span>
+            <span className={`block text-base ${extra > 0 ? "text-amber-600 font-semibold" : "text-gray-300"}`}>{extra > 0 ? `${extra}` : "—"}</span>
             <span className="block text-xs font-semibold text-gray-400">{palletsOf(extra, row.itemsPerPallet)} plt</span>
           </>
         );
@@ -1266,15 +1267,7 @@ export default function Unloading() {
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-gray-600">{ev.stv ?? "—"}</td>
                     <td className="whitespace-nowrap px-3 py-2">
-                      {ev.voided ? (
-                        <span className="font-semibold text-red-500">Voided</span>
-                      ) : ev.isCredit ? (
-                        <span className="font-semibold text-blue-700">Credit</span>
-                      ) : ev.isExtra ? (
-                        <span className="font-semibold text-amber-700">Extra</span>
-                      ) : (
-                        <span className="font-semibold text-emerald-600">OK</span>
-                      )}
+                      <HistoryStatus source="unloading" isExtra={ev.isExtra} isCredit={ev.isCredit} voided={ev.voided} voidReason={ev.voidReason} />
                     </td>
                     {canWrite && (
                       <td className="px-3 py-2 text-right">
@@ -2322,7 +2315,7 @@ export default function Unloading() {
                                 { label: "Expected", value: item.expected, cls: "text-gray-900" },
                                 { label: "Received", value: item.scanned, cls: "text-emerald-600" },
                                 { label: "Remaining", value: item.remaining, cls: "text-[#001d6e]" },
-                                { label: "Extra", value: extra > 0 ? `+${extra}` : "—", cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
+                                { label: "Extra", value: extra > 0 ? `${extra}` : "—", cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
                               ] as const).map((cell) => (
                                 <div key={cell.label} className="min-w-0 px-1 text-center">
                                   <p className="truncate text-[9px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</p>

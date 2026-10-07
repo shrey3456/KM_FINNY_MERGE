@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+﻿import React, { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
 import { NotionStatusBadge } from "@/components/NotionStatusBadge";
@@ -2209,11 +2209,11 @@ export default function ProformaSlips() {
             </>
           )}
 
-          {/* Upload CSV: admin only — record loads that already left the warehouse (preview page) */}
+          {/* Create System Generated Load Slip: admin only — record loads that already left the warehouse from a Sales Orders CSV (preview page) */}
           {isAdminOrSuper && (
             <Link href="/load-csv-upload">
               <Button variant="outline" size="sm">
-                <Upload className="mr-2 h-4 w-4" /> Upload CSV
+                <Upload className="mr-2 h-4 w-4" /> Create System Generated Load Slip
               </Button>
             </Link>
           )}

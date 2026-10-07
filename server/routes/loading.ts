@@ -393,16 +393,6 @@ async function withProgress(slip: any, items: any[]) {
   );
   const loadedByBarcode = new Map<string, number>(loadedRows.map((r: any) => [normalize(r.barcode), r.loadedQty]));
 
-  // Quantity logged through Add Extra / flagged is_extra. Counted in loaded like any scan, but
-  // "loaded - expected" alone can't see it while the item still has room left (expected 100,
-  // loaded 10 of which all Extra) — so it's reported separately for the Extra stat/filter.
-  const { rows: extraRows } = await pool.query(
-    `SELECT barcode, COALESCE(SUM(total_qty), 0)::int AS "extraQty"
-     FROM loading_scan_events WHERE order_number = $1 AND voided IS NOT TRUE AND is_extra = true GROUP BY barcode`,
-    [slip.orderNumber],
-  );
-  const extraByBarcode = new Map<string, number>(extraRows.map((r: any) => [normalize(r.barcode), r.extraQty]));
-
   const progressItems = await Promise.all(items.map(async (item) => {
     const product = item.barcode ? await storage.getProductByBarcode(item.barcode, slip.plant) : undefined;
     const expected = item.quantity ?? 0;
@@ -422,7 +412,11 @@ async function withProgress(slip: any, items: any[]) {
     }
     return {
       ...item, expected, loaded, remaining: Math.max(0, expected - loaded),
-      extraQty: Math.max(extraByBarcode.get(normalize(item.barcode)) ?? 0, loaded - expected, 0),
+      // Extra is simply what is loaded beyond what was expected — always agrees with Loaded and
+      // Remaining. (It used to add up the rows flagged Extra, which went wrong after a "−" or a "+"
+      // that crossed the expected quantity: the stale Extra rows were never taken back out.) Extra can
+      // only be added once an item is complete now, so there is no "Extra inside the expected qty".
+      extraQty: Math.max(0, loaded - expected),
       itemsPerPallet,
       // The pallet size actually configured in Product Master (0 when GJ/MP PLT is blank).
       // itemsPerPallet falls back to the line quantity so totals still count one pallet; this
@@ -1005,13 +999,26 @@ router.get('/loading/date-report/scan-activity', requirePageAccess('loading'), a
 // product, with each party's share underneath. Read-only, guarded by the scan-viewer page (not
 // Loading) since that is the page that shows it. Built on computeLoadDateReport, so the numbers
 // match the Loading page's own date report; orders not loaded yet are included (loaded 0).
-router.get('/loading/date-items', requirePageAccess('scan-viewer'), async (req: Request, res: Response) => {
+router.get('/loading/date-items', requirePageAccess(['loading-overview', 'scan-viewer']), async (req: Request, res: Response) => {
   try {
-    const plant = String(req.query.plant ?? '').trim();
-    const date = String(req.query.date ?? '').trim();
+    let plant = String(req.query.plant ?? '').trim();
+    let date = String(req.query.date ?? '').trim();
+    const orderParam = String(req.query.order ?? '').trim();
+    const PLANT_RESTRICTED = 'You can not access this plant — your account is restricted to the plant(s) assigned to you.';
+    // One order asked for by number: its own plant and date decide what is read, and the plant
+    // restriction is checked against THAT plant, so an order of another plant is refused.
+    if (orderParam) {
+      const { rows: found } = await pool.query(
+        `SELECT plant, to_char(order_date, 'YYYY-MM-DD') AS d FROM proforma_slips WHERE order_number = $1 ORDER BY id LIMIT 1`, [orderParam],
+      );
+      if (found.length === 0) return res.json({ plant: '', date: '', orders: 0, parties: 0, items: [] });
+      plant = String(found[0].plant ?? '');
+      date = String(found[0].d ?? '');
+      if (!plant || !canAccessPlant(req, plant)) return res.status(403).json({ message: `You can not open order #${orderParam} — it belongs to plant ${plant || 'unknown'}, which your account is restricted from (plant restriction).` });
+    }
     if (!plant || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'plant and date (YYYY-MM-DD) are required' });
     const allPlants = plant === '__all__';
-    if (!allPlants && !canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (!allPlants && !canAccessPlant(req, plant)) return res.status(403).json({ message: PLANT_RESTRICTED });
 
     // proforma_slips.plant keeps whatever casing the source used ("VALSAD"), the picker sends the
     // plant's configured name ("Valsad") — resolve the stored spelling(s) case-insensitively.
@@ -1030,7 +1037,7 @@ router.get('/loading/date-items', requirePageAccess('scan-viewer'), async (req: 
     const slips: any[] = [];
     for (const p of plantRows as any[]) {
       const report = await computeLoadDateReport(p.plant, date);
-      if (report) slips.push(...report.slips.map((s) => ({ ...s, plant: p.plant as string })));
+      if (report) slips.push(...report.slips.filter((s) => !orderParam || s.orderNumber === orderParam).map((s) => ({ ...s, plant: p.plant as string })));
     }
 
     const barcodes = Array.from(new Set(slips.flatMap((s) => s.items.map((i: any) => i.barcode))));
@@ -1084,6 +1091,28 @@ router.get('/loading/date-items', requirePageAccess('scan-viewer'), async (req: 
     });
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to build the loading item list' });
+  }
+});
+
+// GET /api/loading/order-suggest?q= — order numbers matching what was typed in Loading Overview's
+// order box, limited to the plants this user may see.
+router.get('/loading/order-suggest', requirePageAccess(['loading-overview', 'scan-viewer']), async (req: Request, res: Response) => {
+  try {
+    const q = String(req.query.q ?? '').trim().replace(/^#/, '');
+    if (q.length < 2) return res.json([]);
+    const userPlants = getUserPlants(req.user);
+    const params: any[] = [`%${q.toLowerCase()}%`];
+    let plantCond = '';
+    if (userPlants !== null) { params.push(userPlants); plantCond = `AND LOWER(plant) = ANY($2)`; }
+    const { rows } = await pool.query(
+      `SELECT order_number AS "orderNumber", party_name AS "partyName", plant, to_char(order_date, 'YYYY-MM-DD') AS "orderDate"
+         FROM proforma_slips WHERE LOWER(order_number) LIKE $1 ${plantCond}
+         ORDER BY order_date DESC NULLS LAST, order_number DESC LIMIT 15`,
+      params,
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to search orders' });
   }
 });
 
@@ -1689,23 +1718,50 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
         throw Object.assign(new Error(`Only ${alreadyLoaded} currently loaded for this item — cannot remove ${Math.abs(delta)}.`), { status: 409 });
       }
 
+      // Split the change into the part that is NORMAL (up to the expected quantity) and the part that
+      // is EXTRA (beyond it), the same way a scan does — so a "+" that crosses the expected quantity
+      // is only partly Extra, and a "−" takes boxes off the Extra first and only then off the normal
+      // part. Extra = Loaded − Expected then stays true whatever order the buttons were pressed in.
       const absDelta = Math.abs(delta);
-      const pallets = itemsPerPallet > 0 ? Math.floor(absDelta / itemsPerPallet) : 0;
-      const looseQty = itemsPerPallet > 0 ? absDelta % itemsPerPallet : absDelta;
-      const isExtra = newLoadedTotal > expected;
-
-      const { rows: adjustEventRows } = await client.query(
-        `INSERT INTO loading_scan_events
-           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, plant, stv, scanned_by_code, scanned_by_name)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13) RETURNING id`,
-        [
-          slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
-          delta > 0 ? pallets : -pallets, delta > 0 ? looseQty : -looseQty, delta, isExtra, slip.plant, null, userCode ?? null, userName ?? null,
-        ],
-      );
+      const room = Math.max(0, expected - alreadyLoaded);          // how much more is still "normal"
+      const aboveExpected = Math.max(0, alreadyLoaded - expected); // how much is already Extra
+      const extraPart = delta > 0 ? Math.max(0, delta - room) : Math.min(absDelta, aboveExpected);
+      const regularPart = absDelta - extraPart;
+      const sign = delta > 0 ? 1 : -1;
+      const insertAdjust = async (qtyAbs: number, isExtra: boolean): Promise<number> => {
+        const { rows } = await client.query(
+          `INSERT INTO loading_scan_events
+             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, plant, stv, scanned_by_code, scanned_by_name)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13) RETURNING id`,
+          [
+            slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
+            sign * (itemsPerPallet > 0 ? Math.floor(qtyAbs / itemsPerPallet) : 0),
+            sign * (itemsPerPallet > 0 ? qtyAbs % itemsPerPallet : qtyAbs),
+            sign * qtyAbs, isExtra, slip.plant, null, userCode ?? null, userName ?? null,
+          ],
+        );
+        return rows[0].id as number;
+      };
+      const regularEventId = regularPart > 0 ? await insertAdjust(regularPart, false) : null;
+      const extraEventId = extraPart > 0 ? await insertAdjust(extraPart, true) : null;
 
       if (delta > 0) {
-        await recordStockPulls(client, adjustEventRows[0].id, positiveDeltaContributions);
+        // Slice the stock pulled across the event(s), normal part first (same as a scan), so each
+        // event's own pulls add up to exactly its own quantity — needed for an exact void later.
+        let sliceRemaining = regularPart;
+        const regularContributions: StockPullContribution[] = [];
+        const extraContributions: StockPullContribution[] = [];
+        for (const c of positiveDeltaContributions) {
+          if (sliceRemaining <= 0) { extraContributions.push(c); continue; }
+          if (c.qty <= sliceRemaining) { regularContributions.push(c); sliceRemaining -= c.qty; }
+          else {
+            regularContributions.push({ plant: c.plant, qty: sliceRemaining });
+            extraContributions.push({ plant: c.plant, qty: c.qty - sliceRemaining });
+            sliceRemaining = 0;
+          }
+        }
+        if (regularEventId) await recordStockPulls(client, regularEventId, regularContributions);
+        if (extraEventId) await recordStockPulls(client, extraEventId, extraContributions);
         for (const c of positiveDeltaContributions) {
           await client.query(
             `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, source)

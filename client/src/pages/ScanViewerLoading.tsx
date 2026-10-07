@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { addDays, format } from "date-fns";
-import { CheckCircle2, Clock, Loader2, Package, PackagePlus, RefreshCw, Users } from "lucide-react";
+import { CheckCircle2, Clock, Loader2, Package, PackagePlus, RefreshCw, Search, Users, X } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { DateInput } from "@/components/ui/date-input";
@@ -28,6 +28,7 @@ type ItemRow = {
   expected: number; loaded: number; extra: number; remaining: number;
   parties: PartyRow[];
 };
+type OrderHit = { orderNumber: string; partyName: string; plant: string; orderDate: string };
 type DateItems = { plant: string; date: string; orders: number; parties: number; items: ItemRow[] };
 
 const ALL_PLANTS = "__all__";
@@ -116,6 +117,11 @@ export function LoadingViewerSection({
   // Always opens on today — not remembered between visits, so it never reopens on an old date.
   const [date, setDate] = useState(() => format(new Date(), "yyyy-MM-dd"));
   const [search, setSearch] = useState("");
+  // Order-number search: narrows the whole page to that order — only its items, and every quantity
+  // (rows, totals, stats) counted for that order alone, not the whole date.
+  const [orderNo, setOrderNo] = useState("");
+  const [picked, setPicked] = useState<OrderHit | null>(null);
+  const [sugOpen, setSugOpen] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [conditions, setConditions] = useState<Record<string, FilterCondition>>({});
 
@@ -126,16 +132,59 @@ export function LoadingViewerSection({
     : plantOptions.find((p) => p.toLowerCase() === plant.toLowerCase()) ?? ALL_PLANTS;
 
   const query = useQuery<DateItems>({
-    queryKey: ["/api/loading/date-items", activePlant, date],
+    queryKey: ["/api/loading/date-items", activePlant, date, picked?.orderNumber ?? ""],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/loading/date-items?plant=${encodeURIComponent(activePlant)}&date=${encodeURIComponent(date)}`);
+      // A picked order is read on its own — its own plant and date decide what is shown.
+      const url = picked
+        ? `/api/loading/date-items?order=${encodeURIComponent(picked.orderNumber)}`
+        : `/api/loading/date-items?plant=${encodeURIComponent(activePlant)}&date=${encodeURIComponent(date)}`;
+      const res = await apiRequest("GET", url);
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to load");
       return res.json();
     },
-    enabled: !!activePlant && !!date,
+    enabled: !!picked || (!!activePlant && !!date),
     refetchInterval: 15_000,
   });
-  const items = query.data?.items ?? [];
+  // Order numbers matching what was typed — the picker below the box. Server-side plant-restricted.
+  const suggestQuery = useQuery<OrderHit[]>({
+    queryKey: ["/api/loading/order-suggest", orderNo.trim()],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/loading/order-suggest?q=${encodeURIComponent(orderNo.trim())}`);
+      return res.ok ? res.json() : [];
+    },
+    enabled: !picked && orderNo.trim().replace(/^#/, "").length >= 2,
+    staleTime: 15_000,
+  });
+  const suggestions = suggestQuery.data ?? [];
+  const pickOrder = (h: OrderHit) => {
+    setPicked(h); setOrderNo(h.orderNumber); setDate(h.orderDate); setSugOpen(false); setExpanded(null);
+  };
+  // No manual pick needed: once the typed number matches exactly one order (or is exactly an order
+  // number), that order selects itself.
+  useEffect(() => {
+    if (picked || suggestions.length === 0) return;
+    const typed = orderNo.trim().replace(/^#/, "").toLowerCase();
+    const hit = suggestions.find((h) => h.orderNumber.toLowerCase() === typed) ?? (suggestions.length === 1 ? suggestions[0] : null);
+    if (hit) pickOrder(hit);
+  }, [suggestions, picked]);
+  const clearOrder = () => { setPicked(null); setOrderNo(""); setSugOpen(false); setExpanded(null); };
+  const orderQ = picked ? picked.orderNumber.toLowerCase() : "";
+  const items = useMemo<ItemRow[]>(() => {
+    const all = query.data?.items ?? [];
+    if (!orderQ) return all;
+    const out: ItemRow[] = [];
+    for (const it of all) {
+      const parties = it.parties.filter((p) => p.orderNumber.toLowerCase() === orderQ);
+      if (parties.length === 0) continue;
+      const sum = (k: "expected" | "loaded" | "extra" | "remaining") => parties.reduce((s, p) => s + p[k], 0);
+      out.push({ ...it, parties, expected: sum("expected"), loaded: sum("loaded"), extra: sum("extra"), remaining: sum("remaining") });
+    }
+    // Extras that are not on this order's slip first, then the slip's own items.
+    out.sort((a, b) => Number(b.expected === 0 && b.extra > 0) - Number(a.expected === 0 && a.extra > 0));
+    return out;
+  }, [query.data, orderQ]);
+  const shownOrders = orderQ ? new Set(items.flatMap((i) => i.parties.map((p) => p.orderNumber))).size : (query.data?.orders ?? 0);
+  const shownParties = orderQ ? new Set(items.flatMap((i) => i.parties.map((p) => p.partyName))).size : (query.data?.parties ?? 0);
 
   const totals = items.reduce(
     (acc, it) => {
@@ -154,7 +203,6 @@ export function LoadingViewerSection({
     { id: "item", label: "Item Name", filterType: "text", options: distinct(items.map((i) => i.itemName)), accessor: (i) => i.itemName },
     { id: "barcode", label: "Barcode", filterType: "text", options: distinct(items.map((i) => i.barcode)), accessor: (i) => i.barcode },
     { id: "party", label: "Party", filterType: "text", options: distinct(items.flatMap((i) => i.parties.map((p) => p.partyName))), accessor: (i) => i.parties.map((p) => p.partyName) },
-    { id: "order", label: "Order No.", filterType: "text", options: distinct(items.flatMap((i) => i.parties.map((p) => p.orderNumber))), accessor: (i) => i.parties.map((p) => p.orderNumber) },
     { id: "expected", label: "Expected", filterType: "number", disableValues: true, options: [], accessor: (i) => i.expected },
     { id: "loaded", label: "Loaded", filterType: "number", disableValues: true, options: [], accessor: (i) => i.loaded },
     { id: "remaining", label: "Remaining", filterType: "number", disableValues: true, options: [], accessor: (i) => i.remaining },
@@ -205,7 +253,7 @@ export function LoadingViewerSection({
             {r.itemsPerPallet > 0 && <span className="block text-xs font-semibold text-gray-500">{r.itemsPerPallet} per pallet</span>}
             {r.expected === 0 && r.extra > 0 && (
               <span className="mt-0.5 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-sm font-bold text-amber-800">
-                NOT ON ANY ORDER · {r.parties.filter((p) => p.extra > 0).map((p) => `#${p.orderNumber}`).join(", ")}
+                {picked ? "EXTRA · NOT ON THIS ORDER'S SLIP" : `NOT ON ANY ORDER · ${r.parties.filter((p) => p.extra > 0).map((p) => `#${p.orderNumber}`).join(", ")}`}
               </span>
             )}
           </div>
@@ -238,11 +286,53 @@ export function LoadingViewerSection({
     },
   ];
 
+  const orderBox = (
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+          <input
+            value={orderNo}
+            onChange={(e) => { setOrderNo(e.target.value); if (picked) { setPicked(null); setExpanded(null); } setSugOpen(true); }}
+            onFocus={() => setSugOpen(true)}
+            onBlur={() => setTimeout(() => setSugOpen(false), 150)}
+            onKeyDown={(e) => { if (e.key === "Enter" && suggestions[0] && !picked) { e.preventDefault(); pickOrder(suggestions[0]); } }}
+            placeholder="Order number"
+            className={`h-8 w-44 rounded-full border bg-white pl-8 pr-7 text-xs font-semibold text-[#001d6e] placeholder:font-normal placeholder:text-gray-400 focus:outline-none ${picked ? "border-[#001d6e] ring-1 ring-[#001d6e]/30" : "border-gray-200 focus:border-[#001d6e]"}`}
+          />
+          {orderNo && (
+            <button type="button" onClick={clearOrder} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700" aria-label="Clear order number">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {sugOpen && !picked && orderNo.trim().replace(/^#/, "").length >= 2 && (
+            <div className="absolute left-0 top-9 z-30 max-h-72 w-72 overflow-y-auto rounded-xl border border-gray-200 bg-white py-1 shadow-lg">
+              {suggestQuery.isLoading ? (
+                <p className="px-3 py-2 text-xs text-gray-400">Searching…</p>
+              ) : suggestions.length === 0 ? (
+                <p className="px-3 py-2 text-xs text-gray-400">No order found for your plants.</p>
+              ) : suggestions.map((h) => (
+                <button
+                  key={`${h.orderNumber}-${h.orderDate}`}
+                  type="button"
+                  onMouseDown={(e) => { e.preventDefault(); pickOrder(h); }}
+                  className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left hover:bg-gray-50"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold text-[#001d6e]">#{h.orderNumber}</span>
+                    <span className="block truncate text-xs text-gray-500">{h.partyName}</span>
+                  </span>
+                  <span className="shrink-0 text-right text-[11px] text-gray-400">{h.plant}<br />{h.orderDate}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+  );
+
   return (
     <div className="space-y-3" style={{ fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" }}>
       {/* Plant + date — the only inputs; everything below is for that one day. */}
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={activePlant} onValueChange={setPlant}>
+        <Select value={activePlant} onValueChange={(v) => { setPlant(v); if (picked) clearOrder(); }}>
           <SelectTrigger
             className="h-8 w-auto gap-1 rounded-full text-xs font-semibold"
             style={plantCfg ? { backgroundColor: plantCfg.bgColor ?? undefined, color: plantCfg.textColor ?? undefined, borderColor: plantCfg.borderColor ?? undefined } : undefined}
@@ -254,7 +344,7 @@ export function LoadingViewerSection({
             {plantOptions.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}
           </SelectContent>
         </Select>
-        <DateInput className="h-8 rounded-full text-xs" value={date} onChange={(v) => { setDate(v); setExpanded(null); }} clearable={false} />
+        <DateInput className="h-8 rounded-full text-xs" value={date} onChange={(v) => { setDate(v); setExpanded(null); if (picked) clearOrder(); }} clearable={false} />
         {/* Quick dates — one tap for the days that are normally looked at. */}
         <div className="flex overflow-hidden rounded-full border border-gray-200 bg-white">
           {([
@@ -268,7 +358,7 @@ export function LoadingViewerSection({
               <button
                 key={d.label}
                 type="button"
-                onClick={() => { setDate(value); setExpanded(null); }}
+                onClick={() => { setDate(value); setExpanded(null); if (picked) clearOrder(); }}
                 className={`px-3 py-1 text-sm font-semibold transition-colors ${active ? "bg-[#001d6e] text-white" : "text-gray-600 hover:bg-gray-50"}`}
               >
                 {d.label}
@@ -288,16 +378,9 @@ export function LoadingViewerSection({
         <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-base text-gray-400">
           Pick a plant and an order date.
         </div>
-      ) : query.isLoading ? (
-        <SectionSkeleton lines={6} />
-      ) : query.isError ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 py-10 text-center text-base text-red-600">{(query.error as Error).message}</div>
-      ) : items.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-base text-gray-400">
-          No Notion orders for {activePlant === ALL_PLANTS ? "any plant" : activePlant} on {date}.
-        </div>
       ) : (
         <>
+          {!query.isLoading && !query.isError && items.length > 0 && (
           <StatsBar
             singleRow
             stats={[
@@ -305,16 +388,18 @@ export function LoadingViewerSection({
               { icon: CheckCircle2, label: "Loaded", value: totals.loaded, hint: `${totals.pLoaded.toFixed(2)} plt`, tone: "emerald" },
               { icon: Clock, label: "Remaining", value: totals.remaining, hint: `${totals.pRemaining.toFixed(2)} plt`, tone: "red" },
               { icon: PackagePlus, label: "Extra", value: totals.extra, hint: `${totals.pExtra.toFixed(2)} plt`, tone: totals.extra > 0 ? "amber" : "muted" },
-              { icon: Users, label: "Orders", value: query.data?.orders ?? 0, hint: `${query.data?.parties ?? 0} parties · ${items.length} items`, tone: "navy" },
+              { icon: Users, label: "Orders", value: shownOrders, hint: `${shownParties} parties · ${items.length} items`, tone: "navy" },
             ]}
           />
+          )}
 
-          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-            <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 px-4 py-3">
+          <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+            <div className="flex flex-wrap items-center gap-2 rounded-t-xl border-b border-gray-100 px-4 py-3">
               <Package className="h-4 w-4 text-[#001d6e]" />
-              <span className="text-lg font-semibold text-gray-900">Items Loaded on {date}</span>
+              <span className="text-lg font-semibold text-gray-900">{picked ? `Order #${picked.orderNumber} · ${picked.partyName} · ${date}` : `Items Loaded on ${date}`}</span>
               <span className="text-sm text-gray-400">{conditionList.length > 0 || q ? `(${rows.length} of ${items.length})` : `(${items.length})`}</span>
               <div className="ml-auto flex items-center gap-2">
+                {orderBox}
                 <AddColumnFilterButton
                   columns={filterColumns}
                   conditions={conditions}
@@ -333,6 +418,16 @@ export function LoadingViewerSection({
               )}
             </div>
 
+            {query.isLoading ? (
+              <div className="p-3"><SectionSkeleton lines={6} /></div>
+            ) : query.isError ? (
+              <div className="py-10 text-center text-base text-red-600">{(query.error as Error).message}</div>
+            ) : items.length === 0 ? (
+              <div className="py-16 text-center text-base text-gray-400">
+                {picked ? `Nothing found for order #${picked.orderNumber}.` : `No Notion orders for ${activePlant === ALL_PLANTS ? "any plant" : activePlant} on ${date}.`}
+              </div>
+            ) : (
+            <>
             {/* Desktop: table. */}
             <div className="hidden lg:block">
               <DataTable<ItemRow>
@@ -379,7 +474,7 @@ export function LoadingViewerSection({
                         <p className="truncate font-mono text-sm text-gray-400">{r.barcode}{r.itemsPerPallet > 0 ? ` · ${r.itemsPerPallet}/plt` : ""}</p>
                         {r.expected === 0 && r.extra > 0 && (
                           <p className="truncate text-sm font-bold text-amber-700">
-                            Not on any order · {r.parties.filter((p) => p.extra > 0).map((p) => `#${p.orderNumber}`).join(", ")}
+                            {picked ? "Extra · not on this order's slip" : `Not on any order · ${r.parties.filter((p) => p.extra > 0).map((p) => `#${p.orderNumber}`).join(", ")}`}
                           </p>
                         )}
                         <p className="mt-0.5 text-base tabular-nums text-gray-600">
@@ -388,7 +483,7 @@ export function LoadingViewerSection({
                           Loaded <span className="text-[17px] font-bold text-emerald-600">{r.loaded}</span>
                           <span className="text-gray-300"> · </span>
                           Rem <span className="text-[17px] font-bold text-[#001d6e]">{r.remaining}</span>
-                          {r.extra > 0 && <span className="ml-1.5 text-[17px] font-bold text-amber-600">+{r.extra} extra</span>}
+                          {r.extra > 0 && <span className="ml-1.5 text-[17px] font-bold text-amber-600">{r.extra} extra</span>}
                         </p>
                       </div>
                     </div>
@@ -397,6 +492,8 @@ export function LoadingViewerSection({
                 );
               })}
             </div>
+            </>
+            )}
           </div>
         </>
       )}

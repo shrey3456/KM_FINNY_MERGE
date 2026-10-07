@@ -1,4 +1,4 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { ArrowLeft, FileText, Loader2, Upload } from "lucide-react";
@@ -184,7 +184,7 @@ export default function LoadCsvUpload() {
       </div>
       <PageHeader
         icon={FileText}
-        title="Upload Load CSV"
+        title="Create System Generated Load Slip"
         subtitle="Record loads that already left the warehouse. Preview first — nothing is saved on this page."
       />
 

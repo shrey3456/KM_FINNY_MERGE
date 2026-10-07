@@ -34,6 +34,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlantFilter } from "@/components/PlantFilter";
 import { NotionStatusBadge } from "@/components/NotionStatusBadge";
 import { withNotionNotice } from "@/lib/notionSyncNotice";
+import { scanTypeLabel } from "@/pages/Scanning/ScanHistory";
+import { HistoryStatus } from "@/components/HistoryStatus";
 import { SingleDateFilter } from "@/components/SingleDateFilter";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -787,7 +789,9 @@ export default function LoadOperation() {
       const el = itemsTableWrapRef.current;
       if (!el) return;
       const top = el.getBoundingClientRect().top;
-      setItemsTableFillHeight(`${Math.max(240, Math.floor(window.innerHeight - top - 16))}px`);
+      // The reserve under the table covers the page's bottom padding and the card border — with
+      // only 16px the last row (and the sticky totals row) ended up clipped below the window.
+      setItemsTableFillHeight(`${Math.max(240, Math.floor(window.innerHeight - top - 56))}px`);
     };
     measure();
     const raf = requestAnimationFrame(measure);
@@ -1513,7 +1517,7 @@ export default function LoadOperation() {
       setItems(data.items);
       setAllComplete(data.allComplete);
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history", "item-panel", data.slip.orderNumber] });
-      toast({ title: "Extra added", description: `${extraTarget?.name} · +${extraQty}` });
+      toast({ title: "Extra added", description: `${extraTarget?.name} · ${extraQty}` });
       resetExtraDialog();
     },
     onError: (err: any) => {
@@ -2353,7 +2357,7 @@ export default function LoadOperation() {
         if (extra <= 0) return null;
         return (
           <>
-            <span className="block font-bold text-amber-600">+{extra}</span>
+            <span className="block font-bold text-amber-600">{extra}</span>
             {renderPalletLoose(extra, row.itemsPerPallet ?? 0)}
           </>
         );
@@ -2408,7 +2412,7 @@ export default function LoadOperation() {
       accessor: (ev) => ev.totalQty,
       render: (ev) => (
         <span className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${ev.isExtra ? "bg-amber-100 text-amber-700" : "bg-[#001d6e]/10 text-[#001d6e]"}`}>
-          {(ev.isExtra || ev.isAdjust) && ev.totalQty > 0 ? "+" : ""}{ev.totalQty}
+          {ev.totalQty}
         </span>
       ),
     },
@@ -2419,17 +2423,12 @@ export default function LoadOperation() {
     },
     {
       id: "status", header: "Status", width: 140, minWidth: 120, totalable: false, headerClassName: "whitespace-nowrap",
-      accessor: (ev) => (ev.voided ? "Voided" : ev.isAdjust ? "Loading Adjust" : ev.isExtra ? "Extra" : ""),
-      render: (ev) =>
-        ev.voided ? (
-          <span className="text-[11px] font-medium text-red-500">Voided</span>
-        ) : ev.isAdjust ? (
-          <span className="whitespace-nowrap text-[11px] font-semibold uppercase text-blue-700">Loading Adjust</span>
-        ) : ev.isExtra ? (
-          <span className="text-[11px] font-bold text-amber-700">+{ev.totalQty}</span>
-        ) : (
-          <span className="text-[11px] text-gray-400">—</span>
-        ),
+      accessor: (ev) => (ev.voided ? "Voided" : scanTypeLabel({ isExtra: !!ev.isExtra, isAdjust: !!ev.isAdjust, isDispatch: true, sourceKind: "loading" }).label),
+      // The same words and badge Scan History's Type column uses ("Load Regular", "Load Extra",
+      // "Load Adjust"), plus "Voided" when the entry was undone.
+      render: (ev) => (
+        <HistoryStatus source="loading" isExtra={ev.isExtra} isAdjust={ev.isAdjust} voided={ev.voided} />
+      ),
     },
     ...(canResetLoad ? [{
       id: "void", header: "", width: 56, minWidth: 56, align: "right" as const, hideable: false, totalable: false,
@@ -3424,11 +3423,11 @@ export default function LoadOperation() {
                       vehicle as a proper row of badges/text underneath, sized to actually be
                       readable at a glance instead of one tiny catch-all line. */}
                   <div className="min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                      <span className="text-sm font-bold text-[#001d6e] truncate">#{slip.orderNumber}</span>
-                      <span className="text-sm text-gray-600 truncate">{slip.partyName}</span>
-                      {slip.plant && <PlantBadge plant={slip.plant} className="text-[10px]" />}
-                      <span className="ml-auto flex shrink-0 flex-wrap items-center gap-x-2 text-[11px]">
+                    <div className="flex flex-nowrap items-center gap-x-2">
+                      <span className="shrink-0 text-sm font-bold text-[#001d6e]">#{slip.orderNumber}</span>
+                      <span className="min-w-0 text-sm text-gray-600 truncate">{slip.partyName}</span>
+                      {slip.plant && <PlantBadge plant={slip.plant} className="shrink-0 text-[10px]" />}
+                      <span className="flex shrink-0 items-center gap-x-2 whitespace-nowrap text-[11px]">
                         {slip.orderDate && <span className="font-semibold text-gray-700">Order: {new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</span>}
                         {slip.loadDate && <span className="font-semibold text-gray-500">Load: {new Date(slip.loadDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</span>}
                       </span>
@@ -3502,6 +3501,12 @@ export default function LoadOperation() {
                           {itemTotals.loaded}/{itemTotals.expected} · {itemPct}%
                         </span>
                       </div>
+                      {locked && (
+                        <span className="inline-flex items-center gap-1 text-xs text-[#001d6e]">
+                          <Lock className="h-3.5 w-3.5 shrink-0" />
+                          Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -3608,14 +3613,6 @@ export default function LoadOperation() {
                   </div>
                 </div>
 
-                {locked && (
-                  <div className="flex items-center gap-2 px-3 sm:px-4 py-1.5 bg-[#001d6e]/5 border-b border-gray-100">
-                    <Lock className="h-3.5 w-3.5 shrink-0 text-[#001d6e]" />
-                    <div className="text-xs text-[#001d6e]">
-                      Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
-                    </div>
-                  </div>
-                )}
 
                 {/* Shift handoff banners — paused (blocked for everyone until claimed) takes
                     priority over the plain "someone else owns this" read-only notice, since a
@@ -4738,7 +4735,7 @@ export default function LoadOperation() {
                         </div>
                         <div className={`rounded-lg px-1 py-1 lg:py-1.5 ${extraSoFar > 0 ? "bg-amber-100 ring-2 ring-amber-400" : "bg-white"}`}>
                           <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">Extra</p>
-                          <p className={`text-lg font-bold leading-tight tabular-nums lg:text-xl ${extraSoFar > 0 ? "text-amber-600" : "text-gray-300"}`}>{extraSoFar > 0 ? `+${extraSoFar}` : "0"}</p>
+                          <p className={`text-lg font-bold leading-tight tabular-nums lg:text-xl ${extraSoFar > 0 ? "text-amber-600" : "text-gray-300"}`}>{extraSoFar > 0 ? `${extraSoFar}` : "0"}</p>
                         </div>
                       </div>
                     );
