@@ -349,7 +349,7 @@ export async function settleNotionSync(outcome: Promise<NotionSyncOutcome>, ms =
 // page's own refresh doesn't hammer Notion), when it's completed, and by the "Sync to Notion" button.
 const lastReconcileAt = new Map<string, number>();
 export async function reconcileOrderWithNotion(
-  orderNumber: string, who?: NotionWho, opts?: { throttleMs?: number },
+  orderNumber: string, who?: NotionWho, opts?: { throttleMs?: number; keepCurrentStatus?: boolean },
 ): Promise<NotionSyncOutcome | null> {
   try {
     if (opts?.throttleMs) {
@@ -358,7 +358,8 @@ export async function reconcileOrderWithNotion(
     }
     const { rows } = await pool.query(
       `SELECT ps.notion_status AS status, ps.loading_stv AS stv, ps.loading_completed_at AS "completedAt",
-              ps.vehicle_assigned_by_code AS assigned, v.notion_page_id AS "vehiclePage"
+              ps.vehicle_assigned_by_code AS assigned, v.notion_page_id AS "vehiclePage",
+              (SELECT COUNT(*)::int FROM loading_scan_events e WHERE e.order_number = ps.order_number AND e.voided IS NOT TRUE) AS entries
          FROM proforma_slips ps LEFT JOIN vehicle_info v ON v.id = ps.vehicle_info_id
         WHERE ps.order_number = $1`,
       [orderNumber],
@@ -366,8 +367,12 @@ export async function reconcileOrderWithNotion(
     const row = rows[0];
     if (!row) return null;
     const want: NotionWanted = {};
-    if (row.stv) {
-      // A load started here has a known real state: not completed = Loading, completed = Ready for
+    // A load is only "active" — and only then forced to Loading — once it has its first entry (a scan,
+    // Add Extra or a +/−), or is completed. A load that was created but not scanned yet keeps whatever
+    // status the slip had.
+    const active = !!row.stv && (row.entries > 0 || !!row.completedAt);
+    if (active) {
+      // A load with entries has a known real state: not completed = Loading, completed = Ready for
       // Dispatch. If this app's status was overwritten with something else (Notion's automation
       // after a vehicle change), put it back — unless it has genuinely moved on to a later stage.
       const expected = row.completedAt ? NOTION_LOADING_COMPLETE_STATUS : NOTION_LOADING_STATUS;
@@ -376,6 +381,11 @@ export async function reconcileOrderWithNotion(
         await pool.query(`UPDATE proforma_slips SET notion_status = $1 WHERE order_number = $2`, [expected, orderNumber]);
       }
       if (!LATER_STAGES.has(normalizeName(current))) want.status = expected;
+    } else if (opts?.keepCurrentStatus) {
+      // After a vehicle change on a slip with no entries yet: put the status it had back in Notion if
+      // Notion's own automation changed it meanwhile. The app's copy was held during the wait.
+      const current = String(row.status ?? '').trim();
+      if (current && !LATER_STAGES.has(normalizeName(current))) want.status = current;
     }
     if (row.assigned && row.vehiclePage) want.vehiclePageId = row.vehiclePage;
     if (!want.status && !want.vehiclePageId) return null;
@@ -408,15 +418,25 @@ export function isNotionStatusGuarded(orderNumber: string): boolean {
   return !!watch && watch.until > Date.now();
 }
 
-export async function watchStatusAfterVehicleChange(orderNumber: string, who?: NotionWho): Promise<void> {
+export async function watchStatusAfterVehicleChange(
+  orderNumber: string, who?: NotionWho, opts?: { holdCurrentStatus?: boolean },
+): Promise<void> {
   try {
-    const { rows } = await pool.query(`SELECT loading_stv AS stv FROM proforma_slips WHERE order_number = $1`, [orderNumber]);
-    if (!rows[0]?.stv) return; // not a load started here — nothing of ours to keep Loading
+    const { rows } = await pool.query(
+      `SELECT ps.loading_stv AS stv, ps.loading_completed_at AS "completedAt",
+              (SELECT COUNT(*)::int FROM loading_scan_events e WHERE e.order_number = ps.order_number AND e.voided IS NOT TRUE) AS entries
+         FROM proforma_slips ps WHERE ps.order_number = $1`,
+      [orderNumber],
+    );
+    const active = !!rows[0]?.stv && (rows[0].entries > 0 || !!rows[0].completedAt);
+    // Not active and not asked to hold the slip's status: nothing of ours to keep (Vehicle Planning, where
+    // Notion's own status change after a vehicle is the wanted one).
+    if (!active && !opts?.holdCurrentStatus) return;
     const previous = statusWatches.get(orderNumber);
     if (previous) clearTimeout(previous.timer);
     const timer = setTimeout(() => {
       // Put the status back (app + Notion) and only then lift the guard.
-      void reconcileOrderWithNotion(orderNumber, who)
+      void reconcileOrderWithNotion(orderNumber, who, { keepCurrentStatus: !!opts?.holdCurrentStatus })
         .catch(() => null)
         .finally(() => { if (statusWatches.get(orderNumber)?.timer === timer) statusWatches.delete(orderNumber); });
     }, STATUS_WATCH_WAIT_MS);

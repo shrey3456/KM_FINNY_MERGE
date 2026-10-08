@@ -13,7 +13,7 @@ import {
 import {
   pushStoreKeeperInfoToNotion, getFinnyStatusOptions, syncOrderToNotion, settleNotionSync, reconcileOrderWithNotion,
   watchStatusAfterVehicleChange,
-  NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS, type NotionSyncOutcome,
+  isLaterStageStatus, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS, type NotionSyncOutcome,
 } from '../services/notionOrderStatusSync';
 import { searchNotionVehicleByNumber } from '../services/notionVehicleSync';
 import { computeLoadDateReport, computeLoadDateActivity } from '../lib/loadDateReport';
@@ -338,6 +338,36 @@ function requireLoadingVoidAccess(req: Request, res: Response, next: NextFunctio
   return res.status(403).json({ message: 'Write access required' });
 }
 
+// The first entry on a load — any scan (gun, camera, manual, offline), Add Extra, or the + / − buttons — is
+// what turns the slip's status to LOADING, in the app and in Notion. Create Operation no longer does. Cheap
+// on every later entry: it only looks at the slip row the route already has, and does nothing when the
+// slip is already Loading, completed, or past that stage (Dispatched, Delivered ...). Returns true when it
+// changed the status, so the caller can show the new one straight away.
+async function ensureLoadingOnEntry(slip: any, who: { userCode?: string; userName?: string }): Promise<boolean> {
+  try {
+    if (!slip || slip.loadingCompletedAt) return false;
+    const current = String(slip.notionStatus ?? '').trim();
+    if (isAlreadyLoading(current) || isLaterStageStatus(current)) return false;
+    await storage.updateProformaSlip(slip.id, {
+      notionStatus: NOTION_LOADING_STATUS,
+      // Remembered so Delete load can put it back.
+      statusBeforeLoading: slip.statusBeforeLoading || current,
+    } as any);
+    void syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_STATUS }, who);
+    try {
+      await storage.logActivity({
+        pageName: 'Loading', action: 'update', entityType: 'proforma_slip', entityId: slip.id,
+        details: `First entry on order ${slip.orderNumber} — status changed from ${current || 'empty'} to LOADING`,
+        userCode: who.userCode, userName: who.userName,
+      });
+    } catch { /* the status change matters more than its log line */ }
+    return true;
+  } catch (error) {
+    console.error('[Loading] Could not set LOADING on the first entry:', error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
 // Attaches the linked vehicle's RTO number AND volume capacity to a slip response, resolved
 // live — never stored on proforma_slips itself (see file header comment). proforma_slips.
 // totalVolume is a SEPARATE number: the order's own required cargo volume, computed from
@@ -638,17 +668,9 @@ router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (
       return res.status(400).json({ message: `"${requestedStv}" is not a Dispatch Directory configured for plant ${slip.plant ?? '—'}.` });
     }
 
-    let notionOutcome: NotionSyncOutcome | undefined;
-    if (!slip.loadingCompletedAt && slip.notionStatus !== NOTION_LOADING_STATUS) {
-      // Remember what LOADING replaces, so deleting this load later can put it back.
-      const updated = await storage.updateProformaSlip(slip.id, {
-        notionStatus: NOTION_LOADING_STATUS,
-        statusBeforeLoading: slip.notionStatus ?? '',
-      } as any);
-      if (updated) slip = updated;
-      // Compare-then-write with retries; the first try is awaited so the screen can say how it went.
-      notionOutcome = await settleNotionSync(syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_STATUS }, actor(req)));
-    }
+    // The status is NOT changed here any more: it becomes LOADING on the load's first entry (see
+    // ensureLoadingOnEntry), so a created-but-unscanned load keeps the status the slip had.
+    const notionOutcome: NotionSyncOutcome | undefined = undefined;
 
     // First-time owner assignment — whoever runs Create Operation becomes the one allowed to
     // scan it, same as the old implicit "creator" idea, just tracked explicitly now so it can be
@@ -1421,7 +1443,9 @@ router.post('/loading/proforma/:orderNumber/link-vehicle', requireLoadingWrite, 
 
     // Notion's automation may change the status after a vehicle is set — two minutes from now the
     // status of a load started here is put back (Loading / Ready for Dispatch).
-    void watchStatusAfterVehicleChange(updated.orderNumber, actor(req));
+    // For a load with entries that is Loading again; for a slip with no entries yet it is the status the
+    // slip had before this link — the link must change the vehicle only.
+    void watchStatusAfterVehicleChange(updated.orderNumber, actor(req), { holdCurrentStatus: true });
 
     res.json({ slip: await withRto(updated), vehicle, capacityWarning, notion: notionOutcome });
   } catch (error) {
@@ -1672,6 +1696,8 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
 
     let finalSlip: any = slip;
     // A load is never completed automatically — someone has to press Complete.
+    // The first entry turns the status to LOADING; show it in this very response.
+    if (await ensureLoadingOnEntry(slip, actor(req))) finalSlip = { ...slip, notionStatus: NOTION_LOADING_STATUS };
 
     res.json({
       slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,
@@ -1684,7 +1710,7 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
     });
 
     // Best-effort, after the response — only when this scan is what just auto-completed it.
-    if (allComplete && finalSlip !== slip) {
+    if (allComplete && (finalSlip as any).loadingCompletedAt && !(slip as any).loadingCompletedAt) {
       void syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_COMPLETE_STATUS }, actor(req));
     }
   } catch (error: any) {
@@ -1849,6 +1875,8 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
     const { items: progressItems, allComplete, loadedVolume } = await withProgress(slip, rawItems);
     let finalSlip: any = slip;
     // A load is never completed automatically — someone has to press Complete.
+    // The first entry turns the status to LOADING; show it in this very response.
+    if (await ensureLoadingOnEntry(slip, actor(req))) finalSlip = { ...slip, notionStatus: NOTION_LOADING_STATUS };
 
     res.json({
       slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,
@@ -1859,7 +1887,7 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
         productId: product?.id ?? null,
       },
     });
-    if (allComplete && finalSlip !== slip) {
+    if (allComplete && (finalSlip as any).loadingCompletedAt && !(slip as any).loadingCompletedAt) {
       void syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_COMPLETE_STATUS }, actor(req));
     }
   } catch (error: any) {
@@ -1999,9 +2027,12 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
 
     const { userCode, userName } = actor(req);
     const previousStatus = String((slip as any).statusBeforeLoading ?? '').trim();
+    // The status before Loading was remembered at the load's first entry. A load that never had an entry never
+    // changed the status, so there is nothing to undo: it keeps what it has.
+    const currentStatus = String((slip as any).notionStatus ?? '').trim();
     const restoredStatus = previousStatus && previousStatus.toUpperCase() !== NOTION_LOADING_STATUS
       ? previousStatus
-      : STATUS_AFTER_DELETE_FALLBACK;
+      : (currentStatus && currentStatus.toUpperCase() !== NOTION_LOADING_STATUS ? currentStatus : STATUS_AFTER_DELETE_FALLBACK);
     const hadNotionStoreKeeper = !!(slip as any).notionStoreKeeperPush;
 
     await client.query('BEGIN');
