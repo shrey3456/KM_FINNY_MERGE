@@ -357,13 +357,15 @@ export default function TollVoucher() {
     const partyText = voucher.party || "";
     const length = partyText.length;
     
-    // Better calculation based on actual character length
-    let partyFontPt = 16; // default large size
-    if (length > 800) partyFontPt = 7;
-    else if (length > 600) partyFontPt = 9;
-    else if (length > 400) partyFontPt = 10;
-    else if (length > 300) partyFontPt = 11;
-    else if (length > 200)   partyFontPt = 12;
+    // Pick the largest font whose wrapped lines fit the Order Details box. The print runs in a hidden
+    // iframe (no layout), so the fit is estimated: box ~410pt wide x ~78pt tall, bold caps ~0.64em/char.
+    const partyEntries = partyText.split("\n").filter((l) => l.trim());
+    let partyFontPt = 7;
+    for (let size = 16; size >= 7; size -= 0.5) {
+      const charsPerLine = Math.floor(410 / (size * 0.64));
+      const wrapped = partyEntries.reduce((n, l) => n + Math.max(1, Math.ceil(l.length / charsPerLine)), 0);
+      if (wrapped * size * 1.15 <= 78) { partyFontPt = size; break; }
+    }
     let logoDataUrl = "";
     try {
       const response = await fetch(logoPath);
@@ -413,7 +415,9 @@ export default function TollVoucher() {
               margin-top: 1.5mm;
             }
 
-            .grid-row { display: flex; width: 100%; border-bottom: 1px solid #000; }
+            .grid-row { display: flex; width: 100%; border-bottom: 1px solid #000; flex-shrink: 0; }
+            .details-row { flex: 1 1 0; min-height: 0; overflow: hidden; flex-shrink: 1; }
+            .details-row .col { min-height: 0; overflow: hidden; }
             .col { padding: 4px; display: flex; align-items: center; justify-content: center; border-right: 1px solid #000; }
             .col:last-child { border-right: none; }
             
@@ -492,7 +496,7 @@ export default function TollVoucher() {
               </div>
             </div>
 
-            <div class="grid-row flex-grow" style="min-height: 40mm;">
+            <div class="grid-row details-row">
               <div class="col w-1-2-a">
                 <span class="label-text" style="font-size: 18pt;">Order Details:</span>
               </div>
@@ -517,7 +521,7 @@ export default function TollVoucher() {
           <script>
             (function adjustFontSize() {
               const element = document.getElementById('order-details-content');
-              if (!element || !element.parentElement) return;
+              if (!element || !element.parentElement || !element.parentElement.clientHeight) return; // hidden iframe has no layout
               
               const parent = element.parentElement;
               let size = ${partyFontPt}; // Start with the calculated size
@@ -526,7 +530,7 @@ export default function TollVoucher() {
               element.style.fontSize = size + 'pt';
               
               // Allow shrinking further if it still overflows, down to 5pt
-              while (element.scrollHeight > parent.clientHeight && size > 4) {
+              while ((element.scrollHeight + 8 > parent.clientHeight || element.scrollWidth > parent.clientWidth) && size > 6) {
                 size -= 0.5;
                 element.style.fontSize = size + 'pt';
               }
