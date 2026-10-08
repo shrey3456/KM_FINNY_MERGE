@@ -478,6 +478,13 @@ app.use((req, res, next) => {
     // only 'adjust' rows Scan History lists. Earlier manual edits that kept the default reason
     // are backfilled; ones given a custom reason can't be told apart and stay untagged.
     await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS source TEXT`);
+    // Unloading with two plants (purchase plant -> stock plant). unload_import_sessions.purchase_plant
+    // is null for every batch that has one plant (all of them before this). A move between the two is
+    // written as a pair of stock_movements rows, type = 'transfer': transfer_dir 'out' at the
+    // purchase plant and 'in' at the stock plant, other_plant naming the plant on the far side.
+    await pool.query(`ALTER TABLE unload_import_sessions ADD COLUMN IF NOT EXISTS purchase_plant TEXT`);
+    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS other_plant TEXT`);
+    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS transfer_dir TEXT`);
     await pool.query(`UPDATE stock_movements SET source = 'manual' WHERE type = 'adjust' AND source IS NULL AND reason = 'Manual adjustment (Overall Stock)'`);
     // Tag older Loading / Unloading ledger rows (see server/lib/stockRecalc.ts) — the same
     // function Settings > Recalculate Stock runs.

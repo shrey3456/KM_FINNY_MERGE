@@ -4,6 +4,7 @@ import { storage } from '../storage';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
 import { getUserPlants, getPlantStateCode, resolvePalletSizeOrQty } from './order-scan';
 import { resplitUnloadEventsExtraFlag } from '../lib/unloadRemap';
+import { postUnloadMovement } from '../lib/unloadStock';
 
 // ============================================================================
 // UNLOADING EDIT — fixes a mistake in an already-uploaded, not-yet-completed unload CSV (one
@@ -199,11 +200,9 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
                WHERE LOWER(barcode) = LOWER($3) AND LOWER(plant) = LOWER($4)`,
               [totalQty, extraQty, oldBarcode, session.plant],
             );
-            await client.query(
-              `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at, source)
-               VALUES ($1, $2, $3, $4, 'adjust', $5, $6, NOW(),'unloading')`,
-              [oldBarcode, session.plant, -totalQty, -extraQty, reason, id],
-            );
+            await postUnloadMovement(client, {
+              sessionId: id, barcode: oldBarcode, qty: -totalQty, extraQty: -extraQty, type: 'adjust', reason,
+            });
 
             // Apply the same quantity to the corrected barcode. RETURNING id so the corrected
             // barcode's own product row links up correctly rather than inheriting the old one's.
@@ -222,11 +221,9 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
                      updated_at = NOW()`,
               [barcode, newProductId, session.plant, totalQty, extraQty],
             );
-            await client.query(
-              `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at, source)
-               VALUES ($1, $2, $3, $4, $5, 'adjust', $6, $7, NOW(),'unloading')`,
-              [barcode, newProductId, session.plant, totalQty, extraQty, reason, id],
-            );
+            await postUnloadMovement(client, {
+              sessionId: id, barcode, productId: newProductId, qty: totalQty, extraQty, type: 'adjust', reason,
+            });
           }
 
           // Relink the scan rows so scan history/status follow the corrected barcode.
@@ -267,11 +264,10 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
                  WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
                 [extraDelta, barcode, session.plant],
               );
-              await client.query(
-                `INSERT INTO stock_movements (barcode, plant, qty, extra_qty, type, reason, session_id, created_at, source)
-                 VALUES ($1, $2, 0, $3, 'adjust', $4, $5, NOW(),'unloading')`,
-                [barcode, session.plant, extraDelta, `Quantity correction (unloading edit): ${existing.quantity} -> ${quantity}`, id],
-              );
+              await postUnloadMovement(client, {
+                sessionId: id, barcode, qty: 0, extraQty: extraDelta, type: 'adjust',
+                reason: `Quantity correction (unloading edit): ${existing.quantity} -> ${quantity}`,
+              });
             }
           }
         }

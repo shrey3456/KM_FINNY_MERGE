@@ -4,11 +4,11 @@ import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/use-auth";
 import { LoadingViewerSection } from "./ScanViewerLoading";
 
-// Loading Overview — every product the Notion orders of a plant and date need, with each party's
-// share, plus an order-number lookup that narrows the page to that one order. Its own page (and its
-// own access grant, "loading-overview") so it can be given to people who don't get Overall Scan Ops.
-// Plant-restricted: an admin sees every plant, everyone else only the plant(s) assigned to them —
-// the server enforces the same rule, this just keeps the picker honest.
+// Load Master — every proforma slip of a plant and date (each opening in Load Operations) and every
+// product those orders need, with each party's share, plus an order-number lookup that narrows the page
+// to that one order. Its own page (access grant "loading-overview"). Plant-restricted: an admin sees
+// every plant, everyone else only the plant(s) assigned to them — the server enforces the same rule,
+// this just keeps the picker honest.
 type Plant = { id: number; name: string; bgColor?: string | null; textColor?: string | null; borderColor?: string | null };
 
 export default function LoadingOverview() {
@@ -39,7 +39,7 @@ export default function LoadingOverview() {
   return (
     <div className="mx-auto w-full max-w-[1800px] space-y-3 p-3 sm:p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-xl font-bold text-[#001d6e]">Loading Overview</h1>
+        <h1 className="text-xl font-bold text-[#001d6e]">Load Master</h1>
         {!isAdmin && myPlants.length > 0 && (
           <span className="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-gray-600" title="Plants your account is allowed to see">
             Your plants: {myPlants.join(", ")}

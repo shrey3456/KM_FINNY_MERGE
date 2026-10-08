@@ -1,4 +1,4 @@
-﻿import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Result } from "@zxing/library";
@@ -18,6 +18,7 @@ import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/Re
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, parseApiErrorMessage } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
+import { PlantRoute } from "@/components/PlantRoute";
 import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { Button } from "@/components/ui/button";
@@ -42,7 +43,7 @@ import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ─── Types (mirror server/routes/unloading.ts responses) ─────────────────────
 type SessionListItem = {
-  id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
+  id: number; plant: string; purchasePlant?: string | null; vehicleNumber: string; orderDate: string; csvFileName: string;
   rowCount: number; groupId: number; partIndex: number; scanStatus: "available" | "active" | "completed";
   createdAt: string; scanActivatedAt: string | null; scanCompletedAt: string | null;
   // Who completed the batch — a name, "System", or null (see server/routes/unloading.ts).
@@ -69,7 +70,7 @@ type SessionItem = {
   realPackSize?: number;
 };
 type SessionDetail = {
-  id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
+  id: number; plant: string; purchasePlant?: string | null; vehicleNumber: string; orderDate: string; csvFileName: string;
   groupId: number; partIndex: number; scanStatus: "available" | "active" | "completed"; scanCompletedAt: string | null;
 };
 type ScanEventRow = {
@@ -1326,7 +1327,7 @@ export default function Unloading() {
     <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
       <span className="font-medium text-gray-600">{scanSession.orderDate}</span>
       <span className="text-gray-300">&middot;</span>
-      <PlantBadge plant={scanSession.plant} className="px-2 py-0 text-[11px]" />
+      <PlantRoute plant={scanSession.plant} purchasePlant={scanSession.purchasePlant} className="px-2 py-0 text-[11px]" />
     </div>
   ) : null;
 
@@ -1648,7 +1649,7 @@ export default function Unloading() {
                     >
                       <span className="text-sm font-bold text-[#001d6e]">{s.vehicleNumber}</span>
                       {s.rtoNumber && <span className="text-xs text-gray-500">RTO: {s.rtoNumber}</span>}
-                      <PlantBadge plant={s.plant} />
+                      <PlantRoute plant={s.plant} purchasePlant={s.purchasePlant} />
                       <span className="text-xs text-gray-500">{s.orderDate}</span>
                       {s.partsCount > 1 && (
                         <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex}/{s.partsCount}</span>
@@ -1741,7 +1742,7 @@ export default function Unloading() {
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="text-base font-bold leading-none text-gray-900">#{s.id}</span>
-                            <PlantBadge plant={s.plant} />
+                            <PlantRoute plant={s.plant} purchasePlant={s.purchasePlant} />
                             {s.partsCount > 1 && (
                               <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
                                 Batch {s.partIndex}/{s.partsCount}
@@ -1858,7 +1859,7 @@ export default function Unloading() {
                               {s.rtoNumber && <span className="block text-[11px] font-normal text-gray-500">RTO: {s.rtoNumber}</span>}
                             </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">{s.orderDate}</td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantBadge plant={s.plant} /></td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantRoute plant={s.plant} purchasePlant={s.purchasePlant} /></td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">{statusBadge(s.scanStatus, s.canActivate)}</td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {s.scannedQty} / {s.expectedQty}

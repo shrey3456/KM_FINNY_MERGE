@@ -87,6 +87,10 @@ type PlantStockRow = {
   // clear across the whole catalogue can't bury the corrections an operator actually made — and
   // its own column, hidden until asked for.
   systemQty?: number | null;
+  // Stock moved between plants by an Unloading batch that has a separate purchase plant: In at the
+  // plant the stock was added to, Out at the plant the purchase was booked at. Counted in Closing.
+  transferIn?: number | null;
+  transferOut?: number | null;
   salePallets?: number | null;
   openingStock?: number | null;
   openingPallets?: number | null;
@@ -236,7 +240,9 @@ const ALL_COLUMNS = [
   { key: "purchase",     label: "Purchase (includes Extra)" },
   { key: "extra",        label: "Extra" },
   { key: "adjust",       label: "Adjust" },
-  { key: "totalIn",      label: "Total Stock (Opening + Purchase + Adjust)" },
+  { key: "transferIn",   label: "Transfer In (from another plant)" },
+  { key: "transferOut",  label: "Transfer Out (to another plant)" },
+  { key: "totalIn",      label: "Total Stock (Opening + Purchase + Adjust + Transfer)" },
   { key: "expectedSale", label: "Expected Sale (proforma)" },
   { key: "sale",         label: "Sale (loaded)" },
   { key: "closing",      label: "Closing" },
@@ -420,6 +426,10 @@ export default function OverallStock() {
   // it, a merged row's OTHER plants' entries (e.g. a stray duplicate sitting under a different
   // plant than the one this row happens to be labelled with) would never show up here at all.
   const [adjustHistoryTarget, setAdjustHistoryTarget] = useState<{ barcode: string; plant: string; itemName: string; combinedPlants?: string[] } | null>(null);
+  // Which item row opened the Transfer In / Out detail (the moves between plants behind the figure).
+  const [transferTarget, setTransferTarget] = useState<{ barcode: string; plant: string; itemName: string; combinedPlants?: string[] } | null>(null);
+  // View chip "Moved Stock": only the rows where stock moved in from or out to another plant.
+  const [movedOnly, setMovedOnly] = useState(false);
   // The one Adjust ledger row about to be deleted from the Adjustments dialog — a stray or
   // duplicate entry (e.g. a stale "Opening stock import" row) distorting the Opening/Adjust/
   // Total Stock figures. Deleting it never touches live stock, only the ledger it's computed
@@ -449,6 +459,13 @@ export default function OverallStock() {
       // Adjust and Total In belong beside Purchase for everyone, including people whose saved
       // layout predates them — without this they are built but never shown.
       if (saved.has("purchase")) { saved.add("adjust"); saved.add("totalIn"); }
+      // The Transfer columns are new: shown once for a layout saved before them, then left to the user.
+      try {
+        if (!localStorage.getItem("overallStock:transferColsAdded")) {
+          saved.add("transferIn"); saved.add("transferOut");
+          localStorage.setItem("overallStock:transferColsAdded", "1");
+        }
+      } catch { /* private mode */ }
       return saved;
     } catch {
       return defaults;
@@ -759,6 +776,22 @@ export default function OverallStock() {
   // touches live stock, see the server endpoint's own comment. Refetches both this dialog's own
   // list and the main stock report, since Opening/Adjust/Total Stock are computed from the same
   // ledger this just changed.
+  const transferPlants = transferTarget?.combinedPlants?.length ? transferTarget.combinedPlants : (transferTarget?.plant ? [transferTarget.plant] : []);
+  const transferQuery = useQuery<{ items: Array<{ id: number; plant: string; direction: "in" | "out" | null; otherPlant: string | null; qty: number; reason: string | null; at: string; day: string; vehicleNumber: string | null; csvFileName: string | null; byName: string | null }> }>({
+    queryKey: ["/api/scan-sessions/reports/stock-transfers", transferTarget?.barcode, transferPlants.join(","), fromDate, toDate],
+    queryFn: () => apiRequest(
+      "GET",
+      buildUrl("/api/scan-sessions/reports/stock-transfers", {
+        barcode: transferTarget?.barcode,
+        plant: transferPlants.join(",") || undefined,
+        from: fromDate || undefined,
+        to: toDate || undefined,
+      }),
+      undefined, false, true,
+    ),
+    enabled: !!transferTarget?.barcode,
+  });
+
   const deleteMovementMutation = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/plant-stock/movements/${id}`, undefined, false, true),
     onSuccess: () => {
@@ -942,8 +975,10 @@ export default function OverallStock() {
       { id: "purchase", label: "Purchase", filterType: "number", options: numberOptions((r) => r.inStock), accessor: (r) => r.inStock },
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
       { id: "adjust", label: "Adjust", filterType: "number", options: numberOptions((r) => r.adjustQty), accessor: (r) => r.adjustQty ?? null },
+      { id: "transferIn", label: "Transfer In", filterType: "number", options: numberOptions((r) => r.transferIn), accessor: (r) => r.transferIn ?? null },
+      { id: "transferOut", label: "Transfer Out", filterType: "number", options: numberOptions((r) => r.transferOut), accessor: (r) => r.transferOut ?? null },
       { id: "system", label: "System (Clear Stock)", filterType: "number", options: numberOptions((r) => r.systemQty), accessor: (r) => r.systemQty ?? null },
-      { id: "totalIn", label: "Total Stock", filterType: "number", options: numberOptions((r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0)), accessor: (r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0) },
+      { id: "totalIn", label: "Total Stock", filterType: "number", options: numberOptions((r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0) + (r.transferIn ?? 0) - (r.transferOut ?? 0)), accessor: (r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0) + (r.transferIn ?? 0) - (r.transferOut ?? 0) },
       { id: "expectedSale", label: "Expected Sale", filterType: "number", options: numberOptions((r) => r.expectedSaleQty), accessor: (r) => r.expectedSaleQty ?? null },
       { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
       { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
@@ -1204,6 +1239,7 @@ export default function OverallStock() {
     return rows.filter((r) => {
       if (!matchesActiveFilters(r)) return false;
       if (!matchAllConditions(r, columnConditionList, filterableColumns)) return false;
+      if (movedOnly && !(r.transferIn || r.transferOut)) return false;
       if (!search) return true;
       const q = normalizedText(search);
       return (
@@ -1217,7 +1253,7 @@ export default function OverallStock() {
         normalizedText(r.plant).includes(q)
       );
     });
-  }, [rows, search, activeFilters, columnConditionList, filterableColumns]);
+  }, [rows, search, activeFilters, columnConditionList, filterableColumns, movedOnly]);
 
   // Summary — from REAL stock rows only; empty boxes are never counted as stock.
   const totalStock = filtered.reduce((s, r) => s + r.inStock, 0);
@@ -1262,6 +1298,8 @@ export default function OverallStock() {
       existing.inStock += r.inStock;
       existing.adjustQty = (existing.adjustQty ?? 0) + (r.adjustQty ?? 0);
       existing.systemQty = (existing.systemQty ?? 0) + (r.systemQty ?? 0);
+      existing.transferIn = (existing.transferIn ?? 0) + (r.transferIn ?? 0);
+      existing.transferOut = (existing.transferOut ?? 0) + (r.transferOut ?? 0);
       existing.extraQty += r.extraQty;
       existing.pallets = (existing.pallets ?? 0) + (r.pallets ?? 0);
       existing.extraPallets = (existing.extraPallets ?? 0) + (r.extraPallets ?? 0);
@@ -1333,7 +1371,7 @@ export default function OverallStock() {
       "Expected Qty", "Expected Pallets",
       "Opening Stock", "Opening Pallets",
       "Purchase Qty", "Purchase Pallets", "Extra Qty (within Purchase)", "Extra Pallets",
-      "Adjust Qty", "Total Stock (Opening + Purchase + Adjust)", "System (Clear Stock)",
+      "Adjust Qty", "Transfer In", "Transfer Out", "Total Stock (Opening + Purchase + Adjust + Transfer)", "System (Clear Stock)",
       "Expected Sale Qty", "Expected Sale Pallets",
       "Sale Qty (loaded)", "Sale Pallets",
       "Closing Stock", "Closing Pallets",
@@ -1351,7 +1389,7 @@ export default function OverallStock() {
         r.expectedQty ?? "", plt(r.expectedPallets),
         r.openingStock ?? "", plt(r.openingPallets),
         purchaseQty, plt(purchasePallets), r.extraQty, plt(r.extraPallets),
-        r.adjustQty ?? 0, (r.openingStock ?? 0) + purchaseQty + (r.adjustQty ?? 0), r.systemQty ?? 0,
+        r.adjustQty ?? 0, r.transferIn ?? 0, r.transferOut ?? 0, (r.openingStock ?? 0) + purchaseQty + (r.adjustQty ?? 0) + (r.transferIn ?? 0) - (r.transferOut ?? 0), r.systemQty ?? 0,
         r.expectedSaleQty ?? "", plt(r.expectedSalePallets),
         r.saleQty ?? "", plt(r.salePallets),
         r.closingStock ?? "", plt(r.closingPallets),
@@ -1685,6 +1723,69 @@ export default function OverallStock() {
       },
     },
     {
+      // Stock that arrived from another plant: an Unloading batch whose purchase plant is not its
+      // stock plant books the purchase at the purchase plant and moves it here. Click for which
+      // batches and which plant it came from.
+      id: "transferIn",
+      header: columnHeader("transferIn", "Transfer In"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.transferIn ?? 0,
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + (r.transferIn ?? 0), 0);
+        return qty !== 0 ? stackedCell(qty, null, "text-emerald-600") : null;
+      },
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => {
+        const qty = row.transferIn ?? 0;
+        if (row.isEmptyBox || qty === 0) return dash;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        return (
+          <button
+            type="button"
+            className="w-full text-right hover:underline"
+            title="Show where this stock was moved in from"
+            onClick={(e) => { e.stopPropagation(); setTransferTarget({ barcode: row.barcode ?? "", plant: row.plant, itemName: row.itemName ?? row.barcode ?? "", combinedPlants: row.combinedPlants }); }}
+          >
+            {stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-red-600" : "text-emerald-600")}
+          </button>
+        );
+      },
+    },
+    {
+      // Stock this plant bought but that was added to another plant (the purchase stays here as
+      // Purchase; this takes it out again so Closing is right).
+      id: "transferOut",
+      header: columnHeader("transferOut", "Transfer Out"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.transferOut ?? 0,
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + (r.transferOut ?? 0), 0);
+        return qty !== 0 ? stackedCell(qty, null, "text-red-600") : null;
+      },
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => {
+        const qty = row.transferOut ?? 0;
+        if (row.isEmptyBox || qty === 0) return dash;
+        const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
+        return (
+          <button
+            type="button"
+            className="w-full text-right hover:underline"
+            title="Show where this stock was moved to"
+            onClick={(e) => { e.stopPropagation(); setTransferTarget({ barcode: row.barcode ?? "", plant: row.plant, itemName: row.itemName ?? row.barcode ?? "", combinedPlants: row.combinedPlants }); }}
+          >
+            {stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-emerald-600" : "text-red-600")}
+          </button>
+        );
+      },
+    },
+    {
       // Settings-wide corrections — Clear Stock. Hidden unless turned on in Columns; Closing
       // counts it either way, so the row adds up whether it is on screen or not.
       id: "system",
@@ -1717,16 +1818,16 @@ export default function OverallStock() {
       width: 110,
       align: "right",
       sortable: true,
-      accessor: (row) => (row.openingStock ?? 0) + row.inStock + (row.adjustQty ?? 0),
+      accessor: (row) => (row.openingStock ?? 0) + row.inStock + (row.adjustQty ?? 0) + (row.transferIn ?? 0) - (row.transferOut ?? 0),
       total: (rows) => {
-        const qty = rows.reduce((sum, r) => sum + (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0), 0);
+        const qty = rows.reduce((sum, r) => sum + (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0) + (r.transferIn ?? 0) - (r.transferOut ?? 0), 0);
         return stackedCell(qty, null, "text-[#001d6e]");
       },
       headerClassName: headerBorder,
       cellClassName: `font-semibold tabular-nums ${cellBorder}`,
       render: (row) => {
         if (row.isEmptyBox) return dash;
-        const qty = (row.openingStock ?? 0) + row.inStock + (row.adjustQty ?? 0);
+        const qty = (row.openingStock ?? 0) + row.inStock + (row.adjustQty ?? 0) + (row.transferIn ?? 0) - (row.transferOut ?? 0);
         const ipp = row.itemsPerPallet ? Number(row.itemsPerPallet) : 0;
         return stackedCell(qty, ipp > 0 ? qty / ipp : null, qty < 0 ? "text-red-600" : "text-[#001d6e]");
       },
@@ -1867,6 +1968,7 @@ export default function OverallStock() {
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Opening</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Purchase</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Adjust</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold" title="Moved in from (+) / out to (−) another plant">Transfer</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Stock</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Extra</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Sale</th>
@@ -1878,7 +1980,7 @@ export default function OverallStock() {
         </thead>
         <tbody>
           {sourceBreakdownLoading && !sourceBreakdownData ? (
-            <tr><td colSpan={12} className="p-0"><SectionSkeleton lines={3} /></td></tr>
+            <tr><td colSpan={13} className="p-0"><SectionSkeleton lines={3} /></td></tr>
           ) : detailPlantRows.map(({ plant, stock, breakdown }) => (
             <tr key={plant} className="border-b border-gray-200 bg-white">
               <td className="border-r border-gray-200 px-2 py-2 font-medium text-gray-900">{plant}</td>
@@ -1886,6 +1988,7 @@ export default function OverallStock() {
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.openingStock ? stock.openingStock : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.inStock ? stock.inStock : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.adjustQty ? stock.adjustQty : <span className="text-gray-300">—</span>}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{(stock?.transferIn || stock?.transferOut) ? ((stock.transferIn ?? 0) - (stock.transferOut ?? 0)) : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right font-bold tabular-nums text-[#001d6e]">{stock?.closingStock ?? 0}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-amber-600">{stock?.extraQty ? stock.extraQty : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-emerald-600">{stock?.saleQty != null ? stock.saleQty : <span className="text-gray-300">—</span>}</td>
@@ -2350,9 +2453,9 @@ export default function OverallStock() {
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">View</span>
           <button
-            onClick={() => setExtrasOnly(false)}
+            onClick={() => { setExtrasOnly(false); setMovedOnly(false); }}
             className={
-              !extrasOnly
+              !extrasOnly && !movedOnly
                 ? "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30"
                 : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
             }
@@ -2360,7 +2463,7 @@ export default function OverallStock() {
             All Stock
           </button>
           <button
-            onClick={() => setExtrasOnly(true)}
+            onClick={() => { setExtrasOnly(true); setMovedOnly(false); }}
             className={
               extrasOnly
                 ? "rounded-full bg-amber-500 px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-amber-500/30"
@@ -2368,6 +2471,17 @@ export default function OverallStock() {
             }
           >
             Extra Only
+          </button>
+          <button
+            onClick={() => { setMovedOnly(true); setExtrasOnly(false); }}
+            title="Only items where stock moved in from, or out to, another plant"
+            className={
+              movedOnly
+                ? "rounded-full bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-sky-600/30"
+                : "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
+            }
+          >
+            Moved Stock
           </button>
         </div>
 
@@ -3004,6 +3118,66 @@ export default function OverallStock() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setAdjustHistoryTarget(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Moves between plants behind an item Transfer In / Transfer Out figure — an Unloading batch whose
+          purchase plant differs from its stock plant. Lines add up to the figure on the table. */}
+      <Dialog open={!!transferTarget} onOpenChange={(open) => { if (!open) setTransferTarget(null); }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Stock moved between plants</DialogTitle>
+            <DialogDescription className="space-y-0.5 pt-1">
+              <span className="block font-semibold text-gray-900">{transferTarget?.itemName}</span>
+              <span className="block font-mono text-xs text-gray-400">
+                {transferTarget?.barcode}
+                {transferPlants.length > 1 ? ` · ${transferPlants.join(", ")}` : transferPlants[0] ? ` · ${transferPlants[0]}` : ""}
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          {transferQuery.isLoading ? (
+            <p className="py-8 text-center text-sm text-gray-400">Loading…</p>
+          ) : (transferQuery.data?.items?.length ?? 0) === 0 ? (
+            <p className="py-8 text-center text-sm text-gray-400">No moves between plants for this item in this period.</p>
+          ) : (
+            <div className="max-h-[60vh] overflow-y-auto border border-gray-200">
+              <table className="w-full border-collapse text-xs">
+                <thead>
+                  <tr className="sticky top-0 border-b-2 border-gray-300 bg-gray-100 text-left text-gray-600">
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">Batch date</th>
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">Plant</th>
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">Move</th>
+                    <th className="border-r border-gray-200 px-3 py-2 text-right font-semibold">Qty</th>
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">Unloading batch</th>
+                    <th className="border-r border-gray-200 px-3 py-2 font-semibold">By</th>
+                    <th className="px-3 py-2 font-semibold">Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transferQuery.data!.items.map((t) => (
+                    <tr key={t.id} className="border-b border-gray-100 bg-white">
+                      <td className="whitespace-nowrap border-r border-gray-100 px-3 py-2 text-gray-700">{t.day}</td>
+                      <td className="border-r border-gray-100 px-3 py-2 text-gray-700">{t.plant}</td>
+                      <td className="whitespace-nowrap border-r border-gray-100 px-3 py-2">
+                        {t.direction === "in"
+                          ? <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-emerald-700">In ← {t.otherPlant}</span>
+                          : <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-red-700">Out → {t.otherPlant}</span>}
+                      </td>
+                      <td className={`border-r border-gray-100 px-3 py-2 text-right font-semibold tabular-nums ${t.qty < 0 ? "text-red-600" : "text-emerald-600"}`}>
+                        {t.qty > 0 ? `+${t.qty.toLocaleString()}` : t.qty.toLocaleString()}
+                      </td>
+                      <td className="border-r border-gray-100 px-3 py-2 text-gray-600">{[t.vehicleNumber, t.csvFileName].filter(Boolean).join(" · ") || "—"}</td>
+                      <td className="border-r border-gray-100 px-3 py-2 text-gray-600">{t.byName ?? "—"}</td>
+                      <td className="px-3 py-2 text-gray-600">{t.reason ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTransferTarget(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -2883,7 +2883,7 @@ function ProgressReadout({ pct, doneItems, totalItems }: { pct: number; doneItem
 
 // Matches GET /api/unloading/sessions' row shape (only the fields this section needs).
 type UnloadingSessionOption = {
-  id: number; plant: string; vehicleNumber: string; orderDate: string | null;
+  id: number; plant: string; purchasePlant?: string | null; vehicleNumber: string; orderDate: string | null;
   partIndex: number | null; scanStatus: string | null;
 };
 
@@ -3410,6 +3410,7 @@ function UnloadingViewerSection({
                       <span className="flex items-center gap-1.5">
                         <span>
                           {so.vehicleNumber}{so.partIndex && so.partIndex > 1 ? ` (Batch ${so.partIndex})` : ""}
+                          {so.purchasePlant && so.purchasePlant.toLowerCase() !== (so.plant ?? "").toLowerCase() ? ` · ${so.purchasePlant} → ${so.plant}` : ""}
                           {!uDate ? ` · ${fmtOrderDate(so.orderDate)}` : ""}
                         </span>
                         {uSessionStatusBadge(so.scanStatus)}

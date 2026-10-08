@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
@@ -31,6 +31,7 @@ import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
 import { PlantBadge } from "@/components/PlantBadge";
+import { PlantRoute } from "@/components/PlantRoute";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
@@ -131,6 +132,8 @@ type ScanHistoryItem = {
   orderDate: string | null;
   srNo: string | null;
   plant: string;
+  // Unloading rows only: the plant the purchase belongs to when it differs from `plant` (the stock plant).
+  purchasePlant?: string | null;
   voided: boolean | null;
   voidedAt: string | null;
   voidReason: string | null;
@@ -1099,7 +1102,7 @@ const ScanHistory = () => {
       width: 90,
       accessor: (row) => row.plant,
       totalable: false,
-      render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : <span className="text-gray-300">—</span>),
+      render: (row) => (row.plant ? <PlantRoute plant={row.plant} purchasePlant={row.purchasePlant} /> : <span className="text-gray-300">—</span>),
     },
     {
       id: "qty",
@@ -1806,7 +1809,7 @@ const ScanHistory = () => {
                       </p>
                       <p className="mt-0.5 font-mono text-xs text-gray-400">{row.barcode ?? "—"}</p>
                     </div>
-                    {row.plant && <PlantBadge plant={row.plant} />}
+                    {row.plant && <PlantRoute plant={row.plant} purchasePlant={row.purchasePlant} />}
                   </div>
                   <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
                     <span>

@@ -338,6 +338,16 @@ function requireLoadingVoidAccess(req: Request, res: Response, next: NextFunctio
   return res.status(403).json({ message: 'Write access required' });
 }
 
+// Load Master's write access: an admin, or anyone granted Write Access on the Load Master page itself.
+// It lets them void a scan, remove a voided entry from the history and delete a load from the slip view
+// there — the same actions requireLoadingVoidAccess guards, reached from the Load Master screen.
+function requireLoadMasterWrite(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  const user = req.user as any;
+  if (isAdmin(req) || hasWriteAccess(user, 'loading-overview')) return next();
+  return res.status(403).json({ message: 'Write access to Load Master is required' });
+}
+
 // Attaches the linked vehicle's RTO number AND volume capacity to a slip response, resolved
 // live — never stored on proforma_slips itself (see file header comment). proforma_slips.
 // totalVolume is a SEPARATE number: the order's own required cargo volume, computed from
@@ -386,13 +396,14 @@ async function withRto(slip: any) {
 // shape both the GET (page load) and POST /scan (after each scan) responses return, so the
 // client always has one consistent source of truth for "what's left to load".
 async function withProgress(slip: any, items: any[]) {
-  const state = await getPlantStateCode(pool, slip.plant ?? '');
-
-  const { rows: loadedRows } = await pool.query(
-    `SELECT barcode, COALESCE(SUM(total_qty), 0)::int AS "loadedQty"
-     FROM loading_scan_events WHERE order_number = $1 AND voided IS NOT TRUE GROUP BY barcode`,
-    [slip.orderNumber],
-  );
+  const [state, { rows: loadedRows }] = await Promise.all([
+    getPlantStateCode(pool, slip.plant ?? ''),
+    pool.query(
+      `SELECT barcode, COALESCE(SUM(total_qty), 0)::int AS "loadedQty"
+       FROM loading_scan_events WHERE order_number = $1 AND voided IS NOT TRUE GROUP BY barcode`,
+      [slip.orderNumber],
+    ),
+  ]);
   const loadedByBarcode = new Map<string, number>(loadedRows.map((r: any) => [normalize(r.barcode), r.loadedQty]));
 
   // Everything this response needs from Product Master and stock is read in TWO queries up front
@@ -405,13 +416,15 @@ async function withProgress(slip: any, items: any[]) {
   const productsByBarcode = new Map<string, any[]>();
   const stockByBarcode = new Map<string, number>();
   if (wantedBarcodes.length > 0) {
-    const productRows = await db.select().from(productsTable).where(inArray(productsTable.barcode, wantedBarcodes));
+    const [productRows, statePlants] = await Promise.all([
+      db.select().from(productsTable).where(inArray(productsTable.barcode, wantedBarcodes)),
+      getStatePlantNames(pool, slip.plant ?? ''),
+    ]);
     for (const pr of productRows) {
       const key = String(pr.barcode ?? '').trim();
       if (!productsByBarcode.has(key)) productsByBarcode.set(key, []);
       productsByBarcode.get(key)!.push(pr);
     }
-    const statePlants = await getStatePlantNames(pool, slip.plant ?? '');
     const { rows: stockRows } = await pool.query(
       `SELECT barcode, COALESCE(SUM(in_stock), 0)::int AS total FROM product_plant_stock
        WHERE barcode = ANY($1::text[]) AND plant = ANY($2::text[]) GROUP BY barcode`,
@@ -555,16 +568,22 @@ router.get('/loading/proforma/:orderNumber', requirePageAccess('loading'), async
     const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
-    const viewError = checkLoadViewAccess(slip, req, await resolveLoadOwner(slip));
+    // Everything the reply needs that does not depend on anything else is fetched at the same time
+    // (it used to be one query after another, which is most of the wait when opening a slip).
+    const [owner, rawItems, sortCheck, slipWithRto] = await Promise.all([
+      resolveLoadOwner(slip),
+      storage.getProformaSlipItems(slip.id),
+      // Told to the Create Operation dialog up front, so it can warn and disable its button before
+      // the operator even tries — POST /start below is the real enforcement either way.
+      plantRequiresSortSlipFirst(slip.plant).then(async (required) => ({
+        required, exists: required ? await orderHasSortSlip(slip.orderNumber) : true,
+      })),
+      withRto(slip),
+    ]);
+    const viewError = checkLoadViewAccess(slip, req, owner);
     if (viewError) return res.status(403).json({ message: viewError });
-
-    const rawItems = await storage.getProformaSlipItems(slip.id);
     const { items, allComplete, loadedVolume } = await withProgress(slip, rawItems);
-    // Told to the Create Operation dialog up front, so it can warn and disable its button before
-    // the operator even tries — POST /start below is the real enforcement either way.
-    const sortSlipRequired = await plantRequiresSortSlipFirst(slip.plant);
-    const sortSlipExists = sortSlipRequired ? await orderHasSortSlip(slip.orderNumber) : true;
-    res.json({ slip: await withRto(slip), items, allComplete, loadedVolume, sortSlipRequired, sortSlipExists });
+    res.json({ slip: slipWithRto, items, allComplete, loadedVolume, sortSlipRequired: sortCheck.required, sortSlipExists: sortCheck.exists });
 
     // Opening a load quietly re-checks its vehicle and status in Notion (this app's values win for
     // Loading / Ready for Dispatch) — catches an earlier update that never got through. Runs after
@@ -609,7 +628,15 @@ router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (
     // Resuming an in-progress load still works fine from the landing list (a plain GET, doesn't
     // go through this endpoint at all) — this only guards the "start a new one" entry point.
     if (isAlreadyLoading(slip.notionStatus)) {
-      return res.status(409).json({ message: 'Status is already Loading — not able to load.' });
+      // Notion already says LOADING. Only an admin / super-admin may still start it here — and only when
+      // no load for this order exists in this app yet (a second one would just duplicate the first).
+      const { rows: existingLoad } = await pool.query(`SELECT 1 FROM loading_records WHERE order_number = $1 LIMIT 1`, [slip.orderNumber]);
+      if (existingLoad.length > 0) {
+        return res.status(409).json({ message: 'A load for this order already exists — open it from the list instead of creating it again.' });
+      }
+      if (!isAdmin(req)) {
+        return res.status(409).json({ message: 'Status is already Loading — not able to load.' });
+      }
     }
 
     // Plant Management can require a Sort Slip to exist for this order before loading is allowed
@@ -1130,25 +1157,146 @@ router.get('/loading/date-items', requirePageAccess(['loading-overview', 'scan-v
   }
 });
 
-// GET /api/loading/order-suggest?q= — order numbers matching what was typed in Loading Overview's
-// order box, limited to the plants this user may see.
+// GET /api/loading/order-suggest?q=&plant=&date= — order numbers matching what was typed in Load
+// Master's order box. Narrowed the same way the page is: to the chosen plant (refused if the user
+// has no access to it), or — with "All plants" — to the plants this user may see; and to the chosen
+// order date when one is picked.
 router.get('/loading/order-suggest', requirePageAccess(['loading-overview', 'scan-viewer']), async (req: Request, res: Response) => {
   try {
     const q = String(req.query.q ?? '').trim().replace(/^#/, '');
     if (q.length < 2) return res.json([]);
+    const plant = String(req.query.plant ?? '').trim();
+    const date = String(req.query.date ?? '').trim();
     const userPlants = getUserPlants(req.user);
     const params: any[] = [`%${q.toLowerCase()}%`];
-    let plantCond = '';
-    if (userPlants !== null) { params.push(userPlants); plantCond = `AND LOWER(plant) = ANY($2)`; }
+    const conds: string[] = ['LOWER(order_number) LIKE $1'];
+    if (plant && plant !== '__all__') {
+      if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'You can not access this plant — your account is restricted to the plant(s) assigned to you.' });
+      params.push(plant); conds.push(`LOWER(plant) = LOWER($${params.length})`);
+    } else if (userPlants !== null) {
+      params.push(userPlants); conds.push(`LOWER(plant) = ANY($${params.length})`);
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) { params.push(date); conds.push(`order_date = $${params.length}::date`); }
     const { rows } = await pool.query(
       `SELECT order_number AS "orderNumber", party_name AS "partyName", plant, to_char(order_date, 'YYYY-MM-DD') AS "orderDate"
-         FROM proforma_slips WHERE LOWER(order_number) LIKE $1 ${plantCond}
+         FROM proforma_slips WHERE ${conds.join(' AND ')}
          ORDER BY order_date DESC NULLS LAST, order_number DESC LIMIT 15`,
       params,
     );
     res.json(rows);
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to search orders' });
+  }
+});
+
+// GET /api/loading/date-slips?plant=&date= — Load Master's slip list: EVERY proforma slip of one
+// order date (not only the ones a load was already started for), with its load progress, so each can
+// be opened in Load Operations. Plant rules are the same as /loading/date-items.
+router.get('/loading/date-slips', requirePageAccess(['loading-overview', 'scan-viewer']), async (req: Request, res: Response) => {
+  try {
+    const plant = String(req.query.plant ?? '').trim();
+    const date = String(req.query.date ?? '').trim();
+    if (!plant || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ message: 'plant and date (YYYY-MM-DD) are required' });
+    const allPlants = plant === '__all__';
+    if (!allPlants && !canAccessPlant(req, plant)) {
+      return res.status(403).json({ message: 'You can not access this plant — your account is restricted to the plant(s) assigned to you.' });
+    }
+    const userPlants = getUserPlants(req.user);
+    const params: any[] = [date];
+    const conds: string[] = ['ps.order_date = $1::date'];
+    if (!allPlants) { params.push(plant); conds.push(`LOWER(ps.plant) = LOWER($${params.length})`); }
+    else if (userPlants !== null) { params.push(userPlants); conds.push(`LOWER(ps.plant) = ANY($${params.length})`); }
+    const { rows } = await pool.query(
+      `SELECT ps.id, ps.order_number AS "orderNumber", ps.party_name AS "partyName", ps.plant,
+              ps.vehicle_number AS "vehicleNumber", ps.notion_status AS "notionStatus",
+              ps.loading_completed_at AS "loadingCompletedAt", ps.loading_owner_name AS "loadingOwnerName",
+              ps.loading_paused_at AS "loadingPausedAt", ps.loading_stv AS "loadingStv",
+              EXISTS (SELECT 1 FROM loading_records lr WHERE lr.order_number = ps.order_number) AS "hasLoad",
+              COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0)::int AS "totalQty",
+              COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = ps.order_number AND e.voided IS NOT TRUE), 0)::int AS "loadedQty",
+              CASE WHEN ps.total_volume ~ '^[0-9]+([.][0-9]+)?$' THEN ps.total_volume::numeric ELSE NULL END::float AS "orderVolume",
+              COALESCE((
+                SELECT SUM(ev.q * iv.vol)
+                FROM (SELECT barcode, SUM(total_qty) AS q FROM loading_scan_events
+                       WHERE order_number = ps.order_number AND voided IS NOT TRUE GROUP BY barcode) ev
+                JOIN LATERAL (
+                  SELECT CASE WHEN i.volume_in_cu_ft ~ '^[0-9]+([.][0-9]+)?$' THEN i.volume_in_cu_ft::numeric ELSE 0 END AS vol
+                  FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id AND i.barcode = ev.barcode LIMIT 1
+                ) iv ON TRUE
+              ), 0)::float AS "loadedVolume"
+         FROM proforma_slips ps
+         WHERE ${conds.join(' AND ')}
+         ORDER BY ps.plant, ps.order_number`,
+      params,
+    );
+    res.json({ plant, date, slips: rows });
+  } catch (err) {
+    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to load the slips' });
+  }
+});
+
+// GET /api/loading/master/slip/:orderNumber — Load Master's read-only view of one slip: header, items
+// with their progress, and the load's scan history. Needs only the Load Master page, not Load
+// Operations; plant-scoped; no ownership rules (it is a view). `canWrite` tells the page whether to
+// offer the void / remove / delete actions.
+router.get('/loading/master/slip/:orderNumber', requirePageAccess(['loading-overview']), async (req: Request, res: Response) => {
+  try {
+    const slip: any = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) {
+      return res.status(403).json({ message: 'You can not open this slip — it belongs to a plant your account is restricted from (plant restriction).' });
+    }
+    const rawItems = await storage.getProformaSlipItems(slip.id);
+    const [progress, slipOut, eventsRes, recordRes] = await Promise.all([
+      withProgress(slip, rawItems),
+      withRto(slip),
+      pool.query(
+        `SELECT id, barcode, item_name AS "itemName", total_qty AS "totalQty", COALESCE(is_extra, false) AS "isExtra",
+                COALESCE(is_adjust, false) AS "isAdjust", COALESCE(voided, false) AS voided, void_reason AS "voidReason",
+                voided_at AS "voidedAt", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt", stv
+           FROM loading_scan_events
+          WHERE order_number = $1 AND NOT COALESCE(hidden_in_history, false)
+          ORDER BY scanned_at DESC, id DESC LIMIT 1500`,
+        [slip.orderNumber],
+      ),
+      pool.query(`SELECT 1 FROM loading_records WHERE order_number = $1 LIMIT 1`, [slip.orderNumber]),
+    ]);
+    res.json({
+      slip: slipOut, items: progress.items, allComplete: progress.allComplete, loadedVolume: progress.loadedVolume,
+      hasLoad: recordRes.rows.length > 0, events: eventsRes.rows,
+      canWrite: isAdmin(req) || hasWriteAccess(req.user, 'loading-overview'),
+    });
+  } catch (error) {
+    console.error('Error loading the Load Master slip view:', error);
+    res.status(500).json({ message: 'Failed to load the slip' });
+  }
+});
+
+// POST /api/loading/master/events/:id/remove — take a VOIDED scan out of the slip's history list. The
+// row stays in the database (stock and totals read it), it is only hidden — the same rule Scan
+// History's Remove entry follows. A live scan must be voided first.
+router.post('/loading/master/events/:id/remove', requireLoadMasterWrite, async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return res.status(400).json({ message: 'Invalid event ID' });
+    const { rows } = await pool.query(`SELECT order_number, plant, barcode, voided FROM loading_scan_events WHERE id = $1`, [id]);
+    const ev = rows[0];
+    if (!ev) return res.status(404).json({ message: 'Load event not found' });
+    if (!canAccessPlant(req, ev.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (!ev.voided) return res.status(409).json({ message: 'Only a voided scan can be removed from history — void it first.' });
+    await pool.query(`UPDATE loading_scan_events SET hidden_in_history = true WHERE id = $1`, [id]);
+    const { userCode, userName } = actor(req);
+    try {
+      await storage.logActivity({
+        pageName: 'Load Master', action: 'delete', entityType: 'scan_history_entry', entityId: id,
+        details: `Removed a voided scan from the history of order ${ev.order_number} (${ev.barcode ?? 'no barcode'}, ${ev.plant ?? ''}) by ${userName ?? userCode}`,
+        userCode, userName,
+      });
+    } catch (e) { console.error('[Load Master] could not write the Activity entry:', e instanceof Error ? e.message : e); }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error removing a load event from history:', error);
+    res.status(500).json({ message: 'Failed to remove the entry' });
   }
 });
 
@@ -1246,6 +1394,9 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 ps.loading_stv AS "loadingStv",
                 COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0)::int AS "totalQty",
                 COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0)::int AS "loadedQty",
+                -- When the first box was really scanned. A load row created later than its own work (rows
+                -- written in a batch afterwards) would otherwise give a negative Time Taken.
+                (SELECT MIN(e.scanned_at) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE) AS "firstScanAt",
                 -- The order's own cargo volume, and how much of it is on the vehicle so far: each
                 -- barcode's loaded quantity times that item's own volume (same sum the open load
                 -- screen shows). Non-numeric/blank volumes count as 0.
@@ -1989,7 +2140,7 @@ const STATUS_AFTER_DELETE_FALLBACK = 'READY≈LOAD';
 //              Loading's ledger rows are never read by any stock total or history view (those all
 //              read the scan entries), so nothing shows or counts them.
 // The proforma slip and its items are never touched.
-router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, async (req: Request, res: Response) => {
+const resetLoadingSlip = async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const mode: 'void' | 'remove' = req.body?.mode === 'remove' ? 'remove' : 'void';
@@ -2105,7 +2256,9 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
   } finally {
     client.release();
   }
-});
+};
+router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, resetLoadingSlip);
+router.post('/loading/master/proforma/:orderNumber/reset', requireLoadMasterWrite, resetLoadingSlip);
 
 // Whether a scan counts as "regular" (fills the item's expected quantity) or "extra" (beyond it)
 // is decided once, at scan time, and stored on that row — /scan itself never revisits it. So
@@ -2146,7 +2299,7 @@ async function reclassifyLoadingEvents(client: any, orderNumber: string, barcode
 // order_scan_items-style item record to reconcile here (withProgress recomputes "loaded" live by
 // summing non-voided rows), so this is simpler than order-scan's void: no FIFO credit transfer,
 // no same-part Extra backfill — just reverse the stock and mark the row.
-router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Request, res: Response) => {
+const voidLoadingEvent = async (req: Request, res: Response) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ message: 'Invalid event ID' });
 
@@ -2244,7 +2397,9 @@ router.post('/loading/events/:id/void', requireLoadingVoidAccess, async (req: Re
   } finally {
     client.release();
   }
-});
+};
+router.post('/loading/events/:id/void', requireLoadingVoidAccess, voidLoadingEvent);
+router.post('/loading/master/events/:id/void', requireLoadMasterWrite, voidLoadingEvent);
 
 // PUT /api/loading/events/:id — body: { totalQty }. Corrects a mistake in an already-recorded
 // load scan (Load Event has no STV concept — see Unloading/Order Scan for that). No cached

@@ -11,7 +11,6 @@ export const CONTROLLABLE_PAGES = [
   { key: "print-operations", label: "Print Operations" },
   { key: "sort-slip", label: "Sort Slip" },
   { key: "loading", label: "Load Operations" },
-  { key: "loading-overview", label: "Loading Overview" },
   { key: "unloading", label: "Unload Operations" },
   { key: "scan-order", label: "Scan Operations" },
   { key: "scan-viewer", label: "Overall Scan Ops" },
@@ -21,6 +20,7 @@ export const CONTROLLABLE_PAGES = [
   // SALES
   { key: "dispatch", label: "Dispatch" },
   { key: "proforma", label: "Proforma Slips" },
+  { key: "loading-overview", label: "Load Master" },
   { key: "adjust-exchange", label: "Adjust Exchange Extra" },
   { key: "order-import", label: "Order Management" },
   // INVENTORY

@@ -1,7 +1,9 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { addDays, format } from "date-fns";
-import { CheckCircle2, Clock, Loader2, Package, PackagePlus, RefreshCw, Search, Users, X } from "lucide-react";
+import { CheckCircle2, Clock, FileText, Loader2, Package, PackagePlus, RefreshCw, Search, Users, X } from "lucide-react";
+import { useLocation } from "wouter";
+import { NotionStatusBadge } from "@/components/NotionStatusBadge";
 import { apiRequest } from "@/lib/queryClient";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { DateInput } from "@/components/ui/date-input";
@@ -29,6 +31,12 @@ type ItemRow = {
   parties: PartyRow[];
 };
 type OrderHit = { orderNumber: string; partyName: string; plant: string; orderDate: string };
+// One proforma slip of the day, with its load progress (GET /api/loading/date-slips).
+type DaySlip = {
+  id: number; orderNumber: string; partyName: string | null; plant: string | null; vehicleNumber: string | null;
+  notionStatus: string | null; loadingCompletedAt: string | null; loadingOwnerName: string | null; loadingPausedAt: string | null;
+  loadingStv: string | null; hasLoad: boolean; totalQty: number; loadedQty: number; orderVolume: number | null; loadedVolume: number;
+};
 type DateItems = { plant: string; date: string; orders: number; parties: number; items: ItemRow[] };
 
 const ALL_PLANTS = "__all__";
@@ -122,6 +130,11 @@ export function LoadingViewerSection({
   const [orderNo, setOrderNo] = useState("");
   const [picked, setPicked] = useState<OrderHit | null>(null);
   const [sugOpen, setSugOpen] = useState(false);
+  // Items = every product of the day; Slips = every proforma slip of the day, each opening in Load Operations.
+  const [tab, setTab] = useState<"items" | "slips">("items");
+  // Slips tab: "" = every slip; "load:<state>" or "notion:<status>" narrows to one status chip.
+  const [slipChip, setSlipChip] = useState("");
+  const [, navigate] = useLocation();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [conditions, setConditions] = useState<Record<string, FilterCondition>>({});
 
@@ -147,15 +160,27 @@ export function LoadingViewerSection({
   });
   // Order numbers matching what was typed — the picker below the box. Server-side plant-restricted.
   const suggestQuery = useQuery<OrderHit[]>({
-    queryKey: ["/api/loading/order-suggest", orderNo.trim()],
+    queryKey: ["/api/loading/order-suggest", orderNo.trim(), activePlant, date],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/loading/order-suggest?q=${encodeURIComponent(orderNo.trim())}`);
+      // Only the chosen plant (or, on "All plants", the plants this user may see) and the chosen date.
+      const res = await apiRequest("GET", `/api/loading/order-suggest?q=${encodeURIComponent(orderNo.trim())}&plant=${encodeURIComponent(activePlant)}&date=${encodeURIComponent(date)}`);
       return res.ok ? res.json() : [];
     },
     enabled: !picked && orderNo.trim().replace(/^#/, "").length >= 2,
     staleTime: 15_000,
   });
   const suggestions = suggestQuery.data ?? [];
+  const slipsQuery = useQuery<{ slips: DaySlip[] }>({
+    queryKey: ["/api/loading/date-slips", activePlant, date],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/loading/date-slips?plant=${encodeURIComponent(activePlant)}&date=${encodeURIComponent(date)}`);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to load");
+      return res.json();
+    },
+    enabled: !!activePlant && !!date,
+    refetchInterval: 15_000,
+  });
+  const pickedSlips = (slipsQuery.data?.slips ?? []).filter((s) => !picked || s.orderNumber === picked.orderNumber);
   const pickOrder = (h: OrderHit) => {
     setPicked(h); setOrderNo(h.orderNumber); setDate(h.orderDate); setSugOpen(false); setExpanded(null);
   };
@@ -328,6 +353,148 @@ export function LoadingViewerSection({
         </div>
   );
 
+  const loadState = (s: DaySlip) =>
+    s.loadingCompletedAt ? { label: "Completed", cls: "bg-emerald-100 text-emerald-700" }
+    : s.hasLoad ? { label: s.loadingPausedAt ? "Paused" : "Loading", cls: s.loadingPausedAt ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-700" }
+    : { label: "Not started", cls: "bg-gray-100 text-gray-600" };
+  // Clicking a slip opens its read-only view (the same details as Load Operations, no buttons).
+  const viewSlip = (orderNumber: string) => navigate(`/load-master/slip/${encodeURIComponent(orderNumber)}`);
+  const daySlips = pickedSlips.filter((s) =>
+    !slipChip ? true
+    : slipChip.startsWith("load:") ? loadState(s).label === slipChip.slice(5)
+    : (s.notionStatus ?? "") === slipChip.slice(7));
+  const loadChips = ["Not started", "Loading", "Paused", "Completed"]
+    .map((label) => ({ key: `load:${label}`, label, count: pickedSlips.filter((s) => loadState(s).label === label).length }))
+    .filter((c) => c.count > 0);
+  const notionCounts = new Map<string, number>();
+  for (const s of pickedSlips) if (s.notionStatus) notionCounts.set(s.notionStatus, (notionCounts.get(s.notionStatus) ?? 0) + 1);
+  const createdCount = pickedSlips.filter((s) => s.hasLoad).length;
+  const slipTotals = daySlips.reduce(
+    (a, s) => ({ qty: a.qty + s.totalQty, loaded: a.loaded + s.loadedQty, done: a.done + (s.loadingCompletedAt ? 1 : 0), started: a.started + (s.hasLoad ? 1 : 0) }),
+    { qty: 0, loaded: 0, done: 0, started: 0 },
+  );
+  const slipsView = (
+    <>
+      <StatsBar
+        singleRow
+        stats={[
+          { icon: FileText, label: "Slips", value: daySlips.length, hint: `${slipTotals.started} started · ${daySlips.length - slipTotals.started} not started`, tone: "navy" },
+          { icon: Package, label: "Total", value: slipTotals.qty, hint: "boxes ordered", tone: "navy" },
+          { icon: CheckCircle2, label: "Loaded", value: slipTotals.loaded, hint: "boxes loaded", tone: "emerald" },
+          { icon: Clock, label: "Remaining", value: Math.max(0, slipTotals.qty - slipTotals.loaded), hint: "boxes left", tone: "red" },
+          { icon: Users, label: "Completed", value: slipTotals.done, hint: `of ${daySlips.length} slips`, tone: slipTotals.done > 0 ? "emerald" : "muted" },
+        ]}
+      />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-xs font-semibold text-gray-500">Load created for <b className="text-[#001d6e]">{createdCount}</b> of <b className="text-gray-800">{pickedSlips.length}</b> slips</span>
+        <button type="button" onClick={() => setSlipChip("")}
+          className={`rounded-full px-3 py-1 text-xs font-semibold ${!slipChip ? "bg-[#001d6e] text-white ring-2 ring-[#001d6e]/30" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}>
+          All ({pickedSlips.length})
+        </button>
+        {loadChips.map((c) => (
+          <button key={c.key} type="button" onClick={() => setSlipChip(slipChip === c.key ? "" : c.key)}
+            className={`rounded-full px-3 py-1 text-xs font-semibold ${slipChip === c.key ? "bg-[#001d6e] text-white ring-2 ring-[#001d6e]/30" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}>
+            {c.label} ({c.count})
+          </button>
+        ))}
+        {Array.from(notionCounts.entries()).map(([status, count]) => (
+          <button key={status} type="button" onClick={() => setSlipChip(slipChip === `notion:${status}` ? "" : `notion:${status}`)}
+            className={`rounded-full px-1 py-0.5 ${slipChip === `notion:${status}` ? "ring-2 ring-[#001d6e]/40" : ""}`} title={`Slips with status ${status}`}>
+            <span className="inline-flex items-center gap-1"><NotionStatusBadge status={status} /><span className="text-xs font-semibold text-gray-600">{count}</span></span>
+          </button>
+        ))}
+      </div>
+      <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center gap-2 rounded-t-xl border-b border-gray-100 px-4 py-3">
+          <FileText className="h-4 w-4 text-[#001d6e]" />
+          <span className="text-lg font-semibold text-gray-900">{picked ? `Order #${picked.orderNumber} · ${picked.partyName}` : `Load slips of ${date}`}</span>
+          <span className="text-sm text-gray-400">({daySlips.length})</span>
+          <div className="ml-auto flex items-center gap-2">{orderBox}</div>
+        </div>
+        {slipsQuery.isLoading ? (
+          <div className="p-3"><SectionSkeleton lines={6} /></div>
+        ) : slipsQuery.isError ? (
+          <div className="py-10 text-center text-base text-red-600">{(slipsQuery.error as Error).message}</div>
+        ) : daySlips.length === 0 ? (
+          <div className="py-16 text-center text-base text-gray-400">
+            {picked ? `Nothing found for order #${picked.orderNumber}.` : `No load slips for ${activePlant === ALL_PLANTS ? "any plant" : activePlant} on ${date}.`}
+          </div>
+        ) : (
+          <>
+            <div className="hidden overflow-x-auto lg:block">
+              <table className="w-full min-w-[900px] text-sm">
+                <thead>
+                  <tr className="bg-[#001d6e] text-left text-[11px] font-semibold uppercase tracking-wide text-white">
+                    <th className="px-3 py-2">Order No.</th>
+                    <th className="px-3 py-2">Party</th>
+                    {activePlant === ALL_PLANTS && <th className="px-3 py-2">Plant</th>}
+                    <th className="px-3 py-2">Vehicle</th>
+                    <th className="px-3 py-2">Load</th>
+                    <th className="px-3 py-2">Status</th>
+                    <th className="px-3 py-2 text-center">Loaded / Total</th>
+                    <th className="px-3 py-2 text-center">Volume</th>
+                    <th className="px-3 py-2">Owner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {daySlips.map((s) => {
+                    const st = loadState(s);
+                    const pct = s.totalQty > 0 ? Math.min(100, Math.round((s.loadedQty / s.totalQty) * 100)) : 0;
+                    return (
+                      <tr key={s.id} onClick={() => viewSlip(s.orderNumber)} className={`cursor-pointer border-t border-gray-100 ${s.loadingCompletedAt ? "bg-emerald-50" : "bg-white"} hover:bg-gray-50`} title="Click to view this slip">
+                        <td className="px-3 py-2 font-semibold tabular-nums text-[#001d6e]">#{s.orderNumber}</td>
+                        <td className="px-3 py-2 text-gray-800">{s.partyName || "—"}</td>
+                        {activePlant === ALL_PLANTS && <td className="px-3 py-2">{s.plant ? <PlantBadge plant={s.plant} /> : "—"}</td>}
+                        <td className="px-3 py-2 text-gray-700">{s.vehicleNumber || <span className="text-gray-300">—</span>}</td>
+                        <td className="px-3 py-2"><span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${st.cls}`}>{st.label}</span></td>
+                        <td className="px-3 py-2"><NotionStatusBadge status={s.notionStatus} /></td>
+                        <td className="px-3 py-2 text-center tabular-nums">
+                          <span className="font-semibold text-emerald-600">{s.loadedQty}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{s.totalQty}</span>
+                          <div className="mx-auto mt-1 h-1 w-24 overflow-hidden rounded-full bg-gray-200"><div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} /></div>
+                        </td>
+                        <td className="px-3 py-2 text-center text-xs tabular-nums">
+                          <span className="font-semibold text-emerald-600">{s.loadedVolume.toFixed(2)}</span>
+                          {s.orderVolume != null && <> <span className="text-gray-400">/</span> <span className="font-semibold">{s.orderVolume.toFixed(2)}</span></>}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-gray-600">{s.loadingOwnerName || <span className="text-gray-300">—</span>}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="grid gap-2 p-3 sm:grid-cols-2 lg:hidden">
+              {daySlips.map((s) => {
+                const st = loadState(s);
+                return (
+                  <div key={s.id} onClick={() => viewSlip(s.orderNumber)} role="button" className={`cursor-pointer rounded-lg border border-l-4 px-3 py-2.5 shadow-sm ${s.loadingCompletedAt ? "border-l-emerald-500 bg-emerald-50" : s.hasLoad ? "border-l-blue-400 bg-white" : "border-l-gray-300 bg-white"}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-base font-bold tabular-nums text-[#001d6e]">#{s.orderNumber}</p>
+                        <p className="truncate text-sm text-gray-800">{s.partyName || "—"}</p>
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${st.cls}`}>{st.label}</span>
+                        {s.plant && activePlant === ALL_PLANTS && <PlantBadge plant={s.plant} />}
+                      </div>
+                    </div>
+                    <p className="mt-1 text-sm tabular-nums text-gray-600">
+                      Loaded <span className="text-[17px] font-bold text-emerald-600">{s.loadedQty}</span> / <span className="text-[17px] font-bold text-gray-900">{s.totalQty}</span>
+                      {s.vehicleNumber && <span className="ml-2 text-xs text-gray-500">{s.vehicleNumber}</span>}
+                    </p>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <NotionStatusBadge status={s.notionStatus} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div className="space-y-3" style={{ fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" }}>
       {/* Plant + date — the only inputs; everything below is for that one day. */}
@@ -374,12 +541,29 @@ export function LoadingViewerSection({
         </Button>
       </div>
 
+      <div className="flex flex-wrap items-center gap-1.5">
+        {([
+          { key: "items", label: "Items", count: items.length },
+          { key: "slips", label: "Slips", count: pickedSlips.length },
+        ] as const).map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => setTab(t.key)}
+            className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${tab === t.key ? "bg-[#001d6e] text-white ring-2 ring-[#001d6e]/30" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}
+          >
+            {t.label} <span className={tab === t.key ? "text-white/70" : "text-gray-400"}>({t.count})</span>
+          </button>
+        ))}
+      </div>
+
       {!activePlant || !date ? (
         <div className="rounded-xl border border-dashed border-gray-300 bg-white py-16 text-center text-base text-gray-400">
           Pick a plant and an order date.
         </div>
       ) : (
         <>
+          {tab === "slips" ? slipsView : (<>
           {!query.isLoading && !query.isError && items.length > 0 && (
           <StatsBar
             singleRow
@@ -495,6 +679,7 @@ export function LoadingViewerSection({
             </>
             )}
           </div>
+          </>)}
         </>
       )}
     </div>

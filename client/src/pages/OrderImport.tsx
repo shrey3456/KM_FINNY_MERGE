@@ -344,6 +344,9 @@ export default function OrderImport() {
   // dialog — but keeping them independent avoids one flow's state leaking into the other's UI). ──
   const [pageMode, setPageMode] = usePersistentFilter<"order-import" | "unloading">("orderImport:pageMode", "order-import");
   const [unloadImportPlant, setUnloadImportPlant] = useState("");
+  // The plant the PURCHASE belongs to, when it is not the plant the stock is added to ("" = the same
+  // plant, as before). Chosen for the whole CSV, once, here — and locked after the first scan.
+  const [unloadPurchasePlant, setUnloadPurchasePlant] = useState("");
   const [unloadImportDate, setUnloadImportDate] = useState("");
   const [unloadImportFile, setUnloadImportFile] = useState<File | null>(null);
   const unloadFileRef = useRef<HTMLInputElement>(null);
@@ -1199,6 +1202,8 @@ export default function OrderImport() {
     // The ordered QUANTITY across this upload's rows — totalRows is only how many lines the file
     // has, which says nothing about how big the delivery is.
     totalQty: number;
+    // The purchase plant when the batch was unloaded for one plant and stocked into another.
+    purchasePlant?: string | null;
     vehicleNumbers: string[]; sessionIds: number[]; vehicles: { vehicleNumber: string; sessionId: number }[];
   };
   const [unloadHistoryOffset, setUnloadHistoryOffset] = useState(0);
@@ -1270,6 +1275,7 @@ export default function OrderImport() {
       setUnloadDeletePreview(null);
       if (mode === "replace" && target) {
         setUnloadImportPlant(target.plant);
+        setUnloadPurchasePlant(target.purchasePlant ?? "");
         setUnloadImportDate(target.orderDate);
         toast({ title: "Pick the corrected CSV", description: "Plant and Order Date are filled in — choose the file to continue." });
         unloadFileRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1280,7 +1286,7 @@ export default function OrderImport() {
   });
 
   function resetUnloadImportForm() {
-    setUnloadImportPlant(""); setUnloadImportDate(""); setUnloadImportFile(null);
+    setUnloadImportPlant(""); setUnloadPurchasePlant(""); setUnloadImportDate(""); setUnloadImportFile(null);
     if (unloadFileRef.current) unloadFileRef.current.value = "";
   }
 
@@ -1320,7 +1326,8 @@ export default function OrderImport() {
     setIsUnloadImporting(true);
     try {
       const data = await apiRequest("POST", "/api/unloading/import", {
-        plant: unloadImportPlant, orderDate: unloadImportDate, csvFileName: unloadCsvData.name, items,
+        plant: unloadImportPlant, purchasePlant: unloadPurchasePlant || null,
+        orderDate: unloadImportDate, csvFileName: unloadCsvData.name, items,
       }, false, true);
 
       toast({
@@ -2443,10 +2450,22 @@ export default function OrderImport() {
               </div>
               <div className="p-6 space-y-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-12 sm:items-end sm:gap-4">
-                  <div className="sm:col-span-3 grid gap-1.5">
-                    <Label className="text-xs font-medium text-gray-600">Plant</Label>
+                  <div className="sm:col-span-2 grid gap-1.5">
+                    <Label className="text-xs font-medium text-gray-600" title="The plant the purchase belongs to. Leave on 'Same plant' when the stock stays where it was bought.">Purchase plant</Label>
+                    <Select value={unloadPurchasePlant || "_same_"} onValueChange={(v) => setUnloadPurchasePlant(v === "_same_" ? "" : v)}>
+                      <SelectTrigger className="h-10 text-sm rounded-full"><SelectValue placeholder="Same plant" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="_same_">Same plant</SelectItem>
+                        {unloadImportablePlants
+                          .filter((p) => p.name.toLowerCase() !== unloadImportPlant.trim().toLowerCase())
+                          .map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="sm:col-span-2 grid gap-1.5">
+                    <Label className="text-xs font-medium text-gray-600" title="The plant the boxes are added to and later loaded from.">Stock plant</Label>
                     {unloadImportablePlants.length > 0 ? (
-                      <Select value={unloadImportPlant || "_none_"} onValueChange={(v) => setUnloadImportPlant(v === "_none_" ? "" : v)}>
+                      <Select value={unloadImportPlant || "_none_"} onValueChange={(v) => { const next = v === "_none_" ? "" : v; setUnloadImportPlant(next); if (next && next.toLowerCase() === unloadPurchasePlant.toLowerCase()) setUnloadPurchasePlant(""); }}>
                         <SelectTrigger className="h-10 text-sm rounded-full"><SelectValue placeholder="Select…" /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="_none_">— Select —</SelectItem>
@@ -2461,7 +2480,7 @@ export default function OrderImport() {
                     <Label className="text-xs font-medium text-gray-600">Order Date</Label>
                     <Input type="date" className="h-10 text-sm w-full rounded-full" value={unloadImportDate} onChange={(e) => setUnloadImportDate(e.target.value)} />
                   </div>
-                  <div className="sm:col-span-4 grid gap-1.5">
+                  <div className="sm:col-span-3 grid gap-1.5">
                     <Label className="text-xs font-medium text-gray-600 truncate">
                       CSV File{unloadImportFile && <span className="text-green-600 font-medium"> · {unloadImportFile.name}</span>}
                     </Label>
@@ -2480,6 +2499,11 @@ export default function OrderImport() {
                   </div>
                 </div>
                 <p className="text-xs text-gray-400">One CSV can contain multiple vehicles — every row must have a Vehicle Number column.</p>
+                {unloadPurchasePlant && unloadImportPlant && (
+                  <p className="rounded-md border border-[#001d6e]/20 bg-[#001d6e]/5 px-3 py-2 text-xs text-[#001d6e]">
+                    Bought for <b>{unloadPurchasePlant}</b>, stock goes to <b>{unloadImportPlant}</b>. The purchase is booked at {unloadPurchasePlant} and moved to {unloadImportPlant} (shown as a Transfer on the Stock page). Both plants are locked once scanning starts.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -2588,7 +2612,11 @@ export default function OrderImport() {
                                   <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
                                 </td>
                                 <td className="truncate border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]" title={u.csvFileName}>{u.csvFileName}</td>
-                                <td className="border-r border-b border-gray-200 px-3 py-2"><PlantBadge plant={u.plant} /></td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2">
+                                  {u.purchasePlant
+                                    ? <span className="inline-flex items-center gap-1"><PlantBadge plant={u.purchasePlant} /><span className="text-gray-400">→</span><PlantBadge plant={u.plant} /></span>
+                                    : <PlantBadge plant={u.plant} />}
+                                </td>
                                 <td className="truncate border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.orderDate}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.vehicleCount}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.totalRows.toLocaleString()}</td>

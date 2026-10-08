@@ -212,12 +212,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "loading",
         },
         {
-          label: "Loading Overview",
-          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/loading-overview",
-          pageKey: "loading-overview",
-        },
-        {
           label: "Unload Operations",
           icon: <PackageOpen className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/unloading",
@@ -275,6 +269,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: <FileText className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/proforma-slips",
           pageKey: "proforma",
+        },
+        {
+          label: "Load Master",
+          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/load-master",
+          pageKey: "loading-overview",
         },
         {
           label: "Adjust Exchange Extra",

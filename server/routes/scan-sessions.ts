@@ -815,6 +815,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       -- came from, and the two together make the Type label ("Scan Extra", "Load Adjust", …).
       -- Needed on its own because a scan row and a stock-ledger row can carry identical flags.
       'scan' AS "sourceKind",
+      NULL::text AS "purchasePlant",
       CASE WHEN ose.item_name LIKE 'Empty Box: %' THEN SUBSTRING(ose.item_name FROM 12) ELSE NULL END AS "emptyBoxNote",
       ose.stv,
       ose.scanned_by_code  AS "scannedByCode",
@@ -859,6 +860,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isUnload",
       false AS "isAdjust",
       'stock' AS "sourceKind",
+      NULL::text AS "purchasePlant",
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
@@ -903,6 +905,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       -- The Loading Items table's +/- corrections ("Load Adjust"); still isDispatch.
       COALESCE(lse.is_adjust, false) AS "isAdjust",
       'loading' AS "sourceKind",
+      NULL::text AS "purchasePlant",
       NULL::text AS "emptyBoxNote",
       lse.stv,
       lse.scanned_by_code   AS "scannedByCode",
@@ -945,6 +948,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       -- Set by a qty edit, not a fresh scan ("Unload Adjust").
       COALESCE(use.is_adjust, false) AS "isAdjust",
       'unloading' AS "sourceKind",
+      uis.purchase_plant AS "purchasePlant",
       NULL::text AS "emptyBoxNote",
       use.stv,
       use.scanned_by_code   AS "scannedByCode",
@@ -991,6 +995,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isUnload",
       true AS "isAdjust",
       'stock' AS "sourceKind",
+      NULL::text AS "purchasePlant",
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
@@ -1044,6 +1049,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
         WHEN sm.reason = 'Backfilled from Loading events (ledger reconciliation)' THEN 'loading'
         ELSE 'scan'
       END AS "sourceKind",
+      NULL::text AS "purchasePlant",
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
@@ -1089,6 +1095,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isUnload",
       false AS "isAdjust",
       'scan' AS "sourceKind",
+      NULL::text AS "purchasePlant",
       NULL::text AS "emptyBoxNote",
       NULL::text AS stv,
       sm.created_by_code AS "scannedByCode",
@@ -1140,6 +1147,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       false AS "isUnload",
       false AS "isAdjust",
       'sorting' AS "sourceKind",
+      NULL::text AS "purchasePlant",
       NULL::text AS "emptyBoxNote",
       -- The platform this order is being loaded on, if Loading has picked one yet — the same STV
       -- the load's own rows carry, so an order reads as one story across the sections.
@@ -1661,6 +1669,52 @@ router.get('/reports/stock-adjustments', async (req: Request, res: Response) => 
   }
 });
 
+// ── GET /reports/stock-transfers ─────────────────────────────────────────────────────────────
+// What is behind one item's Transfer In / Transfer Out figures: every move between plants made by an
+// Unloading batch that has a separate purchase plant — which plant it came from / went to, which
+// batch (vehicle + CSV), the day it counts on (the batch's order date), and who did it. A void or a
+// correction shows as its own negative line, so the lines add up to the figure on the stock page.
+router.get('/reports/stock-transfers', async (req: Request, res: Response) => {
+  try {
+    const barcode = typeof req.query.barcode === 'string' ? req.query.barcode.trim() : '';
+    const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
+    const plantList = plantParam ? plantParam.split(',').map((p) => p.trim()).filter(Boolean) : [];
+    if (!barcode) return res.status(400).json({ message: 'barcode is required' });
+
+    const allowed = getUserPlants(req.user);
+    if (allowed !== null && allowed.length === 0) return res.json({ items: [] });
+
+    const conditions = [`LOWER(TRIM(sm.barcode)) = LOWER(TRIM($1))`, `sm.type = 'transfer'`];
+    const params: any[] = [barcode];
+    if (plantList.length > 0) {
+      params.push(plantList.map((p) => p.toLowerCase()));
+      conditions.push(`LOWER(TRIM(sm.plant)) = ANY($${params.length}::text[])`);
+    }
+    if (allowed !== null) { params.push(allowed); conditions.push(`LOWER(sm.plant) = ANY($${params.length}::text[])`); }
+    const from = typeof req.query.from === 'string' && req.query.from.trim() ? req.query.from.trim() : '';
+    const to = typeof req.query.to === 'string' && req.query.to.trim() ? req.query.to.trim() : '';
+    if (from) { params.push(from); conditions.push(`COALESCE(uis.order_date::date, sm.created_at::date) >= $${params.length}::date`); }
+    if (to) { params.push(to); conditions.push(`COALESCE(uis.order_date::date, sm.created_at::date) <= $${params.length}::date`); }
+
+    const { rows } = await pool.query(
+      `SELECT sm.id, sm.plant, sm.transfer_dir AS "direction", sm.other_plant AS "otherPlant", sm.qty, sm.reason,
+              sm.created_at AS "at", COALESCE(uis.order_date::date, sm.created_at::date)::text AS "day",
+              uis.vehicle_number AS "vehicleNumber", uis.csv_file_name AS "csvFileName", sm.session_id AS "sessionId",
+              (SELECT u.name FROM users u WHERE u.user_code = sm.created_by_code LIMIT 1) AS "byName"
+       FROM stock_movements sm
+       LEFT JOIN unload_import_sessions uis ON uis.id = sm.session_id
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY sm.created_at DESC, sm.id DESC
+       LIMIT 300`,
+      params,
+    );
+    return res.json({ items: rows });
+  } catch (error) {
+    console.error('Error listing stock transfers:', error);
+    return res.status(500).json({ message: 'Failed to load the transfer history' });
+  }
+});
+
 // ── Plant-wise stock (Overall Stock page) ─────────────────────────────────
 // Reads the live per-plant running totals from product_plant_stock (one row per
 // barcode+plant), enriched with product specs. Access is plant-scoped: admin/
@@ -1739,11 +1793,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // $1 / $2 are the period bounds, pushed first because they appear first in the SQL text.
     const params: any[] = [periodStart, periodEnd];
     // Hide rows with nothing at all to show for this period (no opening, purchase, sale or extra).
-    const conds: string[] = ['(pps.opening_stock <> 0 OR pps.in_stock <> 0 OR pps.sale_qty <> 0 OR pps.extra_qty <> 0)'];
+    const conds: string[] = ['(pps.opening_stock <> 0 OR pps.in_stock <> 0 OR pps.sale_qty <> 0 OR pps.extra_qty <> 0 OR pps.transfer_in <> 0 OR pps.transfer_out <> 0)'];
     const inPeriod = (dateExpr: string) => `(${dateExpr} >= $1::date AND ($2::date IS NULL OR ${dateExpr} <= $2::date))`;
     const sourceSql = `(
       WITH purchase_rows AS (
-        SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty, sm.product_id, sm.created_at, sm.type,
+        SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty, sm.product_id, sm.created_at, sm.type, sm.transfer_dir,
                COALESCE(sm.origin, CASE WHEN sm.source = 'manual' THEN 'page' ELSE 'operation' END) AS origin,
                COALESCE(
                  CASE WHEN sm.source = 'unloading' THEN uis.order_date::date ELSE ois.order_date::date END,
@@ -1784,7 +1838,13 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
                -- opening_purchase above) so that if an Opening Stock import's effective date ever
                -- falls WITHIN the viewed period instead of before it, it still can't double up as
                -- an in-period Adjust on top of being Opening.
-               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin NOT IN ('settings', 'opening', 'void')), 0)::int AS adjust,
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type NOT IN ('receive', 'transfer') AND origin NOT IN ('settings', 'opening', 'void')), 0)::int AS adjust,
+               -- Stock moved between plants by an Unloading batch that has a separate purchase plant
+               -- (server/lib/unloadStock.ts): 'out' at the purchase plant, 'in' at the stock plant. Kept
+               -- OUT of Adjust and Purchase, shown in its own columns, and counted in Closing. A void or
+               -- correction of such a scan writes the same pair with the opposite sign, so it nets here.
+               COALESCE(-SUM(qty) FILTER (WHERE ${inPeriod('d')} AND transfer_dir = 'out'), 0)::int AS transfer_out,
+               COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND transfer_dir = 'in'), 0)::int AS transfer_in,
                -- Settings-wide actions (Clear Stock). Their own figure, so one clear across the
                -- whole catalogue can't bury the corrections above.
                COALESCE(SUM(qty) FILTER (WHERE ${inPeriod('d')} AND type <> 'receive' AND origin = 'settings'), 0)::int AS system_adjust,
@@ -1823,6 +1883,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
              COALESCE(pu.purchase, 0) AS in_stock,
              COALESCE(pu.adjust, 0) AS adjust_qty,
              COALESCE(pu.system_adjust, 0) AS system_qty,
+             COALESCE(pu.transfer_in, 0) AS transfer_in,
+             COALESCE(pu.transfer_out, 0) AS transfer_out,
              COALESCE(pu.extra, 0) AS extra_qty,
              COALESCE(pu.opening_purchase, 0) - COALESCE(sa.opening_sale, 0) AS opening_stock,
              COALESCE(sa.sale, 0) AS sale_qty,
@@ -1833,6 +1895,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
                -- resets, not movements of goods. Their figure is still on screen in the System
                -- column, so the clear is never hidden, only kept out of the arithmetic.
                + COALESCE(pu.purchase, 0) + COALESCE(pu.adjust, 0)
+               + COALESCE(pu.transfer_in, 0) - COALESCE(pu.transfer_out, 0)
                - COALESCE(sa.sale, 0) AS closing_stock,
              pu.last_arrived AS updated_at,
              pu.product_id
@@ -1874,6 +1937,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         pps.adjust_qty                                     AS "adjustQty",
         pps.system_qty                                     AS "systemQty",
         pps.extra_qty                                      AS "extraQty",
+        pps.transfer_in                                    AS "transferIn",
+        pps.transfer_out                                   AS "transferOut",
         pps.opening_stock                                  AS "openingStock",
         pps.sale_qty                                       AS "saleQty",
         pps.closing_stock                                  AS "closingStock",
@@ -1954,6 +2019,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         // Settings-wide corrections (Clear Stock) — its own column, hidden by default.
         systemQty: Number(r.systemQty) || 0,
         extraQty: Number(r.extraQty) || 0,
+        // Stock moved in from / out to another plant by an Unloading batch (purchase plant -> stock plant).
+        transferIn: Number(r.transferIn) || 0,
+        transferOut: Number(r.transferOut) || 0,
         openingStock: Number(r.openingStock) || 0,
         saleQty: Number(r.saleQty) || 0,
         closingStock: Number(r.closingStock) || 0,
@@ -2141,8 +2209,8 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // NOT in here — they are resets, not goods moving, and they have their own System column.
     // Defined once and used by both places that produce a Closing figure; they drifted apart
     // before, and the silent one won.
-    const closingOf = (opening: number, purchase: number, adjust: number, sale: number) =>
-      opening + purchase + adjust - sale;
+    const closingOf = (opening: number, purchase: number, adjust: number, sale: number, transferIn = 0, transferOut = 0) =>
+      opening + purchase + adjust + transferIn - transferOut - sale;
 
     const hasExpected = true;
     const ledgerRows = [...items, ...expectedOnlyRows, ...saleOnlyRows].map((it: any) => {
@@ -2159,7 +2227,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       // THE definition of Closing, and the only one — see closingOf's comment. This pass used to
       // recompute it as opening + purchase − sale, which quietly dropped Adjust and overwrote the
       // figure the query had already worked out correctly.
-      const closingStock = closingOf(openingStock, Number(it.inStock) || 0, Number(it.adjustQty) || 0, saleQty);
+      const closingStock = closingOf(openingStock, Number(it.inStock) || 0, Number(it.adjustQty) || 0, saleQty, Number(it.transferIn) || 0, Number(it.transferOut) || 0);
       return {
         ...it,
         expectedQty,
@@ -2180,6 +2248,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // nothing else (Clear Stock, a voided scan, an adjustment back to zero) is hidden.
     const itemsWithExpected = ledgerRows.filter((it: any) =>
       it.closingStock !== 0 || it.saleQty !== 0 || (it.adjustQty ?? 0) !== 0 || (it.systemQty ?? 0) !== 0
+      || (it.transferIn ?? 0) !== 0 || (it.transferOut ?? 0) !== 0
       || (it.expectedQty ?? 0) !== 0 || (it.expectedSaleQty ?? 0) !== 0,
     );
     const saleTotal = itemsWithExpected.reduce((sum: number, it: any) => sum + (Number(it.saleQty) || 0), 0);

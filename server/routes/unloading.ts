@@ -5,6 +5,7 @@ import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/p
 import { getPlantStateCode, resolvePalletSizeOrQty, getPalletSize, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
+import { postUnloadMovement } from '../lib/unloadStock';
 import {
   computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId,
   computeUnloadDateReport, computeUnloadDateActivity,
@@ -188,8 +189,8 @@ async function isEligibleToActivate(session: { id: number; groupId: number; part
 // page itself, so a user who can only reach that page still needs to be able to call this.
 router.post('/unloading/import', requirePageWrite(['unloading', 'order-import']), async (req: Request, res: Response) => {
   try {
-    const { plant, orderDate, csvFileName, items } = req.body as {
-      plant: string; orderDate: string; csvFileName: string;
+    const { plant, orderDate, csvFileName, items, purchasePlant: rawPurchasePlant } = req.body as {
+      plant: string; orderDate: string; csvFileName: string; purchasePlant?: string | null;
       items: Array<{ vehicleNumber?: string; barcode?: string; itemName?: string; sapCode?: string; quantity?: number }>;
     };
 
@@ -198,6 +199,17 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
     if (!csvFileName) return res.status(400).json({ message: 'csvFileName is required' });
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ message: 'CSV has no rows' });
     if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    // The purchase plant — only when it is a DIFFERENT plant from the stock plant above. The user must
+    // be able to access both (admins always can). Stored null when it is the same plant.
+    const purchasePlantName = typeof rawPurchasePlant === 'string' ? rawPurchasePlant.trim() : '';
+    const purchasePlant = purchasePlantName && purchasePlantName.toLowerCase() !== String(plant).trim().toLowerCase() ? purchasePlantName : null;
+    if (purchasePlant) {
+      const { rows: knownPlant } = await pool.query('SELECT name FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1', [purchasePlant]);
+      if (knownPlant.length === 0) return res.status(400).json({ message: `Purchase plant "${purchasePlant}" does not exist.` });
+      if (!canAccessPlant(req, purchasePlant)) {
+        return res.status(403).json({ message: 'You do not have access to the purchase plant — you need access to both plants to unload for one and stock into the other.' });
+      }
+    }
 
     const normOrderDate = String(orderDate).trim();
     const missingVehicle = items.findIndex((it) => !it.vehicleNumber || !String(it.vehicleNumber).trim());
@@ -263,9 +275,9 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
       }
 
       const { rows: sessionRows } = await pool.query(
-        `INSERT INTO unload_import_sessions (plant, vehicle_number, order_date, csv_file_name, row_count, imported_by_code, group_id, part_index)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, group_id AS "groupId"`,
-        [plant, vehicleNumber, normOrderDate, csvFileName, vehicleItems.length, userCode ?? null, groupIdForInsert, partIndex],
+        `INSERT INTO unload_import_sessions (plant, vehicle_number, order_date, csv_file_name, row_count, imported_by_code, group_id, part_index, purchase_plant)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, group_id AS "groupId"`,
+        [plant, vehicleNumber, normOrderDate, csvFileName, vehicleItems.length, userCode ?? null, groupIdForInsert, partIndex, purchasePlant],
       );
       let session = sessionRows[0];
       let groupId = session.groupId as number | null;
@@ -371,7 +383,7 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
     if (userCode) {
       await storage.logActivity({
         pageName: 'Unloading', action: 'create', entityType: 'unload_import', entityId: csvFileName,
-        details: `Imported ${csvFileName} for ${plant} (${normOrderDate}) by ${userName ?? userCode} — ${summary.length} vehicle(s): `
+        details: `Imported ${csvFileName} for ${plant}${purchasePlant ? ` (purchase plant ${purchasePlant} → stock plant ${plant})` : ""} (${normOrderDate}) by ${userName ?? userCode} — ${summary.length} vehicle(s): `
           + summary.map((s) => `${s.vehicleNumber} (${s.rowCount})`).join(', '),
         userCode, userName,
       });
@@ -457,7 +469,7 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
     const listWhere = listConditions.length ? `WHERE ${listConditions.join(' AND ')}` : '';
 
     const listSelect =
-        `SELECT s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+        `SELECT s.id, s.plant, s.purchase_plant AS "purchasePlant", s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
                 (SELECT vi.rto_number FROM vehicle_info vi
                   WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
                   ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
@@ -585,6 +597,7 @@ router.get('/unloading/csv-history', requirePageAccess(['unloading', 'order-impo
         `SELECT
            s.csv_file_name AS "csvFileName",
            s.plant,
+           MAX(s.purchase_plant) AS "purchasePlant",
            s.order_date AS "orderDate",
            s.imported_by_code AS "importedByCode",
            MAX(u.name) AS "importedByName",
@@ -654,7 +667,7 @@ router.get('/unloading/sessions/recent-complete', requirePageAccess('unloading')
 
     const { rows } = await pool.query(
       `SELECT DISTINCT ON (s.plant)
-         s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+         s.id, s.plant, s.purchase_plant AS "purchasePlant", s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
          (SELECT vi.rto_number FROM vehicle_info vi
                   WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
                   ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
@@ -866,7 +879,7 @@ router.get('/unloading/sessions/:id', requirePageAccess('unloading'), async (req
     const { items, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id: session.id, plant: session.plant });
     res.json({
       session: {
-        id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
+        id: session.id, plant: session.plant, purchasePlant: session.purchase_plant ?? null, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
         csvFileName: session.csv_file_name, groupId: session.group_id, partIndex: session.part_index,
         scanStatus: session.scan_status, scanCompletedAt: session.scan_completed_at,
       },
@@ -1090,11 +1103,12 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
          ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
         [barcode, product?.id ?? null, session.plant, qty],
       );
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-         VALUES ($1,$2,$3,$4,$5,'receive',$6,$7,$8,'unloading')`,
-        [barcode, product?.id ?? null, session.plant, qty, extraQty, `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, id, userCode ?? null],
-      );
+      // One row at the one plant — or, when the batch has a separate purchase plant, the purchase row
+      // plus the transfer pair (see server/lib/unloadStock.ts). The live count above is unchanged.
+      await postUnloadMovement(client, {
+        sessionId: id, barcode, productId: product?.id ?? null, qty, extraQty, type: 'receive',
+        reason: `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, userCode: userCode ?? null,
+      });
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -1136,7 +1150,7 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
 
     res.json({
       session: {
-        id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
+        id: session.id, plant: session.plant, purchasePlant: session.purchase_plant ?? null, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
         scanStatus: finalStatus, groupId: session.group_id, partIndex: session.part_index,
       },
       items: progressItems, allComplete, offBatchExtraQty, offBatchExtraPallets,
@@ -1323,11 +1337,10 @@ router.delete('/unloading/sessions/:id', requireUnloadingDeleteAccess, async (re
           `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
           [actualQty, r.barcode, session.plant],
         );
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
-          [r.barcode, productId, session.plant, -actualQty, 'Unloading CSV deleted — rollback', id, userCode ?? null],
-        );
+        await postUnloadMovement(client, {
+          sessionId: id, barcode: r.barcode, productId, qty: -actualQty, type: 'adjust',
+          reason: 'Unloading CSV deleted — rollback', userCode: userCode ?? null,
+        });
         stockReversed.push({ barcode: r.barcode, qty: actualQty });
       }
       await client.query(`UPDATE unload_scan_events SET voided = true WHERE session_id = $1 AND voided IS NOT TRUE`, [id]);
@@ -1446,11 +1459,10 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
       // origin = 'void' — same reasoning as Order Scan's own void (see reverseLiveScanStock in
       // server/lib/orderGroupReport.ts): lets Overall Stock fold this back into Purchase instead
       // of Adjust, always in the same period as the receive it's reversing (same session_id).
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, origin)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading','void')`,
-        [event.barcode, product?.id ?? null, event.plant, -qty, reason ?? 'Unloading scan voided', event.session_id, userCode ?? null],
-      );
+      await postUnloadMovement(client, {
+        sessionId: event.session_id, barcode: event.barcode, productId: product?.id ?? null, qty: -qty, type: 'adjust', origin: 'void',
+        reason: reason ?? 'Unloading scan voided', userCode: userCode ?? null,
+      });
     }
     await client.query(
       `UPDATE unload_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
@@ -1550,11 +1562,10 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
       `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
       [oldQty, event.barcode, event.plant],
     );
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-       VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
-      [event.barcode, product?.id ?? null, event.plant, -oldQty, `Qty correction — old scan reversed (edited by ${editorLabel})`, event.session_id, userCode ?? null],
-    );
+    await postUnloadMovement(client, {
+      sessionId: event.session_id, barcode: event.barcode, productId: product?.id ?? null, qty: -oldQty, type: 'adjust',
+      reason: `Qty correction — old scan reversed (edited by ${editorLabel})`, userCode: userCode ?? null,
+    });
 
     await client.query(
       `UPDATE unload_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
@@ -1603,11 +1614,10 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
        ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
       [event.barcode, product?.id ?? null, event.plant, newQty],
     );
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8,'unloading')`,
-      [event.barcode, product?.id ?? null, event.plant, newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, event.session_id, userCode ?? null],
-    );
+    await postUnloadMovement(client, {
+      sessionId: event.session_id, barcode: event.barcode, productId: product?.id ?? null, qty: newQty as number, extraQty, type: 'adjust',
+      reason: `Qty corrected (edited by ${editorLabel})`, userCode: userCode ?? null,
+    });
 
     // This correction just changed how much of this barcode is "scanned" for this session —
     // re-check every surviving event, not just the ones just inserted, in case a separate extra

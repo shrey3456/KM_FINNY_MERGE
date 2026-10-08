@@ -12,6 +12,7 @@ import SortSlips from "@/pages/SortSlip/SortSlips";
 import DailyReports from "@/pages/DailyReports";
 import AdjustExchange from "@/pages/AdjustExchange";
 import LoadingOverview from "@/pages/LoadingOverview";
+import LoadMasterSlip from "@/pages/LoadMasterSlip";
 import NotionInventory from "@/pages/NotionInventory";
 import ScanHistory from "@/pages/Scanning/ScanHistory.tsx";
 import Users from "@/pages/Users";
@@ -280,6 +281,8 @@ function Router() {
         <Route path="/stock-sheets" component={StockSheets} />
         <ProtectedRoute path="/scan-history" component={ScanHistory} requiredPage="scan-history" />
         <ProtectedRoute path="/adjust-exchange" component={AdjustExchange} requiredPage="adjust-exchange" />
+        <ProtectedRoute path="/load-master/slip/:orderNumber" component={LoadMasterSlip} requiredPage="loading-overview" />
+        <ProtectedRoute path="/load-master" component={LoadingOverview} requiredPage="loading-overview" />
         <ProtectedRoute path="/loading-overview" component={LoadingOverview} requiredPage="loading-overview" />
         {/* /reports was the old path for this page — kept as a redirect so any existing
             bookmark/browser history still lands somewhere instead of 404ing. */}

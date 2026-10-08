@@ -1404,6 +1404,11 @@ export const unloadImportSessions = pgTable("unload_import_sessions", {
   remappedToSessionId: integer("remapped_to_session_id"),
   remappedAt: timestamp("remapped_at"),
   replacesSessionId: integer("replaces_session_id"),
+  // The plant the PURCHASE belongs to, when it differs from `plant` (the STOCK plant — where the
+  // boxes are added and later loaded from). Null = the same plant (every batch before this
+  // existed, and the normal case). Chosen once at CSV import and never changed afterwards: the
+  // two plants are locked for the life of the batch. See server/lib/unloadStock.ts.
+  purchasePlant: text("purchase_plant"),
 });
 
 export const unloadImportItems = pgTable("unload_import_items", {

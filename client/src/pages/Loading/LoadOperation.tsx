@@ -1,10 +1,10 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronLeft, ChevronRight, Download, FileText,
   ChevronDown, ChevronUp, Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
-  Truck, UserCircle2, X, Zap, Pause,
+  Truck, UserCircle2, X, Zap, Pause, Columns3,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
@@ -31,6 +31,9 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { PlantFilter } from "@/components/PlantFilter";
 import { NotionStatusBadge } from "@/components/NotionStatusBadge";
 import { withNotionNotice } from "@/lib/notionSyncNotice";
@@ -172,6 +175,9 @@ type LoadingRecord = {
   createdAt: string; orderDate: string | null;
   // Order's total quantity and how much of it is loaded so far (non-voided scans).
   totalQty?: number; loadedQty?: number;
+  // When the first (non-voided) box was scanned — used as the start of Time Taken when the row itself was
+  // created later than its own work.
+  firstScanAt?: string | null;
   // The order's own cargo volume and how much of it is loaded so far (cu ft).
   orderVolume?: number | null; loadedVolume?: number;
   loadingCompletedAt: string | null;
@@ -574,6 +580,157 @@ export default function LoadOperation() {
         />
       </span>
     );
+  };
+
+  // ── The landing table's columns ────────────────────────────────────────────────────────────────
+  // Each can be hidden (Columns menu above the table) and dragged wider or narrower (grab the right
+  // edge of a heading; double-click it to reset). Both choices are remembered on this device.
+  // Shown by default: Load Date, Order Date, Order Number, Party Name, Plant, Vehicle, Dispatch Directory, Status,
+  // Current Owner, Time Taken, Completed By, Creator (and Actions). Loaded / Total and Volume stay hidden until
+  // someone adds them from Columns.
+  const DEFAULT_HIDDEN_LIST_COLS = ["loadedQty", "volume"];
+  const LIST_COLUMN_ORDER = ["loadDate", "orderDate", "orderNumber", "party", "plant", "vehicle", "stv", "status", "owner", "loadedQty", "volume", "timeTaken", "completedBy", "creator"];
+  type ListColumn = {
+    id: string; label: string; title?: string; filterId?: string; cellClassName?: string; stopClick?: boolean;
+    render: (r: LoadingRecord) => ReactNode;
+  };
+  const [hiddenListCols, setHiddenListCols] = useState<string[]>(() => {
+    try { const raw = localStorage.getItem("loading:list:hiddenCols:v3"); if (raw == null) return DEFAULT_HIDDEN_LIST_COLS; const v = JSON.parse(raw); return Array.isArray(v) ? v : DEFAULT_HIDDEN_LIST_COLS; } catch { return DEFAULT_HIDDEN_LIST_COLS; }
+  });
+  const [listColWidths, setListColWidths] = useState<Record<string, number>>(() => {
+    try { const v = JSON.parse(localStorage.getItem("loading:list:colWidths") ?? "{}"); return v && typeof v === "object" ? v : {}; } catch { return {}; }
+  });
+  useEffect(() => { try { localStorage.setItem("loading:list:hiddenCols:v3", JSON.stringify(hiddenListCols)); } catch { /* private mode */ } }, [hiddenListCols]);
+  useEffect(() => { try { localStorage.setItem("loading:list:colWidths", JSON.stringify(listColWidths)); } catch { /* private mode */ } }, [listColWidths]);
+
+  const listDay = (iso: string) => new Date(iso).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" });
+  const rawListColumns: ListColumn[] = [
+    {
+      id: "orderDate", label: "Order Date", filterId: "orderDate", title: "The proforma slip's own order date",
+      render: (r) => (r.orderDate ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" }) : "-"),
+    },
+    { id: "loadDate", label: "Load Date", filterId: "loadDate", title: "When this load operation was started", render: (r) => listDay(r.createdAt) },
+    { id: "orderNumber", label: "Order Number", filterId: "orderNumber", render: (r) => `#${r.orderNumber}` },
+    { id: "party", label: "Party Name", filterId: "party", render: (r) => r.partyName || "-" },
+    { id: "plant", label: "Plant", filterId: "plant", render: (r) => (r.plant ? <PlantBadge plant={r.plant} /> : "-") },
+    {
+      id: "vehicle", label: "Vehicle No.", filterId: "vehicle", title: "Vehicle number (top) and RTO number (below)",
+      render: (r) => (
+        <div className="flex flex-col">
+          <span>{r.vehicleNumber || "-"}</span>
+          {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
+        </div>
+      ),
+    },
+    {
+      id: "stv", label: "Dispatch Directory", filterId: "stv", title: "The Dispatch Directory this load was started on — set once at Create Operation",
+      render: (r) => (r.loadingStv
+        ? <span className="inline-flex items-center whitespace-nowrap rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
+        : <span className="text-muted-foreground">-</span>),
+    },
+    {
+      id: "status", label: "Status", filterId: "status",
+      render: (r) => (
+        <div className="flex flex-wrap items-center gap-1">
+          <NotionStatusBadge status={recordStatus(r)} />
+          {r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}
+        </div>
+      ),
+    },
+    {
+      id: "owner", label: "Current Owner", filterId: "owner", title: "Whoever currently has the right to scan this load", stopClick: true,
+      render: (r) => (r.loadingCompletedAt ? (
+        "-"
+      ) : r.loadingPausedAt ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-amber-700">Paused · {r.loadingOwnerName ?? r.loadingOwnerCode ?? "—"}</span>
+          {canWrite && (
+            <Button
+              size="sm"
+              className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
+              disabled={claimLoadMutation.isPending}
+              onClick={() => setClaimTarget(r.orderNumber)}
+            >
+              Claim
+            </Button>
+          )}
+        </div>
+      ) : r.loadingOwnerName || r.loadingOwnerCode ? (
+        <span className="text-xs text-gray-600">{r.loadingOwnerName ?? r.loadingOwnerCode}</span>
+      ) : (
+        <span className="text-xs text-gray-300">—</span>
+      )),
+    },
+    {
+      id: "loadedQty", label: "Loaded / Total", title: "Quantity loaded so far out of the order's total quantity", cellClassName: "whitespace-nowrap tabular-nums",
+      render: (r) => <><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></>,
+    },
+    {
+      id: "volume", label: "Volume", title: "Volume loaded so far out of the order's total volume", cellClassName: "whitespace-nowrap tabular-nums",
+      render: (r) => (r.orderVolume != null
+        ? <><span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.orderVolume.toFixed(2)}</span></>
+        : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>),
+    },
+    {
+      id: "timeTaken", label: "Time Taken", title: "Time from when the load was created to when it was marked complete — counts up while it is still loading",
+      render: (r) => {
+        // The creation time — or, if the row was written AFTER its own scans (so the clock would run
+        // backwards), the moment the first box was scanned.
+        const startMs = Math.min(new Date(r.createdAt).getTime(), r.firstScanAt ? new Date(r.firstScanAt).getTime() : Infinity);
+        const start = Number.isFinite(startMs) ? new Date(startMs).toISOString() : r.createdAt;
+        if (r.loadingCompletedAt) return formatDuration(start, r.loadingCompletedAt) ?? "-";
+        const running = formatDuration(start, new Date().toISOString());
+        return running
+          ? <span className="whitespace-nowrap text-xs italic text-blue-600" title="Still loading — time since this load was started">{running} …</span>
+          : "-";
+      },
+    },
+    {
+      id: "completedBy", label: "Completed By", filterId: "completedBy", title: "Who marked this load complete — the Complete button, or the scan that finished it",
+      render: (r) => (r.loadingCompletedAt
+        ? <span className="text-xs font-medium text-gray-700">{r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "—"}</span>
+        : <span className="text-xs text-gray-300">—</span>),
+    },
+    {
+      id: "creator", label: "Creator", filterId: "creator",
+      render: (r) => (
+        <div className="flex flex-col">
+          <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
+          <span className="text-xs text-muted-foreground">
+            {listDay(r.createdAt)}{" "}
+            {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
+          </span>
+        </div>
+      ),
+    },
+  ];
+  const listColumns = [...rawListColumns].sort((a, b) => LIST_COLUMN_ORDER.indexOf(a.id) - LIST_COLUMN_ORDER.indexOf(b.id));
+  const visibleListColumns = listColumns.filter((c) => !hiddenListCols.includes(c.id));
+  const listColStyle = (id: string) => {
+    const w = listColWidths[id];
+    return w ? { width: w, minWidth: w, maxWidth: w } : undefined;
+  };
+  const toggleListColumn = (id: string) =>
+    setHiddenListCols((cur) => {
+      if (cur.includes(id)) return cur.filter((x) => x !== id);
+      // Never hide the last visible column — the table would have nothing left to show but Actions.
+      return listColumns.length - cur.length <= 1 ? cur : [...cur, id];
+    });
+  const resetListColumns = () => { setHiddenListCols(DEFAULT_HIDDEN_LIST_COLS); setListColWidths({}); };
+  const resetListColWidth = (id: string) => setListColWidths((cur) => { const next = { ...cur }; delete next[id]; return next; });
+  const startListColResize = (e: ReactMouseEvent<HTMLElement>, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = e.currentTarget.parentElement as HTMLElement;
+    const startX = e.clientX;
+    const startW = th.getBoundingClientRect().width;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(60, Math.round(startW + ev.clientX - startX));
+      setListColWidths((cur) => ({ ...cur, [id]: w }));
+    };
+    const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
   };
 
   // Whether any filter narrowing the list is currently active — drives the empty-state message
@@ -1055,6 +1212,15 @@ export default function LoadOperation() {
   }
 
   useEffect(() => {
+    // Opened from Load Master (/loading?order=<number>): open that slip — the existing load if one was
+    // started, otherwise the Create Operation dialog — instead of resuming the remembered order.
+    let fromLink: string | null = null;
+    try { fromLink = new URLSearchParams(window.location.search).get("order"); } catch { /* ignore */ }
+    if (fromLink && fromLink.trim()) {
+      try { window.history.replaceState(null, "", window.location.pathname); } catch { /* ignore */ }
+      openOrder(fromLink.trim(), { confirm: true });
+      return;
+    }
     if (admin) return; // admin never auto-resumes a remembered order — always starts on the list
     const saved = localStorage.getItem(LAST_ORDER_KEY);
     if (saved) openOrder(saved, { silent: true });
@@ -2857,6 +3023,29 @@ export default function LoadOperation() {
                   <SelectItem value="completedAt:asc">Completed — Ascending</SelectItem>
                 </SelectContent>
               </Select>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="hidden h-9 shrink-0 gap-1 rounded-md text-xs font-medium text-[#001d6e] xl:inline-flex" title="Show or hide columns">
+                    <Columns3 className="h-3.5 w-3.5" /> Columns
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="max-h-80 w-56 overflow-y-auto">
+                  <DropdownMenuLabel className="text-xs">Show columns</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {listColumns.map((c) => (
+                    <DropdownMenuCheckboxItem
+                      key={c.id}
+                      checked={!hiddenListCols.includes(c.id)}
+                      onCheckedChange={() => toggleListColumn(c.id)}
+                      onSelect={(e) => e.preventDefault()}
+                    >
+                      {c.label}
+                    </DropdownMenuCheckboxItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={resetListColumns} className="text-xs text-[#001d6e]">Reset to default columns and widths</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <AddColumnFilterButton
                 columns={recordFilterColumns}
                 conditions={recordColumnConditions}
@@ -2904,110 +3093,40 @@ export default function LoadOperation() {
                       the shared component or any other table on the site. */}
                   <Table className="[&_th]:px-2 [&_td]:px-2 [&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-[#001d6e]">
                     <TableHeader>
-                      {/* Same navy/white uppercase header every other table on the site uses,
-                          instead of the plain shadcn default (muted-gray text on white) — makes
-                          the header read as a header rather than blending into the rows. */}
                       <TableRow className="border-b border-white/20 bg-[#001d6e] hover:bg-[#001d6e]">
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">{recordColumnHeader("orderDate", "Order Date")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="When this load operation was started">{recordColumnHeader("loadDate", "Load Date")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("orderNumber", "Order Number")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("party", "Party Name")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("plant", "Plant")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The Dispatch Directory this load was started on — set once at Create Operation">{recordColumnHeader("stv", "Dispatch Directory")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Quantity loaded so far out of the order's total quantity">Loaded / Total</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Volume loaded so far out of the order's total volume">Volume</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("creator", "Creator")}</TableHead>
+                        {visibleListColumns.map((col) => (
+                          <TableHead
+                            key={col.id}
+                            className="relative text-[11px] font-semibold uppercase tracking-wide text-white"
+                            style={listColStyle(col.id)}
+                            title={col.title}
+                          >
+                            {col.filterId ? recordColumnHeader(col.filterId, col.label) : col.label}
+                            <span
+                              role="separator"
+                              onMouseDown={(e) => startListColResize(e, col.id)}
+                              onDoubleClick={() => resetListColWidth(col.id)}
+                              className="absolute right-0 top-0 h-full w-2 cursor-col-resize select-none hover:bg-white/30"
+                              title="Drag to change the width · double-click to reset"
+                            />
+                          </TableHead>
+                        ))}
                         <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {filteredRecords.map((r) => {
-                        return (
-                          <Fragment key={r.id}>
-                            {/* A plain row: the click-to-open History / Owners panel was removed on
-                                request. The row's own action buttons are still the way in. */}
-                            <TableRow>
-                              <TableCell>
-                                {r.orderDate
-                                  ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
-                                  : "-"}
-                              </TableCell>
-                              <TableCell>
-                                {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
-                              </TableCell>
-                              <TableCell>#{r.orderNumber}</TableCell>
-                              <TableCell>{r.partyName || "-"}</TableCell>
-                              <TableCell>{r.plant ? <PlantBadge plant={r.plant} /> : "-"}</TableCell>
-                              <TableCell>
-                                <div className="flex flex-col">
-                                  <span>{r.vehicleNumber || "-"}</span>
-                                  {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                {r.loadingStv
-                                  ? <span className="inline-flex items-center whitespace-nowrap rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
-                                  : <span className="text-muted-foreground">-</span>}
-                              </TableCell>
-                              <TableCell>
-                                <div className="flex flex-wrap items-center gap-1"><NotionStatusBadge status={recordStatus(r)} />{r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}</div>
-                              </TableCell>
-                              <TableCell onClick={(e) => e.stopPropagation()}>
-                                {r.loadingCompletedAt ? (
-                                  "-"
-                                ) : r.loadingPausedAt ? (
-                                  <div className="flex flex-col gap-1">
-                                    <span className="text-xs text-amber-700">Paused · {r.loadingOwnerName ?? r.loadingOwnerCode ?? "—"}</span>
-                                    {canWrite && (
-                                      <Button
-                                        size="sm"
-                                        className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
-                                        disabled={claimLoadMutation.isPending}
-                                        onClick={() => setClaimTarget(r.orderNumber)}
-                                      >
-                                        Claim
-                                      </Button>
-                                    )}
-                                  </div>
-                                ) : r.loadingOwnerName || r.loadingOwnerCode ? (
-                                  <span className="text-xs text-gray-600">{r.loadingOwnerName ?? r.loadingOwnerCode}</span>
-                                ) : (
-                                  <span className="text-xs text-gray-300">—</span>
-                                )}
-                              </TableCell>
-                              <TableCell className="whitespace-nowrap tabular-nums"><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></TableCell>
-                              <TableCell className="whitespace-nowrap tabular-nums">
-                                {r.orderVolume != null
-                                  ? <><span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.orderVolume.toFixed(2)}</span></>
-                                  : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>}
-                              </TableCell>
-                              <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
-                              <TableCell>
-                                {r.loadingCompletedAt ? (
-                                  <div className="flex flex-col">
-                                    <span className="text-xs font-medium text-gray-700">{r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "—"}</span>
-                                    <span className="text-[11px] text-gray-400">
-                                      {new Date(r.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-gray-300">—</span>
-                                )}
-                              </TableCell>
-                              <TableCell>
-                                <div className="flex flex-col">
-                                  <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
-                                  <span className="text-xs text-muted-foreground">
-                                    {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}{" "}
-                                    {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
-                                  </span>
-                                </div>
-                              </TableCell>
+                      {filteredRecords.map((r) => (
+                        <TableRow key={r.id}>
+                          {visibleListColumns.map((col) => (
+                            <TableCell
+                              key={col.id}
+                              className={`${col.cellClassName ?? ""} ${listColWidths[col.id] ? "overflow-hidden text-ellipsis" : ""}`}
+                              style={listColStyle(col.id)}
+                              onClick={col.stopClick ? (e) => e.stopPropagation() : undefined}
+                            >
+                              {col.render(r)}
+                            </TableCell>
+                          ))}
                               <TableCell onClick={(e) => e.stopPropagation()}>
                                 <div className="flex space-x-2 justify-end">
                                   <Button
@@ -3048,10 +3167,8 @@ export default function LoadOperation() {
                                   )}
                                 </div>
                               </TableCell>
-                            </TableRow>
-                          </Fragment>
-                        );
-                      })}
+                        </TableRow>
+                      ))}
                     </TableBody>
                   </Table>
                 </div>
@@ -4343,11 +4460,15 @@ export default function LoadOperation() {
                     </span>
                   </div>
                 </div>
-                {pendingSlipAlreadyLoading && (
+                {pendingSlipAlreadyLoading && (admin ? (
+                  <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    Notion already says <b>LOADING</b> for this order. You are creating the load operation here as an admin.
+                  </div>
+                ) : (
                   <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                     Status is already Loading — not able to load.
                   </div>
-                )}
+                ))}
                 {pendingMissingSortSlip && !pendingSlipAlreadyLoading && (
                   <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                     <span className="font-semibold">This plant requires a Sort Slip before Create Operation.</span>{" "}
@@ -4536,7 +4657,7 @@ export default function LoadOperation() {
                 <Button
                   variant="default"
                   className="w-full bg-[#001d6e] hover:bg-[#001d6e]/90"
-                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading || pendingMissingSortSlip || !pendingStv || (pendingOverCapacity && !capacityAck)}
+                  disabled={startLoadMutation.isPending || (pendingSlipAlreadyLoading && !admin) || pendingMissingSortSlip || !pendingStv || (pendingOverCapacity && !capacityAck)}
                   onClick={() => { if (pendingSlip && pendingStv) startLoadMutation.mutate({ orderNumber: pendingSlip.slip.orderNumber, stv: pendingStv }); }}
                 >
                   {startLoadMutation.isPending ? (
