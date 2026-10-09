@@ -3563,10 +3563,10 @@ export default function LoadOperation() {
                       color, same PlantBadge every other page uses), date, volume and the linked
                       vehicle as a proper row of badges/text underneath, sized to actually be
                       readable at a glance instead of one tiny catch-all line. */}
-                  <div className="min-w-0 space-y-1">
+                  <div className="min-w-0 space-y-1 xl:shrink-0">
                     <div className="flex flex-nowrap items-center gap-x-2">
                       <span className="shrink-0 text-sm font-bold text-[#001d6e]">#{slip.orderNumber}</span>
-                      <span className="min-w-0 text-sm text-gray-600 truncate">{slip.partyName}</span>
+                      <span className="text-sm text-gray-600" title={slip.partyName ?? undefined}>{slip.partyName}</span>
                       {slip.plant && <PlantBadge plant={slip.plant} className="shrink-0 text-[10px]" />}
                       <span className="flex shrink-0 items-center gap-x-2 whitespace-nowrap text-[11px]">
                         {slip.orderDate && <span className="font-semibold text-gray-700">Order: {new Date(`${String(slip.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</span>}
@@ -3623,43 +3623,11 @@ export default function LoadOperation() {
                           {slip.vehicleNumber}{slip.rtoNumber ? ` · ${slip.rtoNumber}` : ""}
                         </span>
                       )}
-                      {/* Progress lives in THIS row (not its own line in the actions block below)
-                          specifically so it shares a line with the vehicle badge instead of each
-                          claiming a separate row — one of the biggest single wins for shrinking
-                          this card's height. */}
-                      <div
-                        className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 ${
-                          itemPct >= 100 ? "bg-emerald-100" : "bg-gray-100"
-                        }`}
-                        title={`${itemTotals.loaded} of ${itemTotals.expected} loaded`}
-                      >
-                        <Progress
-                          value={itemPct}
-                          className={`w-16 h-1.5 ${itemPct >= 100 ? "bg-emerald-200" : "bg-gray-200"}`}
-                          indicatorClassName={itemPct >= 100 ? "bg-emerald-600" : "bg-[#001d6e]"}
-                        />
-                        <span className={`text-xs font-bold whitespace-nowrap ${itemPct >= 100 ? "text-emerald-700" : "text-gray-700"}`}>
-                          {itemTotals.loaded}/{itemTotals.expected} · {itemPct}%
-                        </span>
-                      </div>
-                      {locked && (
-                        <span className="inline-flex items-center gap-1 text-xs text-[#001d6e]">
-                          <Lock className="h-3.5 w-3.5 shrink-0" />
-                          Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Actions — Back to List is the primary way out of this page, so it gets a
-                      visibly bigger, outlined treatment rather than reading as just another
-                      small pill alongside Change Vehicle/Complete. */}
-                  <div className="flex w-full flex-wrap items-center gap-x-2 gap-y-1">
                     {/* STV is read-only here by design. It's picked once in the Create Operation
                         dialog and, after that, only an admin can change it — from the Proforma
                         Slips page, not from the scanning screen. */}
                     {lockedStv && (
-                      <div className="flex items-center gap-1">
+                      <div className="ml-1 flex items-center gap-1">
                         <span className="hidden text-[10px] font-semibold uppercase tracking-wide text-gray-400 sm:inline">Dispatch Directory</span>
                         <span className="inline-flex h-6 items-center gap-1 rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-3 text-xs font-semibold text-[#001d6e]">
                           <Lock className="h-3 w-3" />{lockedStv}
@@ -3679,7 +3647,39 @@ export default function LoadOperation() {
                         )}
                       </div>
                     )}
-                    <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+                      {locked && (
+                        <span className="inline-flex items-center gap-1 text-xs text-[#001d6e]">
+                          <Lock className="h-3.5 w-3.5 shrink-0" />
+                          Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right-hand column: the load progress in the top-right corner, above the buttons. */}
+                  <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 xl:flex-col xl:items-stretch xl:gap-1">
+                    <div className="flex shrink-0 xl:justify-end">
+                      <div
+                        className={`flex items-center gap-1.5 rounded-full px-2 py-0.5 ${
+                          itemPct >= 100 ? "bg-emerald-100" : "bg-gray-100"
+                        }`}
+                        title={`${itemTotals.loaded} of ${itemTotals.expected} loaded`}
+                      >
+                        <Progress
+                          value={itemPct}
+                          className={`w-16 h-1.5 ${itemPct >= 100 ? "bg-emerald-200" : "bg-gray-200"}`}
+                          indicatorClassName={itemPct >= 100 ? "bg-emerald-600" : "bg-[#001d6e]"}
+                        />
+                        <span className={`text-xs font-bold whitespace-nowrap ${itemPct >= 100 ? "text-emerald-700" : "text-gray-700"}`}>
+                          {itemTotals.loaded}/{itemTotals.expected} · {itemPct}%
+                        </span>
+                      </div>
+                    </div>
+                  {/* Actions — Back to List is the primary way out of this page, so it gets a
+                      visibly bigger, outlined treatment rather than reading as just another
+                      small pill alongside Change Vehicle/Complete. */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 xl:w-full">
+                    <div className="flex flex-wrap items-center gap-2 xl:ml-auto">
                     {canWrite && !locked && canEditVehicle && (
                       <Button
                         size="sm"
@@ -3691,7 +3691,7 @@ export default function LoadOperation() {
                       </Button>
                     )}
                     {/* Re-checks this load's vehicle and status in Notion and fixes what differs. */}
-                    {canWrite && !!lockedStv && (
+                    {admin && canWrite && !!lockedStv && (
                       <Button
                         size="sm"
                         variant="outline"
@@ -3751,6 +3751,7 @@ export default function LoadOperation() {
                       Back to List
                     </Button>
                     </div>
+                  </div>
                   </div>
                 </div>
 
@@ -4192,7 +4193,7 @@ export default function LoadOperation() {
                                 <div className="flex w-full items-stretch gap-2.5">
                                   {/* The product photo fills the row's full height — tap it to enlarge; the row
                                       itself opens the history. */}
-                                  <ItemRowThumb name={row.itemName} className="w-14 self-stretch" />
+                                  <ItemRowThumb name={row.itemName} className="h-[4.5rem] w-14 self-center" />
                                   <div className="min-w-0 flex-1">
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0">
@@ -4212,14 +4213,14 @@ export default function LoadOperation() {
                                   {/* Same four-column block the Unloading list uses (plus Stock): each number sits
                                       in the same place on every row, and the whole row takes the colour. */}
                                   <div className="mt-1.5 flex items-center gap-2">
-                                    <div className="grid min-w-0 flex-1 grid-cols-5 divide-x divide-black/10 rounded-md bg-white/70 py-0.5 ring-1 ring-black/5">
+                                    <div className="flex min-w-0 items-start gap-4">
                                       {([
                                         { label: "Expected", value: row.expected, qty: row.expected, cls: "text-gray-900" },
                                         { label: "Loaded", value: row.loaded, qty: row.loaded, cls: "text-emerald-600" },
                                         { label: "Remaining", value: row.remaining, qty: row.remaining, cls: "text-[#001d6e]" },
                                         { label: "Extra", value: extra > 0 ? `${extra}` : "—", qty: extra, cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
                                         { label: "Stock", value: row.stockAvailable ?? 0, qty: row.stockAvailable ?? 0, cls: noStock ? "text-red-600" : "text-gray-700" },
-                                      ] as const).map((cell) => {
+                                      ] as const).filter((cell) => cell.label !== "Stock").map((cell) => {
                                         // Pallets and loose boxes under the number, honouring the All / Pallet / Loose tab.
                                         const ipp = row.itemsPerPallet ?? 0;
                                         const pallets = ipp > 0 ? Math.floor(cell.qty / ipp) : 0;
@@ -4229,16 +4230,18 @@ export default function LoadOperation() {
                                           itemUnitTab !== "pallet" && loose > 0 ? `${loose} loose` : null,
                                         ].filter(Boolean);
                                         return (
-                                          <div key={cell.label} className="min-w-0 px-0.5 text-center">
-                                            <p className="truncate text-[8px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</p>
-                                            <p className={`text-sm font-bold leading-none tabular-nums ${cell.cls}`}>{cell.value}</p>
-                                            <p className="truncate text-[11px] font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : " "}</p>
+                                          <div key={cell.label} className="shrink-0 px-0.5">
+                                            <p className="flex items-baseline gap-1 whitespace-nowrap">
+                                              <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</span>
+                                              <span className={`text-sm font-bold leading-none tabular-nums ${cell.cls}`}>{cell.value}</span>
+                                            </p>
+                                            <p className="whitespace-nowrap text-right text-[11px] font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : "\u00A0"}</p>
                                           </div>
                                         );
                                       })}
                                     </div>
                                     {canScanThisLoad && row.barcode && (
-                                      <div className="flex shrink-0 items-center gap-1.5">
+                                      <div className="ml-3 flex shrink-0 items-center gap-1.5">
                                         <Button size="sm" variant="ghost" disabled={row.loaded <= 0}
                                           className="h-9 w-9 rounded-full bg-red-100 p-0 text-xl font-bold leading-none text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
                                           title="Remove from loaded quantity"
@@ -4251,6 +4254,24 @@ export default function LoadOperation() {
                                           onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
                                       </div>
                                     )}
+                                    {(() => {
+                                      // Stock at the far right, after the +/- buttons, with its pallets and loose boxes.
+                                      const ipp = row.itemsPerPallet ?? 0;
+                                      const stockQty = row.stockAvailable ?? 0;
+                                      const pallets = ipp > 0 ? Math.floor(stockQty / ipp) : 0;
+                                      const loose = ipp > 0 ? stockQty % ipp : 0;
+                                      const bits = [
+                                        itemUnitTab !== "loose" && pallets > 0 ? `${pallets} plt` : null,
+                                        itemUnitTab !== "pallet" && loose > 0 ? `${loose} loose` : null,
+                                      ].filter(Boolean);
+                                      return (
+                                        <div className="ml-auto min-w-[5.5rem] shrink-0 pl-2 text-right">
+                                          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Stock</p>
+                                          <p className={`text-xl font-bold leading-none tabular-nums ${noStock ? "text-red-600" : "text-gray-800"}`}>{stockQty}</p>
+                                          <p className="whitespace-nowrap text-xs font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : "\u00A0"}</p>
+                                        </div>
+                                      );
+                                    })()}
                                   </div>
                                   </div>
                                 </div>

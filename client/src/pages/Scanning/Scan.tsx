@@ -47,6 +47,7 @@ import { hasPageWriteAccess } from "@/lib/permissions";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { HistoryStatus } from "@/components/HistoryStatus";
+import { useFillViewportHeight } from "@/hooks/useFillViewportHeight";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { DataTable, DATA_TABLE_TOTALS_ROW, type DataTableColumn } from "@/components/ui/data-table";
@@ -1887,6 +1888,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // Same click-outside-closes treatment for the Scan tab's own search toggle.
   const closeOsSearch = useCallback(() => { setOsSearchOpen(false); setOsSearch(""); }, []);
   const osSearchDesktopRef = useOutsideClick(osSearchOpen, closeOsSearch);
+  // The Scan and Master View tables reach the bottom of the window on a desktop screen (header on top, totals
+  // row at the bottom) instead of ending after the last row and leaving the page blank under them.
+  const fillEnabled = typeof window !== "undefined" && window.innerWidth >= 1024;
+  const osFill = useFillViewportHeight<HTMLDivElement>(fillEnabled);
+  const mvFill = useFillViewportHeight<HTMLDivElement>(fillEnabled);
   const osSearchMobileRef = useOutsideClick(osSearchOpen, closeOsSearch);
   const [mvVoidTarget, setMvVoidTarget] = useState<MvHistoryEvent | null>(null);
   const [mvVoidReason, setMvVoidReason] = useState("");
@@ -3124,7 +3130,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
 
     return (
-      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-6 lg:pb-6 lg:pt-3 ${kioskRotateClass}`}>
+      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-3 lg:pb-4 lg:pt-3 ${kioskRotateClass}`}>
         <RotateToggleButton />
         {osRotated && (
           <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
@@ -4492,7 +4498,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
         {/* ══════════════════════════════════════════════════════════════════════════════════════════════════════ */}
       <div className={bigView ? "hidden" : "hidden lg:block"}>
-          <div className="mx-auto w-full max-w-[1800px] space-y-3">
+          {/* Full width: the 1800px cap plus 24px side padding left a wide empty strip each side on a
+              1920px screen. */}
+          <div className="mx-auto w-full space-y-3">
 
             {/* Session info + tabs + Order Totals pinned to the top of the page's own scroll
                 container while the items table below scrolls underneath — same "sticky top-0
@@ -4507,7 +4515,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                 padding (lg:pt-3 on the root below, this block only ever shows at lg+) — that strip
                 was never opaque, so the table scrolling behind it could peek through right above
                 this header (same bug, same fix, as the Stock Overview page). */}
-            <div className="sticky top-0 z-30 -mx-4 lg:-mx-6 lg:-mt-3 space-y-3 bg-gray-50 px-4 pb-3 pt-2 shadow-sm lg:px-6 lg:pt-3">
+            <div className="sticky top-0 z-30 -mx-4 lg:-mx-3 lg:-mt-3 space-y-3 bg-gray-50 px-4 pb-3 pt-2 shadow-sm lg:px-3 lg:pt-3">
 
             {/* Header row */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -4934,6 +4942,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </div>
                     )}
                   </div>
+                  <div ref={osFill.ref}>
                   <DataTable<OsScanItem>
                     className="space-y-0"
                     containerClassName="rounded-none border-0"
@@ -4960,10 +4969,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     onColumnOrderChange={setOsColumnOrder}
                     enableColumnResizing
                     isStickyHeader
-                    maxHeight="max(420px, calc(100vh - 340px))"
+                    maxHeight={osFill.height ?? "max(420px, calc(100vh - 340px))"}
+                    minHeight={osFill.height}
                     showMobileSwipeHint
                     headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                   />
+                  </div>
                 </div>
               )}
               {osTab === "master-view" && (
@@ -5031,6 +5042,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                             )}
                           </div>
                         </div>
+                        <div ref={mvFill.ref}>
                         <DataTable<MvMergedItem>
                           className="space-y-0"
                           containerClassName="rounded-none border-0"
@@ -5058,10 +5070,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           columnVisibility={mvVisibleColumnIds}
                           enableColumnResizing
                           isStickyHeader
-                          maxHeight="max(420px, calc(100vh - 340px))"
+                          maxHeight={mvFill.height ?? "max(420px, calc(100vh - 340px))"}
+                          minHeight={mvFill.height}
                           showMobileSwipeHint
                           headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
                         />
+                        </div>
                       </div>
                     </div>
                   )}
