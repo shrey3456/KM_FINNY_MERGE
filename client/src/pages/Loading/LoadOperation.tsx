@@ -4114,7 +4114,7 @@ export default function LoadOperation() {
                     Loose
                   </button>
                 </div>
-                <div className="flex w-full flex-wrap items-center justify-start gap-1.5 sm:ml-auto sm:w-auto sm:gap-2">
+                <div className="ml-auto flex flex-nowrap items-center justify-end gap-1.5 sm:gap-2">
                   {allComplete && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">ALL LOADED</span>}
                   {canScanThisLoad && (
                     <button
@@ -4190,37 +4190,27 @@ export default function LoadOperation() {
                               className={`${USE_GRID_ITEM_ROWS ? "block px-3" : "flex items-center gap-2.5 px-2.5"} rounded-lg border border-l-4 border-gray-200 py-2 text-left shadow-sm transition hover:shadow ${extra > 0 ? "bg-amber-50" : row.isComplete ? "bg-emerald-50" : USE_GRID_ITEM_ROWS && row.loaded > 0 ? "bg-yellow-50/70" : "bg-white"} ${tone.edge}`}
                             >
                               {USE_GRID_ITEM_ROWS ? (
-                                <div className="flex w-full items-stretch gap-2.5">
+                                <div className="flex w-full items-center gap-3">
                                   {/* The product photo fills the row's full height — tap it to enlarge; the row
                                       itself opens the history. */}
-                                  <ItemRowThumb name={row.itemName} className="h-[4.5rem] w-14 self-center" />
+                                  <ItemRowThumb name={row.itemName} className="h-[4.5rem] w-14 shrink-0 self-center" />
+                                  {/* Left: name + code line, then Expected / Loaded / Remaining / Extra as four
+                                      equal columns, so each number sits in the same place on every row. */}
                                   <div className="min-w-0 flex-1">
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="min-w-0">
-                                      <p className="break-words text-sm font-semibold leading-snug text-gray-900">
-                                        {row.srNo && <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 align-middle font-mono text-[10px] font-bold text-gray-600 ring-1 ring-inset ring-gray-200">{row.srNo}</span>}
-                                        {row.itemName ?? "—"}
-                                      </p>
-                                      <p className="truncate font-mono text-[11px] text-gray-400">
-                                        {row.barcode || "—"}{row.sapCode ? ` · SAP ${row.sapCode}` : ""}{(row.itemsPerPallet ?? 0) > 0 ? ` · ${row.itemsPerPallet}/plt` : ""}
-                                      </p>
-                                    </div>
-                                    <div className="flex shrink-0 flex-col items-end gap-1">
-                                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${tone.badge}`}>{extra > 0 ? "Extra" : tone.label}</span>
-                                      {noStock && <span className="rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
-                                    </div>
-                                  </div>
-                                  {/* Same four-column block the Unloading list uses (plus Stock): each number sits
-                                      in the same place on every row, and the whole row takes the colour. */}
-                                  <div className="mt-1.5 flex items-center gap-2">
-                                    <div className="flex min-w-0 items-start gap-4">
+                                    <p className="break-words text-sm font-semibold leading-snug text-gray-900">
+                                      {row.srNo && <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 align-middle font-mono text-[10px] font-bold text-gray-600 ring-1 ring-inset ring-gray-200">{row.srNo}</span>}
+                                      {row.itemName ?? "—"}
+                                    </p>
+                                    <p className="truncate font-mono text-[11px] text-gray-400">
+                                      {row.barcode || "—"}{row.sapCode ? ` · SAP ${row.sapCode}` : ""}{(row.itemsPerPallet ?? 0) > 0 ? ` · ${row.itemsPerPallet}/plt` : ""}
+                                    </p>
+                                    <div className="mt-1.5 grid grid-cols-4 gap-2">
                                       {([
-                                        { label: "Expected", value: row.expected, qty: row.expected, cls: "text-gray-900" },
-                                        { label: "Loaded", value: row.loaded, qty: row.loaded, cls: "text-emerald-600" },
-                                        { label: "Remaining", value: row.remaining, qty: row.remaining, cls: "text-[#001d6e]" },
-                                        { label: "Extra", value: extra > 0 ? `${extra}` : "—", qty: extra, cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
-                                        { label: "Stock", value: row.stockAvailable ?? 0, qty: row.stockAvailable ?? 0, cls: noStock ? "text-red-600" : "text-gray-700" },
-                                      ] as const).filter((cell) => cell.label !== "Stock").map((cell) => {
+                                        { label: "Expected", qty: row.expected, value: `${row.expected}`, cls: "text-gray-900" },
+                                        { label: "Loaded", qty: row.loaded, value: `${row.loaded}`, cls: "text-emerald-600" },
+                                        { label: "Remaining", qty: row.remaining, value: `${row.remaining}`, cls: "text-[#001d6e]" },
+                                        { label: "Extra", qty: extra, value: extra > 0 ? `${extra}` : "—", cls: extra > 0 ? "text-amber-600" : "text-gray-300" },
+                                      ] as const).map((cell) => {
                                         // Pallets and loose boxes under the number, honouring the All / Pallet / Loose tab.
                                         const ipp = row.itemsPerPallet ?? 0;
                                         const pallets = ipp > 0 ? Math.floor(cell.qty / ipp) : 0;
@@ -4230,50 +4220,54 @@ export default function LoadOperation() {
                                           itemUnitTab !== "pallet" && loose > 0 ? `${loose} loose` : null,
                                         ].filter(Boolean);
                                         return (
-                                          <div key={cell.label} className="shrink-0 px-0.5">
-                                            <p className="flex items-baseline gap-1 whitespace-nowrap">
-                                              <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</span>
-                                              <span className={`text-sm font-bold leading-none tabular-nums ${cell.cls}`}>{cell.value}</span>
-                                            </p>
-                                            <p className="whitespace-nowrap text-right text-[11px] font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : "\u00A0"}</p>
+                                          <div key={cell.label} className="min-w-0">
+                                            <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-gray-500">{cell.label}</p>
+                                            <p className={`text-base font-bold leading-tight tabular-nums ${cell.cls}`}>{cell.value}</p>
+                                            <p className="truncate text-[11px] font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : "\u00A0"}</p>
                                           </div>
                                         );
                                       })}
                                     </div>
-                                    {canScanThisLoad && row.barcode && (
-                                      <div className="ml-3 flex shrink-0 items-center gap-1.5">
-                                        <Button size="sm" variant="ghost" disabled={row.loaded <= 0}
-                                          className="h-9 w-9 rounded-full bg-red-100 p-0 text-xl font-bold leading-none text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
-                                          title="Remove from loaded quantity"
-                                          onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}>−</Button>
-                                        {/* The loaded quantity, between − and +. */}
-                                        <span className="min-w-[2.25rem] text-center text-xl font-bold tabular-nums text-gray-900" title="Current loaded quantity">{row.loaded}</span>
-                                        <Button size="sm" variant="ghost"
-                                          className="h-9 w-9 rounded-full bg-emerald-100 p-0 text-xl font-bold leading-none text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
-                                          title="Add to loaded quantity"
-                                          onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
-                                      </div>
-                                    )}
-                                    {(() => {
-                                      // Stock at the far right, after the +/- buttons, with its pallets and loose boxes.
-                                      const ipp = row.itemsPerPallet ?? 0;
-                                      const stockQty = row.stockAvailable ?? 0;
-                                      const pallets = ipp > 0 ? Math.floor(stockQty / ipp) : 0;
-                                      const loose = ipp > 0 ? stockQty % ipp : 0;
-                                      const bits = [
-                                        itemUnitTab !== "loose" && pallets > 0 ? `${pallets} plt` : null,
-                                        itemUnitTab !== "pallet" && loose > 0 ? `${loose} loose` : null,
-                                      ].filter(Boolean);
-                                      return (
-                                        <div className="ml-auto min-w-[5.5rem] shrink-0 pl-2 text-right">
+                                  </div>
+                                  {/* − qty + stepper sits before the Stock column. */}
+                                  {canScanThisLoad && row.barcode && (
+                                    <div className="flex shrink-0 items-center gap-1.5">
+                                      <Button size="sm" variant="ghost" disabled={row.loaded <= 0}
+                                        className="h-9 w-9 rounded-full bg-red-100 p-0 text-xl font-bold leading-none text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+                                        title="Remove from loaded quantity"
+                                        onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "remove"); }}>−</Button>
+                                      {/* The loaded quantity, between − and +. */}
+                                      <span className="min-w-[2rem] text-center text-xl font-bold tabular-nums text-gray-900" title="Current loaded quantity">{row.loaded}</span>
+                                      <Button size="sm" variant="ghost"
+                                        className="h-9 w-9 rounded-full bg-emerald-100 p-0 text-xl font-bold leading-none text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800"
+                                        title="Add to loaded quantity"
+                                        onClick={(e) => { e.stopPropagation(); openAdjustDialog(row, "add"); }}>+</Button>
+                                    </div>
+                                  )}
+                                  {/* Last: status (+ NO STOCK) and Stock, right-aligned behind a divider. */}
+                                  {(() => {
+                                    const ipp = row.itemsPerPallet ?? 0;
+                                    const stockQty = row.stockAvailable ?? 0;
+                                    const pallets = ipp > 0 ? Math.floor(stockQty / ipp) : 0;
+                                    const loose = ipp > 0 ? stockQty % ipp : 0;
+                                    const bits = [
+                                      itemUnitTab !== "loose" && pallets > 0 ? `${pallets} plt` : null,
+                                      itemUnitTab !== "pallet" && loose > 0 ? `${loose} loose` : null,
+                                    ].filter(Boolean);
+                                    return (
+                                      <div className="flex w-[7.5rem] shrink-0 flex-col items-end justify-between gap-2 self-stretch border-l border-gray-200 pl-3">
+                                        <div className="flex flex-wrap items-center justify-end gap-1">
+                                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset ${tone.badge}`}>{extra > 0 ? "Extra" : tone.label}</span>
+                                          {noStock && <span className="rounded-full bg-red-100 px-1.5 py-px text-[10px] font-bold text-red-700">NO STOCK</span>}
+                                        </div>
+                                        <div className="text-right">
                                           <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Stock</p>
                                           <p className={`text-xl font-bold leading-none tabular-nums ${noStock ? "text-red-600" : "text-gray-800"}`}>{stockQty}</p>
-                                          <p className="whitespace-nowrap text-xs font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : "\u00A0"}</p>
+                                          <p className="whitespace-nowrap text-[11px] font-bold leading-tight text-violet-600">{bits.length > 0 ? bits.join(" · ") : "\u00A0"}</p>
                                         </div>
-                                      );
-                                    })()}
-                                  </div>
-                                  </div>
+                                      </div>
+                                    );
+                                  })()}
                                 </div>
                               ) : (
                               <>
