@@ -31,6 +31,8 @@ type Row = {
   openingStock: number; purchaseQty: number; extraPurchaseQty: number; saleQty: number; extraSaleQty: number;
   transferIn: number; transferOut: number; adjustQty: number; closingStock: number; closingPallets: number;
   expectedPurchase: number; expectedSale: number;
+  // Set on a combined row (all plants / a state): the plant rows folded into it.
+  parts?: Row[];
 };
 type Report = { items: Row[]; total: number; from: string | null; to: string | null };
 type DayRow = { date: string; purchaseQty: number; extraPurchaseQty: number; saleQty: number; extraSaleQty: number; transferIn: number; transferOut: number };
@@ -67,7 +69,7 @@ export default function StockOverviewV2() {
     return { from: "", to: "" };
   }, [dateValue]);
   const [detail, setDetail] = useState<Row | null>(null);
-  const rowIdOf = (r: Row) => String(r.id ?? `${r.plant}-${r.barcode}`);
+  const rowIdOf = (r: Row) => (r.parts ? `m:${r.barcode}|${r.itemName}` : String(r.id ?? `${r.plant}-${r.barcode}`));
   const [compareOpen, setCompareOpen] = useState(false);
   const [openingOpen, setOpeningOpen] = useState(false);
 
@@ -101,12 +103,38 @@ export default function StockOverviewV2() {
     return Array.from(m.entries()).map(([s, p]) => ({ state: s, plants: Array.from(p).sort() })).sort((a, b) => a.state.localeCompare(b.state));
   }, [all]);
 
+  // Without a plant picked (All, or a State) every item is ONE row, its plants added together — like the Stock
+  // Overview's merged view; the plant-wise figures are in the row's "Plants" tab. Pick a plant for plant rows.
+  const merged = !plant;
   const rows = useMemo(() => {
     const t = search.trim().toLowerCase();
-    const list = data?.items ?? [];
-    if (!t) return list;
-    return list.filter((r) => [r.itemName, r.barcode, r.sapCode, r.srNo, r.category, r.brand].some((v) => String(v ?? "").toLowerCase().includes(t)));
-  }, [data, search]);
+    let list = data?.items ?? [];
+    if (t) list = list.filter((r) => [r.itemName, r.barcode, r.sapCode, r.srNo, r.category, r.brand].some((v) => String(v ?? "").toLowerCase().includes(t)));
+    if (!merged) return list;
+    const byKey = new Map<string, Row[]>();
+    for (const r of list) {
+      const k = `${r.barcode.trim().toLowerCase()}|${r.itemName.trim().toLowerCase()}`; // same barcode AND same name = the same product
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k)!.push(r);
+    }
+    const add = (f: (r: Row) => number, ps: Row[]) => ps.reduce((x, r) => x + f(r), 0);
+    return Array.from(byKey.values()).map((ps): Row => {
+      if (ps.length === 1) return { ...ps[0], parts: ps };
+      const head = ps[0];
+      return {
+        ...head,
+        id: null,
+        plant: ps.map((p) => p.plant).join(", "),
+        stock: add((r) => r.stock, ps), openingStock: add((r) => r.openingStock, ps),
+        purchaseQty: add((r) => r.purchaseQty, ps), extraPurchaseQty: add((r) => r.extraPurchaseQty, ps),
+        saleQty: add((r) => r.saleQty, ps), extraSaleQty: add((r) => r.extraSaleQty, ps),
+        transferIn: add((r) => r.transferIn, ps), transferOut: add((r) => r.transferOut, ps), adjustQty: add((r) => r.adjustQty, ps),
+        closingStock: add((r) => r.closingStock, ps), closingPallets: add((r) => r.closingPallets, ps),
+        expectedPurchase: add((r) => r.expectedPurchase, ps), expectedSale: add((r) => r.expectedSale, ps),
+        parts: ps,
+      };
+    });
+  }, [data, search, merged]);
 
   const sum = (f: (r: Row) => number) => rows.reduce((s, r) => s + f(r), 0);
   const tOpen = sum((r) => r.openingStock);
@@ -129,7 +157,7 @@ export default function StockOverviewV2() {
       id: "itemName", header: "Item", hideable: false, width: 220, fixedWidth: true, sortable: true, totalable: false,
       accessor: (r) => r.itemName, cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
       render: (r) => (
-        <button type="button" disabled={r.id == null} onClick={() => setDetail((cur) => (cur && rowIdOf(cur) === rowIdOf(r) ? null : r))} className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e]">
+        <button type="button" onClick={() => setDetail((cur) => (cur && rowIdOf(cur) === rowIdOf(r) ? null : r))} className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e]">
           {r.itemName}
         </button>
       ),
@@ -141,7 +169,7 @@ export default function StockOverviewV2() {
     },
     { id: "category", header: "Category", width: 130, sortable: true, totalable: false, accessor: (r) => r.category, cellClassName: "text-gray-700", render: (r) => r.category ?? dash },
     { id: "brand", header: "Brand", width: 110, sortable: true, totalable: false, accessor: (r) => r.brand, cellClassName: "text-gray-700", render: (r) => r.brand ?? dash },
-    { id: "plant", header: "Plant", hideable: false, width: 100, sortable: true, totalable: false, accessor: (r) => r.plant, render: (r) => <PlantBadge plant={r.plant} /> },
+    ...(merged ? [] : [{ id: "plant", header: "Plant", hideable: false, width: 100, sortable: true, totalable: false, accessor: (r) => r.plant, render: (r) => <PlantBadge plant={r.plant} /> } as DataTableColumn<Row>]),
     { id: "stock", header: "Stock", width: 90, align: "right", sortable: true, accessor: (r) => r.stock, total: (rs) => num(rs.reduce((s, r) => s + r.stock, 0)), cellClassName: "font-semibold text-[#001d6e]", render: (r) => <span className="tabular-nums">{num(r.stock)}</span> },
     { id: "expectedPurchase", header: "Expected Purchase", width: 110, align: "right", sortable: true, accessor: (r) => r.expectedPurchase, total: (rs) => num(rs.reduce((s, r) => s + r.expectedPurchase, 0)), render: (r) => figure(r.expectedPurchase, 0, "text-purple-700") },
     { id: "opening", header: "Opening", width: 90, align: "right", sortable: true, accessor: (r) => r.openingStock, total: (rs) => num(rs.reduce((s, r) => s + r.openingStock, 0)), render: (r) => figure(r.openingStock) },
@@ -241,7 +269,7 @@ export default function StockOverviewV2() {
           data={isLoading ? [] : rows}
           getRowId={rowIdOf}
           renderExpandedRow={() => (detail ? <EntriesPanel row={detail} /> : null)}
-          isRowExpandable={(r) => r.id != null}
+          isRowExpandable={() => true}
           expandedRowId={detail ? rowIdOf(detail) : null}
           emptyState="No stock lines yet. Click Rebuild to bring the current stock across."
           noResultsState="No stock rows match your search."
@@ -362,26 +390,48 @@ const fmtAt = (v: string | null | undefined) => { const d = v ? new Date(v) : nu
 const tabCls = (on: boolean) => `rounded-full px-3 py-1 text-xs font-medium ${on ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`;
 
 function EntriesPanel({ row }: { row: Row }) {
-  const [tab, setTab] = useState<"days" | "scanning" | "unloading" | "loading" | "adjust">("days");
-  const hist = (name: string) => useQuery<Hist>({
-    queryKey: [`/api/scan-sessions/reports/${name}`, row.barcode, row.plant],
-    queryFn: () => apiRequest("GET", `/api/scan-sessions/reports/${name}?barcode=${encodeURIComponent(row.barcode)}&plant=${encodeURIComponent(row.plant)}`, undefined, false, true),
-    enabled: tab === (name === "stock-movements" ? "scanning" : name === "unloading-history" ? "unloading" : name === "loading-history" ? "loading" : "adjust"),
+  const parts = row.parts && row.parts.length ? row.parts : [row];
+  const multi = parts.length > 1;
+  const plants = parts.map((p) => p.plant);
+  const plantsKey = plants.join(",");
+  const [tab, setTab] = useState<"plants" | "days" | "scanning" | "unloading" | "loading" | "adjust">(multi ? "plants" : "days");
+  const newest = (it: any) => +new Date(it.arrivedAt ?? it.scannedAt ?? it.at ?? 0);
+  // One history per plant, merged newest first — what the Stock Overview does for a combined (all plants / state) row.
+  const hist = (name: string, forTab: string) => useQuery<Hist>({
+    queryKey: [`/api/scan-sessions/reports/${name}`, row.barcode, plantsKey],
+    queryFn: async () => {
+      const per = await Promise.all(plants.map((plant) =>
+        apiRequest("GET", `/api/scan-sessions/reports/${name}?barcode=${encodeURIComponent(row.barcode)}&plant=${encodeURIComponent(plant)}`, undefined, false, true)
+          .then((d: Hist) => d.items.map((it) => ({ ...it, plant })))));
+      return { items: per.flat().sort((a, b) => newest(b) - newest(a)) };
+    },
+    enabled: tab === forTab,
   });
-  const days = useQuery<{ days: DayRow[]; ledger: LedgerRow[] }>({
-    queryKey: [`/api/stock-v2/line/${row.id}/days`],
-    queryFn: () => apiRequest("GET", `/api/stock-v2/line/${row.id}/days`, undefined, false, true),
-    enabled: tab === "days" && row.id != null,
+  const lineIds = parts.map((p) => p.id).filter((x): x is number => x != null);
+  const days = useQuery<{ days: (DayRow & { plant: string })[]; ledger: (LedgerRow & { plant: string })[] }>({
+    queryKey: ["/api/stock-v2/line-days", lineIds.join(",")],
+    queryFn: async () => {
+      const per = await Promise.all(parts.filter((p) => p.id != null).map((p) =>
+        apiRequest("GET", `/api/stock-v2/line/${p.id}/days`, undefined, false, true)
+          .then((d: { days: DayRow[]; ledger: LedgerRow[] }) => ({ days: d.days.map((x) => ({ ...x, plant: p.plant })), ledger: d.ledger.map((x) => ({ ...x, plant: p.plant })) }))));
+      return {
+        days: per.flatMap((x) => x.days).sort((a, b) => b.date.localeCompare(a.date)),
+        ledger: per.flatMap((x) => x.ledger).sort((a, b) => b.date.localeCompare(a.date)),
+      };
+    },
+    enabled: tab === "days" && lineIds.length > 0,
   });
-  const scanning = hist("stock-movements");
-  const unloading = hist("unloading-history");
-  const loading = hist("loading-history");
-  const adjust = hist("adjust-history");
+  const scanning = hist("stock-movements", "scanning");
+  const unloading = hist("unloading-history", "unloading");
+  const loading = hist("loading-history", "loading");
+  const adjust = hist("adjust-history", "adjust");
 
+  const withPlant = (head: string[], rows: (string | number | JSX.Element)[][], plantOf: string[]) =>
+    multi ? { head: ["Plant", ...head], rows: rows.map((r, i) => [plantOf[i], ...r]) } : { head, rows };
   const Table = ({ head, rows, empty, busy }: { head: string[]; rows: (string | number | JSX.Element)[][]; empty: string; busy: boolean }) => (
     busy ? <Loader2 className="mx-auto my-3 h-5 w-5 animate-spin" /> : (
       <table className="w-full text-left text-xs">
-        <thead><tr className="border-b text-[11px] uppercase text-gray-400">{head.map((h, i) => <th key={h} className={`py-1 pr-3 ${i >= head.length - 2 && typeof rows[0]?.[i] === "number" ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
+        <thead><tr className="border-b text-[11px] uppercase text-gray-400">{head.map((h) => <th key={h} className="py-1 pr-3">{h}</th>)}</tr></thead>
         <tbody>
           {rows.map((r, i) => <tr key={i} className="border-b border-gray-100">{r.map((c, j) => <td key={j} className="py-1 pr-3 align-top">{c}</td>)}</tr>)}
           {!rows.length && <tr><td colSpan={head.length} className="py-3 text-center text-gray-400">{empty}</td></tr>}
@@ -390,50 +440,50 @@ function EntriesPanel({ row }: { row: Row }) {
     )
   );
   const typeLabel = (t: string, q: number) => (t === "receive" ? "Received" : t === "dispatch" ? "Dispatched" : t === "exchange" ? "Exchange" : q < 0 ? "Adjust (−)" : "Adjust (+)");
+  const fromHist = (q: ReturnType<typeof hist>, head: string[], map: (m: any) => (string | number | JSX.Element)[], empty: string) => {
+    const items = q.data?.items ?? [];
+    const t = withPlant(head, items.map(map), items.map((m: any) => m.plant));
+    return <Table busy={q.isLoading} empty={empty} head={t.head} rows={t.rows} />;
+  };
 
   return (
     <div className="sticky left-0 w-full max-w-[95vw] bg-gray-50 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[#001d6e]">
         <History className="h-4 w-4 shrink-0" />
         <span className="text-sm font-semibold">{row.itemName}</span>
-        <span className="font-mono text-xs text-gray-400">{row.barcode} · {row.plant}{row.sapCode ? ` · SAP ${row.sapCode}` : ""} · Stock {num(row.stock)}</span>
+        <span className="font-mono text-xs text-gray-400">
+          {row.barcode} · {multi ? `${row.plant} (${plants.join(", ")})` : row.plant}{row.sapCode ? ` · SAP ${row.sapCode}` : ""} · Stock {num(row.stock)}
+        </span>
       </div>
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        {([["days", "Days"], ["scanning", "Scan Order"], ["unloading", "Unloading"], ["loading", "Loading"], ["adjust", "Adjust"]] as const).map(([k, l]) => (
+        {([...(multi ? [["plants", "Plants"]] : []), ["days", "Days"], ["scanning", "Scan Order"], ["unloading", "Unloading"], ["loading", "Loading"], ["adjust", "Adjust"]] as [typeof tab, string][]).map(([k, l]) => (
           <button key={k} type="button" onClick={() => setTab(k)} className={tabCls(tab === k)}>{l}</button>
         ))}
       </div>
-      {tab === "days" && (
-        <div className="space-y-3">
-          <Table busy={days.isLoading} empty="No purchase or sale yet."
-            head={["Date", "Purchase", "Sale", "Transfer In", "Transfer Out"]}
-            rows={(days.data?.days ?? []).map((d) => [d.date, figure(d.purchaseQty, d.extraPurchaseQty), figure(d.saleQty, d.extraSaleQty, "text-emerald-700"), figure(d.transferIn), figure(d.transferOut)])} />
-          {!!days.data?.ledger.length && (
-            <Table busy={false} empty="" head={["Date", "Correction", "Qty", "By"]}
-              rows={days.data.ledger.map((l) => [l.date, `${l.kind}${l.reason ? ` — ${l.reason}` : ""}`, signed(l.qty), l.by ?? "—"])} />
-          )}
-        </div>
+      {tab === "plants" && (
+        <Table busy={false} empty="" head={["Plant", "Stock", "Opening", "Purchase", "Adjust", "Transfer In", "Transfer Out", "Sale", "Closing"]}
+          rows={parts.map((p) => [<PlantBadge key={p.plant} plant={p.plant} />, num(p.stock), num(p.openingStock), figure(p.purchaseQty, p.extraPurchaseQty), p.adjustQty ? signed(p.adjustQty) : "—", figure(p.transferIn), figure(p.transferOut), figure(p.saleQty, p.extraSaleQty, "text-emerald-700"), num(p.closingStock)])} />
       )}
-      {tab === "scanning" && (
-        <Table busy={scanning.isLoading} empty="No scan-order entries."
-          head={["Arrived", "CSV", "Order date", "Type", "Qty", "Extra"]}
-          rows={(scanning.data?.items ?? []).map((m: any) => [fmtAt(m.arrivedAt), `${m.orderName ?? "—"}${m.partIndex ? ` (part ${m.partIndex})` : ""}`, m.orderDate ? String(m.orderDate).slice(0, 10) : "—", typeLabel(m.type, m.qty), signed(m.qty), m.extraQty ? num(m.extraQty) : "—"])} />
-      )}
-      {tab === "unloading" && (
-        <Table busy={unloading.isLoading} empty="No unloading entries."
-          head={["Scanned", "Vehicle", "Order date", "Scanned by", "Qty", "Status"]}
-          rows={(unloading.data?.items ?? []).map((u: any) => [fmtAt(u.scannedAt), u.vehicleNumber ?? "—", u.orderDate ? String(u.orderDate).slice(0, 10) : "—", u.scannedByName ?? "—", num(u.qty), u.voided ? `Voided${u.voidReason ? ` — ${u.voidReason}` : ""}` : u.isExtra ? "Extra" : "OK"])} />
-      )}
-      {tab === "loading" && (
-        <Table busy={loading.isLoading} empty="No loading entries."
-          head={["Scanned", "Order no.", "Order date", "Scanned by", "Qty", "Status"]}
-          rows={(loading.data?.items ?? []).map((l: any) => [fmtAt(l.scannedAt), l.orderNumber ?? "—", l.orderDate ? String(l.orderDate).slice(0, 10) : "—", l.scannedByName ?? "—", signed(l.qty), l.voided ? `Voided${l.voidReason ? ` — ${l.voidReason}` : ""}` : l.isAdjust ? "Adjust" : l.isExtra ? "Extra" : "OK"])} />
-      )}
-      {tab === "adjust" && (
-        <Table busy={adjust.isLoading} empty="No adjustments."
-          head={["When", "Kind", "By", "Reason", "Stock change"]}
-          rows={(adjust.data?.items ?? []).map((a: any) => [fmtAt(a.at), a.kind, a.byName ?? "—", a.reason ?? "—", signed(a.stockQty)])} />
-      )}
+      {tab === "days" && (() => {
+        const dd = days.data?.days ?? [];
+        const t = withPlant(["Date", "Purchase", "Sale", "Transfer In", "Transfer Out"], dd.map((d) => [d.date, figure(d.purchaseQty, d.extraPurchaseQty), figure(d.saleQty, d.extraSaleQty, "text-emerald-700"), figure(d.transferIn), figure(d.transferOut)]), dd.map((d) => d.plant));
+        const ll = days.data?.ledger ?? [];
+        const t2 = withPlant(["Date", "Correction", "Qty", "By"], ll.map((l) => [l.date, `${l.kind}${l.reason ? ` — ${l.reason}` : ""}`, signed(l.qty), l.by ?? "—"]), ll.map((l) => l.plant));
+        return (
+          <div className="space-y-3">
+            <Table busy={days.isLoading} empty="No purchase or sale yet." head={t.head} rows={t.rows} />
+            {!!ll.length && <Table busy={false} empty="" head={t2.head} rows={t2.rows} />}
+          </div>
+        );
+      })()}
+      {tab === "scanning" && fromHist(scanning, ["Arrived", "CSV", "Order date", "Type", "Qty", "Extra"],
+        (m: any) => [fmtAt(m.arrivedAt), `${m.orderName ?? "—"}${m.partIndex ? ` (part ${m.partIndex})` : ""}`, m.orderDate ? String(m.orderDate).slice(0, 10) : "—", typeLabel(m.type, m.qty), signed(m.qty), m.extraQty ? num(m.extraQty) : "—"], "No scan-order entries.")}
+      {tab === "unloading" && fromHist(unloading, ["Scanned", "Vehicle", "Order date", "Scanned by", "Qty", "Status"],
+        (u: any) => [fmtAt(u.scannedAt), u.vehicleNumber ?? "—", u.orderDate ? String(u.orderDate).slice(0, 10) : "—", u.scannedByName ?? "—", num(u.qty), u.voided ? `Voided${u.voidReason ? ` — ${u.voidReason}` : ""}` : u.isExtra ? "Extra" : "OK"], "No unloading entries.")}
+      {tab === "loading" && fromHist(loading, ["Scanned", "Order no.", "Order date", "Scanned by", "Qty", "Status"],
+        (l: any) => [fmtAt(l.scannedAt), l.orderNumber ?? "—", l.orderDate ? String(l.orderDate).slice(0, 10) : "—", l.scannedByName ?? "—", signed(l.qty), l.voided ? `Voided${l.voidReason ? ` — ${l.voidReason}` : ""}` : l.isAdjust ? "Adjust" : l.isExtra ? "Extra" : "OK"], "No loading entries.")}
+      {tab === "adjust" && fromHist(adjust, ["When", "Kind", "By", "Reason", "Stock change"],
+        (a: any) => [fmtAt(a.at), a.kind, a.byName ?? "—", a.reason ?? "—", signed(a.stockQty)], "No adjustments.")}
     </div>
   );
 }

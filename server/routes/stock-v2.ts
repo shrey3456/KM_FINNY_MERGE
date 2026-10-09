@@ -97,10 +97,12 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
         WHERE ${expPC} AND ois.is_deleted = false${scope('oii.plant', expP)} GROUP BY 1,2`, expP);
     const expU: any[] = [];
     const expUC = dateCond('uis.order_date', expU);
+    // An unloading CSV is expected at its PURCHASE plant (Baroda), not the plant its stock is added to (Valsad) —
+    // the same plant its Purchase is booked at.
     const e2 = await pool.query(
-      `SELECT LOWER(uii.barcode) AS bc, LOWER(uii.plant) AS pl, SUM(uii.quantity)::int AS q
+      `SELECT LOWER(uii.barcode) AS bc, LOWER(COALESCE(NULLIF(TRIM(uis.purchase_plant), ''), uii.plant)) AS pl, SUM(uii.quantity)::int AS q
          FROM unload_import_items uii JOIN unload_import_sessions uis ON uis.id = uii.session_id
-        WHERE ${expUC} AND uis.is_deleted = false${scope('uii.plant', expU)} GROUP BY 1,2`, expU);
+        WHERE ${expUC} AND uis.is_deleted = false${scope("COALESCE(NULLIF(TRIM(uis.purchase_plant), ''), uii.plant)", expU)} GROUP BY 1,2`, expU);
     const expS: any[] = [];
     const expSC = dateCond('ps.order_date', expS);
     const e3 = await pool.query(
