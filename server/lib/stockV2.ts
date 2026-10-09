@@ -54,7 +54,7 @@ function detailsFromProduct(p: any, state: string | null) {
   return {
     sapCode: ownSap ?? pick(null, p.sap_code),
     sapIsFallback: !ownSap && !!pick(null, p.sap_code),
-    srNo: pick(stateSr, p.new_sr),
+    srNo: pick(p.new_sr, stateSr), // the Product Master's New Sr. first (what every other page shows)
     hsn: pick(stateHsn, p.hsn_code),
     pallet: s === 'MP' ? p.mp_plt : s === 'GJ' ? p.gj_plt : null,
   };

@@ -40,7 +40,7 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
 
     const { rows } = await pool.query(
       `SELECT l.id, l.plant, l.state, l.barcode, l.item_name AS "itemName", l.sap_code AS "sapCode",
-              l.sap_is_fallback AS "sapIsFallback", l.sr_no AS "srNo", l.brand, l.category,
+              l.sap_is_fallback AS "sapIsFallback", COALESCE(NULLIF(TRIM(pm.new_sr), ''), l.sr_no) AS "srNo", l.brand, l.category,
               l.pallet_size AS "palletSize", l.stock_qty AS "stock",
               COALESCE(d.opening,0)::int + COALESCE(a.opening,0)::int AS "openingStock",
               COALESCE(d.purchase,0)::int AS "purchaseQty", COALESCE(d.xpurchase,0)::int AS "extraPurchaseQty",
@@ -48,6 +48,7 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
               COALESCE(d.tin,0)::int AS "transferIn", COALESCE(d.tout,0)::int AS "transferOut",
               COALESCE(a.adj,0)::int AS "adjustQty"
          FROM stock_v2_lines l
+         LEFT JOIN products pm ON pm.id = l.product_id
          LEFT JOIN LATERAL (
            SELECT SUM(CASE WHEN $1::date IS NOT NULL AND stock_date < $1::date THEN purchase_qty - sale_qty + transfer_in_qty - transfer_out_qty ELSE 0 END) AS opening,
                   SUM(CASE WHEN ($1::date IS NULL OR stock_date >= $1::date) AND ($2::date IS NULL OR stock_date <= $2::date) THEN purchase_qty END) AS purchase,
