@@ -207,6 +207,9 @@ interface DataTableProps<TData> {
   // so resizing a pinned column keeps the next one lined up correctly.
   stickyColumnIds?: string[];
   maxHeight?: string;
+  // With isStickyHeader: the scroll box is at least this tall, so a table with few rows still fills the
+  // space it is given (header on top, totals row at the bottom) instead of leaving blank page under it.
+  minHeight?: string;
   headerClassName?: string;
   showMobileSwipeHint?: boolean;
   enableZebraStripes?: boolean;
@@ -281,6 +284,7 @@ export function DataTable<TData>({
   isStickyHeader = false,
   stickyColumnIds,
   maxHeight,
+  minHeight,
   headerClassName,
   showMobileSwipeHint,
   enableZebraStripes = false,
@@ -726,6 +730,7 @@ export function DataTable<TData>({
             style={{
               overflowY: isStickyHeader ? "auto" : undefined,
               maxHeight: isStickyHeader ? maxHeight : undefined,
+              minHeight: isStickyHeader ? minHeight : undefined,
               WebkitOverflowScrolling: "touch",
             }}
           >
