@@ -67,13 +67,88 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
         ORDER BY l.plant, l.item_name`,
       params,
     );
-    const items = rows
+    // Expected Purchase = what the receiving CSVs and unloading CSVs say is coming (their Order Date in the
+    // period); Expected Sale = what the proforma slips plan to send. Same rules as the old Stock Overview:
+    // with no date picked the period starts at the Sales Tracking Start date.
+    const ss = await pool.query(`SELECT sales_tracking_start_date AS d FROM sales_settings ORDER BY id LIMIT 1`);
+    const periodStart = from || String(ss.rows[0]?.d ?? '2026-08-01').slice(0, 10);
+    const periodEnd = to || null;
+    const plantRows = await pool.query(`SELECT name, state FROM plants`);
+    let plantList: string[] | null = null;
+    if (plant) plantList = [plant];
+    else if (state) plantList = plantRows.rows.filter((p: any) => String(p.state ?? '').toUpperCase() === state).map((p: any) => String(p.name).toLowerCase());
+    const scope = (col: string, ps: any[]) => {
+      const c: string[] = [];
+      if (allowed !== null) { ps.push(allowed.map((p: string) => p.toLowerCase())); c.push(`LOWER(${col}) = ANY($${ps.length}::text[])`); }
+      if (plantList) { ps.push(plantList); c.push(`LOWER(${col}) = ANY($${ps.length}::text[])`); }
+      return c.length ? ' AND ' + c.join(' AND ') : '';
+    };
+    const dateCond = (col: string, ps: any[]) => {
+      ps.push(periodStart);
+      let c = `${col} >= $${ps.length}`;
+      if (periodEnd) { ps.push(periodEnd); c += ` AND ${col} <= $${ps.length}`; }
+      return c;
+    };
+    const expP: any[] = [];
+    const expPC = dateCond('ois.order_date', expP);
+    const e1 = await pool.query(
+      `SELECT LOWER(oii.barcode) AS bc, LOWER(oii.plant) AS pl, SUM(oii.quantity)::int AS q
+         FROM order_import_items oii JOIN order_import_sessions ois ON ois.id = oii.session_id
+        WHERE ${expPC} AND ois.is_deleted = false${scope('oii.plant', expP)} GROUP BY 1,2`, expP);
+    const expU: any[] = [];
+    const expUC = dateCond('uis.order_date', expU);
+    const e2 = await pool.query(
+      `SELECT LOWER(uii.barcode) AS bc, LOWER(uii.plant) AS pl, SUM(uii.quantity)::int AS q
+         FROM unload_import_items uii JOIN unload_import_sessions uis ON uis.id = uii.session_id
+        WHERE ${expUC} AND uis.is_deleted = false${scope('uii.plant', expU)} GROUP BY 1,2`, expU);
+    const expS: any[] = [];
+    const expSC = dateCond('ps.order_date', expS);
+    const e3 = await pool.query(
+      `SELECT LOWER(psi.barcode) AS bc, LOWER(ps.plant) AS pl, SUM(psi.quantity)::int AS q
+         FROM proforma_slip_items psi JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
+        WHERE ${expSC} AND psi.barcode IS NOT NULL AND ps.plant IS NOT NULL${scope('ps.plant', expS)} GROUP BY 1,2`, expS);
+    const expPurchase = new Map<string, number>();
+    const expSale = new Map<string, number>();
+    const keyOf = (r: any) => `${r.pl}|${r.bc}`;
+    for (const r of [...e1.rows, ...e2.rows]) expPurchase.set(keyOf(r), (expPurchase.get(keyOf(r)) ?? 0) + Number(r.q));
+    for (const r of e3.rows) expSale.set(keyOf(r), (expSale.get(keyOf(r)) ?? 0) + Number(r.q));
+
+    // A CSV / slip item with no stock line yet (nothing scanned, no stock) still shows, with Stock 0 —
+    // its details come from the Product Master.
+    const have = new Set(rows.map((r: any) => `${String(r.plant).toLowerCase()}|${String(r.barcode).toLowerCase()}`));
+    const missing = [...new Set([...expPurchase.keys(), ...expSale.keys()])].filter((k) => !have.has(k));
+    const extraRows: any[] = [];
+    if (missing.length) {
+      const bcs = [...new Set(missing.map((k) => k.split('|')[1]))];
+      const pr = await pool.query(
+        `SELECT DISTINCT ON (LOWER(barcode)) LOWER(barcode) AS bc, barcode, name, brand, category, new_sr, COALESCE(gj_sap, mp_sap, sap_code) AS sap
+           FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY LOWER(barcode), id`, [bcs]);
+      const byBc = new Map<string, any>(pr.rows.map((r: any) => [r.bc, r]));
+      const nameOf = new Map<string, any>(plantRows.rows.map((p: any) => [String(p.name).toLowerCase(), p]));
+      for (const k of missing) {
+        const [pl, bc] = k.split('|');
+        const p = byBc.get(bc);
+        const pt = nameOf.get(pl);
+        if (!p || !pt) continue;
+        extraRows.push({
+          id: null, plant: pt.name, state: pt.state, barcode: p.barcode, itemName: p.name, sapCode: p.sap, sapIsFallback: false,
+          srNo: p.new_sr, brand: p.brand, category: p.category, palletSize: null, stock: 0, openingStock: 0, purchaseQty: 0,
+          extraPurchaseQty: 0, saleQty: 0, extraSaleQty: 0, transferIn: 0, transferOut: 0, adjustQty: 0,
+        });
+      }
+    }
+    const items = [...rows, ...extraRows]
       .map((r: any) => {
         const pallet = r.palletSize && r.palletSize > 0 ? r.palletSize : 0;
         const closingStock = r.openingStock + r.purchaseQty - r.saleQty + r.adjustQty + r.transferIn - r.transferOut;
-        return { ...r, closingStock, closingPallets: pallet ? Math.round((closingStock / pallet) * 100) / 100 : 0 };
+        const k = `${String(r.plant).toLowerCase()}|${String(r.barcode).toLowerCase()}`;
+        return {
+          ...r, closingStock, closingPallets: pallet ? Math.round((closingStock / pallet) * 100) / 100 : 0,
+          expectedPurchase: expPurchase.get(k) ?? 0, expectedSale: expSale.get(k) ?? 0,
+        };
       })
-      .filter((r: any) => r.closingStock !== 0 || r.saleQty !== 0 || r.purchaseQty !== 0 || r.adjustQty !== 0 || r.transferIn !== 0 || r.transferOut !== 0 || r.stock !== 0);
+      .filter((r: any) => r.closingStock !== 0 || r.saleQty !== 0 || r.purchaseQty !== 0 || r.adjustQty !== 0 || r.transferIn !== 0
+        || r.transferOut !== 0 || r.stock !== 0 || r.expectedPurchase !== 0 || r.expectedSale !== 0);
     res.json({ items, total: items.length, plants: allowed, from, to });
   } catch (e) {
     console.error('[StockV2] report failed:', e);

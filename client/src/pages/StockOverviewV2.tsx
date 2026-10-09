@@ -1,6 +1,9 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { LayoutList, Boxes, TrendingUp, History, ShoppingCart, ArrowLeftRight, RotateCw, Loader2, Scale } from "lucide-react";
+import { format } from "date-fns";
+import { X } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { LayoutList, CalendarDays, Boxes, TrendingUp, History, ShoppingCart, ArrowLeftRight, RotateCw, Loader2, Scale } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -22,11 +25,12 @@ import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 // page runs beside it until the new one is proven, then the old one goes.
 
 type Row = {
-  id: number; plant: string; state: string | null; barcode: string; itemName: string;
+  id: number | null; plant: string; state: string | null; barcode: string; itemName: string;
   sapCode: string | null; sapIsFallback: boolean; srNo: string | null; brand: string | null; category: string | null;
   palletSize: number | null; stock: number;
   openingStock: number; purchaseQty: number; extraPurchaseQty: number; saleQty: number; extraSaleQty: number;
   transferIn: number; transferOut: number; adjustQty: number; closingStock: number; closingPallets: number;
+  expectedPurchase: number; expectedSale: number;
 };
 type Report = { items: Row[]; total: number; from: string | null; to: string | null };
 type DayRow = { date: string; purchaseQty: number; extraPurchaseQty: number; saleQty: number; extraSaleQty: number; transferIn: number; transferOut: number };
@@ -55,9 +59,15 @@ export default function StockOverviewV2() {
   const [search, setSearch] = useState("");
   const [state, setState] = useState("");
   const [plant, setPlant] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  // Same encoding as the Stock Overview: "d:YYYY-MM-DD" (one day) or "r:YYYY-MM-DD:YYYY-MM-DD" (a range).
+  const [dateValue, setDateValue] = useState("");
+  const { from, to } = useMemo(() => {
+    if (dateValue.startsWith("d:")) return { from: dateValue.slice(2), to: dateValue.slice(2) };
+    if (dateValue.startsWith("r:")) { const [, f, t] = dateValue.split(":"); return { from: f ?? "", to: t ?? "" }; }
+    return { from: "", to: "" };
+  }, [dateValue]);
   const [detail, setDetail] = useState<Row | null>(null);
+  const rowIdOf = (r: Row) => String(r.id ?? `${r.plant}-${r.barcode}`);
   const [compareOpen, setCompareOpen] = useState(false);
   const [openingOpen, setOpeningOpen] = useState(false);
 
@@ -104,6 +114,8 @@ export default function StockOverviewV2() {
   const tExtraP = sum((r) => r.extraPurchaseQty);
   const tSale = sum((r) => r.saleQty);
   const tClose = sum((r) => r.closingStock);
+  const tExpP = sum((r) => r.expectedPurchase);
+  const tExpS = sum((r) => r.expectedSale);
   const tStock = sum((r) => r.stock);
   const period = from || to ? `${from || "start"} → ${to || "today"}` : "All dates";
 
@@ -117,7 +129,7 @@ export default function StockOverviewV2() {
       id: "itemName", header: "Item", hideable: false, width: 220, fixedWidth: true, sortable: true, totalable: false,
       accessor: (r) => r.itemName, cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
       render: (r) => (
-        <button type="button" onClick={() => setDetail(r)} className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e]">
+        <button type="button" disabled={r.id == null} onClick={() => setDetail((cur) => (cur && rowIdOf(cur) === rowIdOf(r) ? null : r))} className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e]">
           {r.itemName}
         </button>
       ),
@@ -131,11 +143,13 @@ export default function StockOverviewV2() {
     { id: "brand", header: "Brand", width: 110, sortable: true, totalable: false, accessor: (r) => r.brand, cellClassName: "text-gray-700", render: (r) => r.brand ?? dash },
     { id: "plant", header: "Plant", hideable: false, width: 100, sortable: true, totalable: false, accessor: (r) => r.plant, render: (r) => <PlantBadge plant={r.plant} /> },
     { id: "stock", header: "Stock", width: 90, align: "right", sortable: true, accessor: (r) => r.stock, total: (rs) => num(rs.reduce((s, r) => s + r.stock, 0)), cellClassName: "font-semibold text-[#001d6e]", render: (r) => <span className="tabular-nums">{num(r.stock)}</span> },
+    { id: "expectedPurchase", header: "Expected Purchase", width: 110, align: "right", sortable: true, accessor: (r) => r.expectedPurchase, total: (rs) => num(rs.reduce((s, r) => s + r.expectedPurchase, 0)), render: (r) => figure(r.expectedPurchase, 0, "text-purple-700") },
     { id: "opening", header: "Opening", width: 90, align: "right", sortable: true, accessor: (r) => r.openingStock, total: (rs) => num(rs.reduce((s, r) => s + r.openingStock, 0)), render: (r) => figure(r.openingStock) },
     { id: "purchase", header: "Purchase", width: 130, align: "right", sortable: true, accessor: (r) => r.purchaseQty, total: (rs) => num(rs.reduce((s, r) => s + r.purchaseQty, 0)), render: (r) => figure(r.purchaseQty, r.extraPurchaseQty) },
     { id: "adjust", header: "Adjust", width: 80, align: "right", sortable: true, accessor: (r) => r.adjustQty, total: (rs) => signed(rs.reduce((s, r) => s + r.adjustQty, 0)), render: (r) => (r.adjustQty ? <span className="tabular-nums">{signed(r.adjustQty)}</span> : dash) },
     { id: "transferIn", header: "Transfer In", width: 90, align: "right", sortable: true, accessor: (r) => r.transferIn, total: (rs) => num(rs.reduce((s, r) => s + r.transferIn, 0)), render: (r) => figure(r.transferIn) },
     { id: "transferOut", header: "Transfer Out", width: 95, align: "right", sortable: true, accessor: (r) => r.transferOut, total: (rs) => num(rs.reduce((s, r) => s + r.transferOut, 0)), render: (r) => figure(r.transferOut) },
+    { id: "expectedSale", header: "Expected Sale", width: 105, align: "right", sortable: true, accessor: (r) => r.expectedSale, total: (rs) => num(rs.reduce((s, r) => s + r.expectedSale, 0)), render: (r) => figure(r.expectedSale, 0, "text-purple-700") },
     { id: "sale", header: "Sale", width: 130, align: "right", sortable: true, accessor: (r) => r.saleQty, total: (rs) => num(rs.reduce((s, r) => s + r.saleQty, 0)), render: (r) => figure(r.saleQty, r.extraSaleQty, "text-emerald-700") },
     {
       id: "closing", header: "Closing", width: 90, align: "right", sortable: true, accessor: (r) => r.closingStock,
@@ -166,9 +180,11 @@ export default function StockOverviewV2() {
         wrapLabels
         singleRow
         stats={[
+          { icon: CalendarDays, tone: "navy" as const, value: num(tExpP), label: "Expected Purchase", hint: period },
           { icon: Scale, tone: "navy" as const, value: num(tStock), label: "Stock", hint: "Total on hand now" },
           { icon: History, tone: "navy" as const, value: num(tOpen), label: "Opening", hint: `Start of period` },
           { icon: Boxes, tone: "navy" as const, value: num(tPurchase), label: "Purchase", hint: tExtraP ? `${period} · incl. ${num(tExtraP)} extra` : period },
+          { icon: ShoppingCart, tone: "navy" as const, value: num(tExpS), label: "Expected Sale", hint: period },
           { icon: ShoppingCart, tone: "emerald" as const, value: num(tSale), label: "Sale (loaded)", hint: period },
           { icon: TrendingUp, tone: tClose < 0 ? ("amber" as const) : ("navy" as const), value: num(tClose), label: "Closing", hint: "End of period" },
         ]}
@@ -201,8 +217,7 @@ export default function StockOverviewV2() {
               <RotateCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
             </Button>
             <CollapsibleSearch value={search} onChange={setSearch} placeholder="Sr No, item, barcode, SAP, category…" />
-            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="h-8 w-[9.5rem] text-xs" title="From" />
-            <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="h-8 w-[9.5rem] text-xs" title="To" />
+            <DateFilter value={dateValue} onChange={setDateValue} />
             {isAdmin && (
               <>
                 <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setCompareOpen(true)}>
@@ -224,7 +239,10 @@ export default function StockOverviewV2() {
           containerClassName="rounded-none border-0"
           columns={columns}
           data={isLoading ? [] : rows}
-          getRowId={(r) => String(r.id)}
+          getRowId={rowIdOf}
+          renderExpandedRow={() => (detail ? <EntriesPanel row={detail} /> : null)}
+          isRowExpandable={(r) => r.id != null}
+          expandedRowId={detail ? rowIdOf(detail) : null}
           emptyState="No stock lines yet. Click Rebuild to bring the current stock across."
           noResultsState="No stock rows match your search."
           hasActiveFilters={!!search}
@@ -241,60 +259,182 @@ export default function StockOverviewV2() {
         />
       </TableCard>
 
-      {detail && <LineDialog row={detail} onClose={() => setDetail(null)} />}
       {compareOpen && <CompareDialog onClose={() => setCompareOpen(false)} />}
       {openingOpen && <OpeningDialog onClose={() => setOpeningOpen(false)} />}
     </div>
   );
 }
 
-function LineDialog({ row, onClose }: { row: Row; onClose: () => void }) {
-  const { data, isLoading } = useQuery<{ days: DayRow[]; ledger: LedgerRow[] }>({
-    queryKey: [`/api/stock-v2/line/${row.id}/days`],
-    queryFn: () => apiRequest("GET", `/api/stock-v2/line/${row.id}/days`, undefined, false, true),
-  });
+// Same two buttons as the Stock Overview: "Filter by date" = quick ranges, "Calendar" = one date or a from/to range.
+const isoOf = (d: Date) => format(d, "yyyy-MM-dd");
+function presetValue(key: string): string {
+  const d = new Date();
+  if (key === "today") return `d:${isoOf(d)}`;
+  if (key === "yday") { const y = new Date(d); y.setDate(y.getDate() - 1); return `d:${isoOf(y)}`; }
+  if (key === "week") { const w = new Date(d); w.setDate(w.getDate() - 6); return `r:${isoOf(w)}:${isoOf(d)}`; }
+  if (key === "month") return `r:${isoOf(new Date(d.getFullYear(), d.getMonth(), 1))}:${isoOf(d)}`;
+  return "";
+}
+const PRESETS = [{ value: "today", label: "Today" }, { value: "yday", label: "Yesterday" }, { value: "week", label: "This week" }, { value: "month", label: "This month" }];
+
+function DateFilter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [calOpen, setCalOpen] = useState(false);
+  const isRange = value.startsWith("r:");
+  const [mode, setMode] = useState<"single" | "range">("single");
+  const parts = value.startsWith("d:") ? [value.slice(2), value.slice(2)] : value.startsWith("r:") ? value.split(":").slice(1) : ["", ""];
+  const fromDate = parts[0] ?? "";
+  const toDate = parts[1] ?? "";
+  const fmt = (x: string) => { const d = x ? new Date(x) : null; return d && !isNaN(d.getTime()) ? format(d, "MMM d, yyyy") : "…"; };
+  const label = value.startsWith("d:") ? fmt(fromDate) : isRange ? `${fmt(fromDate)} – ${fmt(toDate)}` : "Filter by date";
+  const inputCls = "h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs";
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{row.itemName}</DialogTitle>
-          <DialogDescription>{row.plant} · {row.barcode}{row.sapCode ? ` · SAP ${row.sapCode}` : ""} · Stock {num(row.stock)}</DialogDescription>
-        </DialogHeader>
-        {isLoading ? <Loader2 className="mx-auto h-5 w-5 animate-spin" /> : (
-          <div className="space-y-4 text-sm">
-            <table className="w-full text-left">
-              <thead><tr className="border-b text-xs uppercase text-gray-400">
-                <th className="py-1">Date</th><th className="text-right">Purchase</th><th className="text-right">Sale</th><th className="text-right">In</th><th className="text-right">Out</th>
-              </tr></thead>
-              <tbody>
-                {(data?.days ?? []).map((d) => (
-                  <tr key={d.date} className="border-b border-gray-100">
-                    <td className="py-1 tabular-nums">{d.date}</td>
-                    <td className="text-right">{figure(d.purchaseQty, d.extraPurchaseQty)}</td>
-                    <td className="text-right">{figure(d.saleQty, d.extraSaleQty, "text-emerald-700")}</td>
-                    <td className="text-right">{figure(d.transferIn)}</td>
-                    <td className="text-right">{figure(d.transferOut)}</td>
-                  </tr>
-                ))}
-                {!data?.days.length && <tr><td colSpan={5} className="py-3 text-center text-gray-400">No purchase or sale yet.</td></tr>}
-              </tbody>
-            </table>
-            {!!data?.ledger.length && (
-              <div>
-                <div className="mb-1 text-xs font-semibold uppercase text-gray-400">Corrections</div>
-                {data.ledger.map((l) => (
-                  <div key={l.id} className="flex justify-between gap-3 border-b border-gray-100 py-1">
-                    <span className="tabular-nums text-gray-500">{l.date}</span>
-                    <span className="flex-1 truncate text-gray-700" title={l.reason ?? ""}>{l.kind}{l.reason ? ` — ${l.reason}` : ""}</span>
-                    <span className="tabular-nums font-medium">{signed(l.qty)}</span>
-                  </div>
-                ))}
+    <div className="flex items-center gap-1">
+      <Popover open={quickOpen} onOpenChange={setQuickOpen}>
+        <PopoverTrigger asChild>
+          <Button size="sm" variant="outline" className={`h-8 gap-1.5 rounded-md text-xs font-medium ${value ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+            <CalendarDays className="h-3.5 w-3.5" />
+            {label}
+            {value && (
+              <span role="button" aria-label="Clear date" onClick={(e) => { e.stopPropagation(); onChange(""); }} className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10">
+                <X className="h-3 w-3" />
+              </span>
+            )}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
+            <div className="grid grid-cols-2 gap-1.5">
+              {PRESETS.map((o) => (
+                <button key={o.value} type="button" onClick={() => { onChange(presetValue(o.value)); setQuickOpen(false); }}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5 hover:text-[#001d6e]">
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+      <Popover open={calOpen} onOpenChange={(o) => { setCalOpen(o); if (o) setMode(isRange ? "range" : "single"); }}>
+        <PopoverTrigger asChild>
+          <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">Calendar</Button>
+        </PopoverTrigger>
+        <PopoverContent align="end" sideOffset={6} avoidCollisions={false} className="w-72">
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-1.5">
+              {(["single", "range"] as const).map((m) => (
+                <button key={m} type="button" onClick={() => setMode(m)}
+                  className={`rounded-md border px-2 py-1 text-xs font-medium ${mode === m ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}>
+                  {m === "single" ? "Single date" : "Date range"}
+                </button>
+              ))}
+            </div>
+            {mode === "single" ? (
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Date</label>
+                <input type="date" value={fromDate} className={inputCls}
+                  onChange={(e) => { onChange(e.target.value ? `d:${e.target.value}` : ""); if (e.target.value) setCalOpen(false); }} />
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">From</label>
+                  <input type="date" value={fromDate} max={toDate || undefined} className={inputCls} onChange={(e) => onChange(`r:${e.target.value}:${toDate}`)} />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">To</label>
+                  <input type="date" value={toDate} min={fromDate || undefined} className={inputCls} onChange={(e) => onChange(`r:${fromDate}:${e.target.value}`)} />
+                </div>
               </div>
             )}
           </div>
-        )}
-      </DialogContent>
-    </Dialog>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
+// The entries behind one line, opened under its row like the Stock Overview: Days (this page's own book), then
+// the same four histories — Scan Order, Unloading, Loading, Adjust.
+type Hist = { items: any[] };
+const fmtAt = (v: string | null | undefined) => { const d = v ? new Date(v) : null; return d && !isNaN(d.getTime()) ? format(d, "dd MMM yyyy, hh:mm a") : "—"; };
+const tabCls = (on: boolean) => `rounded-full px-3 py-1 text-xs font-medium ${on ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`;
+
+function EntriesPanel({ row }: { row: Row }) {
+  const [tab, setTab] = useState<"days" | "scanning" | "unloading" | "loading" | "adjust">("days");
+  const hist = (name: string) => useQuery<Hist>({
+    queryKey: [`/api/scan-sessions/reports/${name}`, row.barcode, row.plant],
+    queryFn: () => apiRequest("GET", `/api/scan-sessions/reports/${name}?barcode=${encodeURIComponent(row.barcode)}&plant=${encodeURIComponent(row.plant)}`, undefined, false, true),
+    enabled: tab === (name === "stock-movements" ? "scanning" : name === "unloading-history" ? "unloading" : name === "loading-history" ? "loading" : "adjust"),
+  });
+  const days = useQuery<{ days: DayRow[]; ledger: LedgerRow[] }>({
+    queryKey: [`/api/stock-v2/line/${row.id}/days`],
+    queryFn: () => apiRequest("GET", `/api/stock-v2/line/${row.id}/days`, undefined, false, true),
+    enabled: tab === "days" && row.id != null,
+  });
+  const scanning = hist("stock-movements");
+  const unloading = hist("unloading-history");
+  const loading = hist("loading-history");
+  const adjust = hist("adjust-history");
+
+  const Table = ({ head, rows, empty, busy }: { head: string[]; rows: (string | number | JSX.Element)[][]; empty: string; busy: boolean }) => (
+    busy ? <Loader2 className="mx-auto my-3 h-5 w-5 animate-spin" /> : (
+      <table className="w-full text-left text-xs">
+        <thead><tr className="border-b text-[11px] uppercase text-gray-400">{head.map((h, i) => <th key={h} className={`py-1 pr-3 ${i >= head.length - 2 && typeof rows[0]?.[i] === "number" ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
+        <tbody>
+          {rows.map((r, i) => <tr key={i} className="border-b border-gray-100">{r.map((c, j) => <td key={j} className="py-1 pr-3 align-top">{c}</td>)}</tr>)}
+          {!rows.length && <tr><td colSpan={head.length} className="py-3 text-center text-gray-400">{empty}</td></tr>}
+        </tbody>
+      </table>
+    )
+  );
+  const typeLabel = (t: string, q: number) => (t === "receive" ? "Received" : t === "dispatch" ? "Dispatched" : t === "exchange" ? "Exchange" : q < 0 ? "Adjust (−)" : "Adjust (+)");
+
+  return (
+    <div className="sticky left-0 w-full max-w-[95vw] bg-gray-50 p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[#001d6e]">
+        <History className="h-4 w-4 shrink-0" />
+        <span className="text-sm font-semibold">{row.itemName}</span>
+        <span className="font-mono text-xs text-gray-400">{row.barcode} · {row.plant}{row.sapCode ? ` · SAP ${row.sapCode}` : ""} · Stock {num(row.stock)}</span>
+      </div>
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        {([["days", "Days"], ["scanning", "Scan Order"], ["unloading", "Unloading"], ["loading", "Loading"], ["adjust", "Adjust"]] as const).map(([k, l]) => (
+          <button key={k} type="button" onClick={() => setTab(k)} className={tabCls(tab === k)}>{l}</button>
+        ))}
+      </div>
+      {tab === "days" && (
+        <div className="space-y-3">
+          <Table busy={days.isLoading} empty="No purchase or sale yet."
+            head={["Date", "Purchase", "Sale", "Transfer In", "Transfer Out"]}
+            rows={(days.data?.days ?? []).map((d) => [d.date, figure(d.purchaseQty, d.extraPurchaseQty), figure(d.saleQty, d.extraSaleQty, "text-emerald-700"), figure(d.transferIn), figure(d.transferOut)])} />
+          {!!days.data?.ledger.length && (
+            <Table busy={false} empty="" head={["Date", "Correction", "Qty", "By"]}
+              rows={days.data.ledger.map((l) => [l.date, `${l.kind}${l.reason ? ` — ${l.reason}` : ""}`, signed(l.qty), l.by ?? "—"])} />
+          )}
+        </div>
+      )}
+      {tab === "scanning" && (
+        <Table busy={scanning.isLoading} empty="No scan-order entries."
+          head={["Arrived", "CSV", "Order date", "Type", "Qty", "Extra"]}
+          rows={(scanning.data?.items ?? []).map((m: any) => [fmtAt(m.arrivedAt), `${m.orderName ?? "—"}${m.partIndex ? ` (part ${m.partIndex})` : ""}`, m.orderDate ? String(m.orderDate).slice(0, 10) : "—", typeLabel(m.type, m.qty), signed(m.qty), m.extraQty ? num(m.extraQty) : "—"])} />
+      )}
+      {tab === "unloading" && (
+        <Table busy={unloading.isLoading} empty="No unloading entries."
+          head={["Scanned", "Vehicle", "Order date", "Scanned by", "Qty", "Status"]}
+          rows={(unloading.data?.items ?? []).map((u: any) => [fmtAt(u.scannedAt), u.vehicleNumber ?? "—", u.orderDate ? String(u.orderDate).slice(0, 10) : "—", u.scannedByName ?? "—", num(u.qty), u.voided ? `Voided${u.voidReason ? ` — ${u.voidReason}` : ""}` : u.isExtra ? "Extra" : "OK"])} />
+      )}
+      {tab === "loading" && (
+        <Table busy={loading.isLoading} empty="No loading entries."
+          head={["Scanned", "Order no.", "Order date", "Scanned by", "Qty", "Status"]}
+          rows={(loading.data?.items ?? []).map((l: any) => [fmtAt(l.scannedAt), l.orderNumber ?? "—", l.orderDate ? String(l.orderDate).slice(0, 10) : "—", l.scannedByName ?? "—", signed(l.qty), l.voided ? `Voided${l.voidReason ? ` — ${l.voidReason}` : ""}` : l.isAdjust ? "Adjust" : l.isExtra ? "Extra" : "OK"])} />
+      )}
+      {tab === "adjust" && (
+        <Table busy={adjust.isLoading} empty="No adjustments."
+          head={["When", "Kind", "By", "Reason", "Stock change"]}
+          rows={(adjust.data?.items ?? []).map((a: any) => [fmtAt(a.at), a.kind, a.byName ?? "—", a.reason ?? "—", signed(a.stockQty)])} />
+      )}
+    </div>
   );
 }
 

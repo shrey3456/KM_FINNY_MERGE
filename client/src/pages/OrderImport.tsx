@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PlantRoute } from "@/components/PlantRoute";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
@@ -2570,14 +2571,14 @@ export default function OrderImport() {
                           was enough to clip the fixed-width Action column into the scrollbar. */}
                       <colgroup>
                         <col className="w-8" />
-                        <col className="w-[19%]" />
-                        <col className="w-[10%]" />
+                        <col className="w-[17%]" />
+                        <col className="w-[15%]" />
                         <col className="w-[9%]" />
                         <col className="w-[7%]" />
                         <col className="w-[8%]" />
-                        <col className="w-[9%]" />
-                        <col className="w-[11%]" />
-                        <col className="w-[11%]" />
+                        <col className="w-[8%]" />
+                        <col className="w-[10%]" />
+                        <col className="w-[10%]" />
                         <col className="w-16" />
                       </colgroup>
                       <thead>
@@ -2613,9 +2614,7 @@ export default function OrderImport() {
                                 </td>
                                 <td className="truncate border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]" title={u.csvFileName}>{u.csvFileName}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2">
-                                  {u.purchasePlant
-                                    ? <span className="inline-flex items-center gap-1"><PlantBadge plant={u.purchasePlant} /><span className="text-gray-400">→</span><PlantBadge plant={u.plant} /></span>
-                                    : <PlantBadge plant={u.plant} />}
+                                  <PlantRoute plant={u.plant} purchasePlant={u.purchasePlant} />
                                 </td>
                                 <td className="truncate border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.orderDate}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.vehicleCount}</td>
