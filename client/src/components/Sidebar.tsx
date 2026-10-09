@@ -243,6 +243,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "overall-stock",
         },
         {
+          label: "Stock (New)",
+          icon: <LayoutList className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/stock-v2",
+          pageKey: "overall-stock-v2",
+        },
+        {
           label: "Reports",
           icon: <FileBarChart className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/daily-reports",

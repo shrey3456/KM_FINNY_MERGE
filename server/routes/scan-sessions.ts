@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { v2Adjust } from '../lib/stockV2';
 import { format } from 'date-fns';
 import { db, pool } from '../db';
 import {
@@ -2388,11 +2389,13 @@ router.post('/reports/exchange-stock', requirePageWrite('overall-stock'), async 
        VALUES ($1, $2, $3, $4, 0, 'exchange', $5, $6, NOW())`,
       [fromBarcode, fromProductId, plant, -removeQty, fromReason, userCode],
     );
+    await v2Adjust(client, { plant, barcode: fromBarcode, qty: -removeQty, kind: 'exchange', reason: fromReason, userCode });
     await client.query(
       `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, created_at)
        VALUES ($1, $2, $3, $4, 0, 'exchange', $5, $6, NOW())`,
       [toBarcode, toProductId, plant, addQty, toReason, userCode],
     );
+    await v2Adjust(client, { plant, barcode: toBarcode, qty: addQty, kind: 'exchange', reason: toReason, userCode });
 
     await client.query('COMMIT');
     res.json({

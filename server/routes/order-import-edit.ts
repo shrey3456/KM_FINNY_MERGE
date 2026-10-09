@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { v2Purchase, v2MoveRefusal } from '../lib/stockV2';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { broadcastOrderImportUpdate } from '../lib/importEvents';
@@ -257,6 +258,14 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
           const totalQty = orderQty + extraQty;
 
           if (totalQty > 0) {
+            const refusal = await v2MoveRefusal(client, session.plant, oldBarcode, barcode, totalQty);
+            if (refusal) {
+              await client.query('ROLLBACK');
+              return res.status(409).json({ message: refusal });
+            }
+          }
+
+          if (totalQty > 0) {
             const reason = `Barcode correction (order-import edit): ${oldBarcode} -> ${barcode}`;
 
             // Reverse stock credited to the old barcode
@@ -276,6 +285,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
                VALUES ($1, $2, $3, $4, $5, 'adjust', $6, $7, NOW())`,
               [oldBarcode, oldPps[0]?.product_id ?? null, session.plant, -totalQty, -extraQty, reason, id],
             );
+            await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode: oldBarcode, qty: -totalQty, extraQty: -extraQty });
 
             // Apply the same quantity to the corrected barcode. RETURNING id so the corrected
             // barcode's own product row (which may differ from the old barcode's) links up
@@ -300,6 +310,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
                VALUES ($1, $2, $3, $4, $5, 'adjust', $6, $7, NOW())`,
               [barcode, newProductId, session.plant, totalQty, extraQty, reason, id],
             );
+            await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode, qty: totalQty, extraQty });
           }
 
           // Relink the scan rows so scan history/status follow the corrected barcode.
@@ -376,6 +387,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
                    VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
                   [barcode, pps[0]?.product_id ?? null, session.plant, extraDelta, `Quantity correction (order-import edit): ${existing.quantity} -> ${quantity}`, id],
                 );
+                await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode, qty: 0, extraQty: extraDelta });
               }
             }
           }
@@ -467,6 +479,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
                  VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
                 [barcode, pps[0]?.product_id ?? null, session.plant, extraDelta, `New item added to CSV (order-import edit): extra ${oldExtraQty} -> ${newExtraQty}`, id],
               );
+              await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode, qty: 0, extraQty: extraDelta });
             }
           }
         }

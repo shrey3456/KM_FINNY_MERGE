@@ -41,6 +41,7 @@ import { initializeStatePreservation } from "./utils/statePreservationInit.tsx";
 import { useAuth, AuthProvider } from "@/hooks/use-auth";
 import PlantSettings from "./pages/PlantSettings";
 import OverallStock from "./pages/OverallStock";
+import StockOverviewV2 from "./pages/StockOverviewV2";
 import VehicleMaster from "./pages/VehicleMaster";
 import VehiclePlanning from "./pages/VehiclePlanning";
 import LoadOperation from "./pages/Loading/LoadOperation";
@@ -288,6 +289,7 @@ function Router() {
             bookmark/browser history still lands somewhere instead of 404ing. */}
         <Route path="/reports"><Redirect to="/scan-history" /></Route>
         <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
+        <ProtectedRoute path="/stock-v2" component={StockOverviewV2} requiredPage="overall-stock-v2" />
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
         <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
         <ProtectedRoute path="/unloading" component={Unloading} requiredPage="unloading" />

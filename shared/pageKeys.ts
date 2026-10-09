@@ -16,6 +16,7 @@ export const CONTROLLABLE_PAGES = [
   { key: "scan-viewer", label: "Overall Scan Ops" },
   { key: "scan-history", label: "Scan History" },
   { key: "overall-stock", label: "Stock Overview" },
+  { key: "overall-stock-v2", label: "Stock (New)" },
   { key: "daily-reports", label: "Reports" },
   // SALES
   { key: "dispatch", label: "Dispatch" },

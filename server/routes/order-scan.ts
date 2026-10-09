@@ -11,6 +11,7 @@ import {
 import { eq, and, or, desc, asc, gte, sql, inArray } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
+import { v2Purchase } from '../lib/stockV2';
 import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
 import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
 import { sessionMiddleware } from '../auth';
@@ -2208,6 +2209,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
                    VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
                   [event.barcode, pps[0]?.product_id ?? null, plant, -take, 'Extra reclassified to Regular — backfilled a shortfall left by a voided scan', event.session_id],
                 );
+                await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: -take });
               }
 
               const backfillResult = await client.query(
@@ -2258,6 +2260,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
            VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
           [event.barcode, pps[0]?.product_id ?? null, plant, qty, 'Un-did a backfill conversion — restored to Extra', event.session_id],
         );
+        await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: qty });
       }
       await client.query('COMMIT');
       return res.json({ event: unflipResult.rows[0], updatedItem });
@@ -2297,6 +2300,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
            VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
           [src.barcode, pps[0]?.product_id ?? null, plant, qty, 'Voided a backfill — qty restored to Extra', event.session_id],
         );
+        await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: src.barcode, qty: 0, extraQty: qty });
       }
     } else if (plant && event.barcode) {
       const qty = Number(event.total_qty ?? 0);
@@ -2634,6 +2638,7 @@ router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), 
         extra.session_id, userCode,
       ],
     );
+    await v2Purchase(client, { source: 'order', sessionId: extra.session_id, plant: extra.session_plant, barcode: extra.barcode, qty: -qty });
     await client.query(
       `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, origin, created_by_code, created_at)
        VALUES ($1, $2, $3, $4, 0, 'receive', $5, $6, 'credit', $7, NOW())`,
@@ -2643,6 +2648,7 @@ router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), 
         target.session_id, userCode,
       ],
     );
+    await v2Purchase(client, { source: 'order', sessionId: target.session_id, plant: target.session_plant, barcode: target.barcode, qty });
 
     await client.query('COMMIT');
     broadcastOrderImportUpdate();

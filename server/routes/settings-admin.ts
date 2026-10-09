@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { v2Adjust } from '../lib/stockV2';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
@@ -179,6 +180,7 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
            VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,true,'settings')`,
           [row.barcode, row.product_id, row.plant, -qty, -Number(row.extra_qty ?? 0), 'Clear Stock (Settings)', userCode ?? null],
         );
+        await v2Adjust(client, { plant: row.plant, barcode: row.barcode, qty: -qty, kind: 'clear', reason: 'Clear Stock (Settings)', userCode });
       }
       await client.query(
         `UPDATE product_plant_stock SET in_stock = 0, extra_qty = 0, updated_at = NOW()
@@ -245,6 +247,7 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
            VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,true,'settings')`,
           [d.barcode, updated[0]?.product_id ?? null, d.plant, d.inStockDelta, d.extraQtyDelta, `Clear Stock (Settings) — orders up to ${dateParam}`, userCode ?? null],
         );
+        await v2Adjust(client, { plant: d.plant, barcode: d.barcode, qty: d.inStockDelta, kind: 'clear', reason: 'Clear Stock (Settings) — up to ' + dateParam, userCode });
       }
     }
 

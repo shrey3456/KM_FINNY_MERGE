@@ -10,6 +10,7 @@ import {
   getPooledStock, getStatePlantNames, debitStatePool, reverseStockPullsForEvent, recordStockPulls,
   type StockPullContribution,
 } from '../lib/statePool';
+import { v2SaleOnSlip, loadingUsesV2 } from '../lib/stockV2';
 import {
   pushStoreKeeperInfoToNotion, getFinnyStatusOptions, syncOrderToNotion, settleNotionSync, reconcileOrderWithNotion,
   watchStatusAfterVehicleChange,
@@ -455,11 +456,17 @@ async function withProgress(slip: any, items: any[]) {
       if (!productsByBarcode.has(key)) productsByBarcode.set(key, []);
       productsByBarcode.get(key)!.push(pr);
     }
-    const { rows: stockRows } = await pool.query(
-      `SELECT barcode, COALESCE(SUM(in_stock), 0)::int AS total FROM product_plant_stock
-       WHERE barcode = ANY($1::text[]) AND plant = ANY($2::text[]) GROUP BY barcode`,
-      [wantedBarcodes, statePlants],
-    );
+    const { rows: stockRows } = (await loadingUsesV2(pool))
+      ? await pool.query(
+          `SELECT barcode, COALESCE(SUM(stock_qty), 0)::int AS total FROM stock_v2_lines
+           WHERE barcode = ANY($1::text[]) AND LOWER(plant) = ANY($2::text[]) GROUP BY barcode`,
+          [wantedBarcodes, statePlants.map((p: string) => p.toLowerCase())],
+        )
+      : await pool.query(
+          `SELECT barcode, COALESCE(SUM(in_stock), 0)::int AS total FROM product_plant_stock
+           WHERE barcode = ANY($1::text[]) AND plant = ANY($2::text[]) GROUP BY barcode`,
+          [wantedBarcodes, statePlants],
+        );
     for (const r of stockRows as any[]) stockByBarcode.set(String(r.barcode), r.total);
   }
   // One row per barcode is the normal case; a barcode that sits on several product rows (one per
@@ -2016,6 +2023,7 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
             userCode ?? null,
           ],
         );
+        await v2SaleOnSlip(client, { orderNumber: slip.orderNumber, plant: slip.plant ?? "", barcode, qty: delta });
       }
       await client.query('COMMIT');
     } catch (err) {
@@ -2208,6 +2216,7 @@ const resetLoadingSlip = async (req: Request, res: Response) => {
             [qty, event.barcode, event.plant],
           );
           contributions = [{ plant: event.plant, qty }];
+          await v2SaleOnSlip(client, { orderNumber: event.order_number ?? slip.orderNumber, plant: event.plant, barcode: event.barcode, qty: -qty });
         }
         if (mode === 'void') {
           for (const c of contributions) {
@@ -2374,6 +2383,7 @@ const voidLoadingEvent = async (req: Request, res: Response) => {
           [qty, event.barcode, event.plant],
         );
         contributions = [{ plant: event.plant, qty }];
+        await v2SaleOnSlip(client, { orderNumber: event.order_number, plant: event.plant, barcode: event.barcode, qty: -qty });
       }
       for (const c of contributions) {
         await client.query(
@@ -2478,6 +2488,7 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
          WHERE barcode = $2 AND LOWER(TRIM(plant)) = LOWER(TRIM($3))`,
         [oldQty, event.barcode, event.plant],
       );
+      await v2SaleOnSlip(client, { orderNumber: event.order_number, plant: event.plant, barcode: event.barcode, qty: -oldQty });
     }
 
     let newQtyContributions: StockPullContribution[];

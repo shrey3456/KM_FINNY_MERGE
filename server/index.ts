@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { pool } from "./db";
 import { tagStockMovementSources } from './lib/stockRecalc';
+import { ensureStockV2Schema } from './lib/stockV2Schema';
 
 
 const app = express();
@@ -489,6 +490,8 @@ app.use((req, res, next) => {
     // Tag older Loading / Unloading ledger rows (see server/lib/stockRecalc.ts) — the same
     // function Settings > Recalculate Stock runs.
     await tagStockMovementSources(pool);
+    // Stock (New) tables — separate from the old stock tables (see server/lib/stockV2Schema.ts).
+    await ensureStockV2Schema(pool);
     // loading_scan_events.is_adjust — marks the Loading Items table's +/- corrections ("Loading
     // Adjust"). Older ones are found through the stock ledger row the same request wrote (same
     // order, barcode, plant, opposite qty, within a few seconds); a negative qty is always one.

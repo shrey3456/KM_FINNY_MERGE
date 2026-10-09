@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { v2MoveRefusal } from '../lib/stockV2';
 import { pool } from '../db';
 import { storage } from '../storage';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
@@ -185,6 +186,14 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
           const orderQty = scannedRows[0]?.orderQty ?? 0;
           const extraQty = scannedRows[0]?.extraQty ?? 0;
           const totalQty = orderQty + extraQty;
+
+          if (totalQty > 0) {
+            const refusal = await v2MoveRefusal(client, session.plant, oldBarcode, barcode, totalQty);
+            if (refusal) {
+              await client.query('ROLLBACK');
+              return res.status(409).json({ message: refusal });
+            }
+          }
 
           if (totalQty > 0) {
             const reason = `Barcode correction (unloading edit): ${oldBarcode} -> ${barcode}`;

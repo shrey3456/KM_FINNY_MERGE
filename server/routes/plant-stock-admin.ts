@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { v2Adjust, v2ForgetLine } from '../lib/stockV2';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
@@ -178,6 +179,7 @@ router.post('/plant-stock/adjust', requireAdminRole, async (req: Request, res: R
          VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,'manual','page')`,
         [barcode, productId, plant, inStockDelta, extraDelta, reason, userCode ?? null],
       );
+      await v2Adjust(client, { plant, barcode, qty: inStockDelta, kind: 'adjust', reason, userCode });
       // Recompute the legacy cross-plant mirror from the live per-plant table.
       await client.query(
         `UPDATE products p
@@ -295,6 +297,9 @@ router.delete('/plant-stock', requireAdminRole, async (req: Request, res: Respon
       `DELETE FROM stock_movements WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) RETURNING id`,
       [barcode, plant],
     );
+
+    // Stock (New): forget this line too (its days and corrections).
+    await v2ForgetLine(client, plant, barcode);
 
     // --- The plant-stock row itself. ---
     await client.query(

@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { v2Adjust } from '../lib/stockV2';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
@@ -123,6 +124,7 @@ router.post('/opening-stock/import', requireAdminRole, async (req: Request, res:
          VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'opening',$7::date)`,
         [row.barcode, product?.id ?? null, plant, row.quantity, 'Opening stock import (Settings)', userCode ?? null, effectiveDate],
       );
+      await v2Adjust(client, { plant, barcode: row.barcode, qty: row.quantity, kind: 'opening', reason: 'Opening stock import (Settings)', userCode, date: effectiveDate });
       rowsSet++;
     }
 

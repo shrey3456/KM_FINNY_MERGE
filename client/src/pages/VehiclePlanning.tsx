@@ -29,9 +29,7 @@ import { withNotionNotice } from "@/lib/notionSyncNotice";
 // — see server/routes/vehicle-planning.ts); a vehicle with no bar in view, or past the end of
 // its bar, is free and gets an Assign button.
 //
-// TEST MODE (server/routes/vehicle-planning.ts): the Assign action only accepts three dummy
-// order numbers — the picker below is limited to exactly those. Remove there, not here, once
-// this page is trusted with real orders.
+// Assign accepts any order from our system: the picker lists the orders of a chosen order date.
 
 type CurrentOrder = {
   orderNumber: string; partyName: string | null; plant: string | null;
@@ -94,6 +92,8 @@ export default function VehiclePlanning() {
   const { toast } = useToast();
   const canWrite = hasPageWriteAccess("vehicle-planning");
   const [assignTarget, setAssignTarget] = useState<VehicleRow | null>(null);
+  const [assignDate, setAssignDate] = useState(() => format(new Date(), "yyyy-MM-dd"));
+  const [assignSearch, setAssignSearch] = useState("");
   const [mismatchTarget, setMismatchTarget] = useState<VehicleRow | null>(null);
   const [historyTarget, setHistoryTarget] = useState<VehicleRow | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
@@ -196,7 +196,7 @@ export default function VehiclePlanning() {
     setWindowDays(Math.max(1, differenceInCalendarDays(to, from) + 1));
   };
 
-  const fleetQuery = useQuery<{ vehicles: VehicleRow[]; testModeOrderNumbers: string[]; companyFilters: string[] }>({
+  const fleetQuery = useQuery<{ vehicles: VehicleRow[]; companyFilters: string[] }>({
     queryKey: ["/api/vehicle-planning/vehicles"],
     queryFn: async () => (await apiRequest("GET", "/api/vehicle-planning/vehicles")).json(),
   });
@@ -213,8 +213,8 @@ export default function VehiclePlanning() {
   });
 
   const availableOrdersQuery = useQuery<{ orders: AvailableOrder[] }>({
-    queryKey: ["/api/vehicle-planning/available-orders"],
-    queryFn: async () => (await apiRequest("GET", "/api/vehicle-planning/available-orders")).json(),
+    queryKey: ["/api/vehicle-planning/available-orders", assignDate, assignSearch],
+    queryFn: async () => (await apiRequest("GET", `/api/vehicle-planning/available-orders?date=${assignDate}&q=${encodeURIComponent(assignSearch)}`)).json(),
     enabled: !!assignTarget,
   });
 
@@ -280,7 +280,6 @@ export default function VehiclePlanning() {
   });
 
   const allVehicles = fleetQuery.data?.vehicles ?? [];
-  const testOrders = fleetQuery.data?.testModeOrderNumbers ?? [];
   const availableCompanies = settingsQuery.data?.availableCompanies ?? [];
   const activeCompanyFilters = fleetQuery.data?.companyFilters ?? [];
 
@@ -353,12 +352,6 @@ export default function VehiclePlanning() {
         icon={CalendarClock}
         title="Vehicle Planning"
       />
-
-      {testOrders.length > 0 && (
-        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800">
-          Test mode — assigning is only possible for orders {testOrders.join(", ")}.
-        </div>
-      )}
 
       {/* Fleet controls — Sync from Notion (the only thing that ever talks to Notion; the page
           itself just reads vehicle_planning_state), which companies to include, search, and
@@ -816,14 +809,18 @@ export default function VehiclePlanning() {
               <Truck className="h-4 w-4" /> Assign {assignTarget?.vehicleNumber}
             </DialogTitle>
             <DialogDescription>
-              Pick an order to assign this vehicle to.
+              Pick an order date, then the order to assign this vehicle to.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
+          <div className="flex gap-2">
+            <Input type="date" value={assignDate} onChange={(e) => setAssignDate(e.target.value)} className="h-9 w-40" />
+            <Input value={assignSearch} onChange={(e) => setAssignSearch(e.target.value)} placeholder="Order no. or party" className="h-9 flex-1" />
+          </div>
+          <div className="max-h-[50vh] space-y-2 overflow-y-auto">
             {availableOrdersQuery.isLoading ? (
               <SectionSkeleton lines={3} />
             ) : (availableOrdersQuery.data?.orders ?? []).length === 0 ? (
-              <p className="py-6 text-center text-sm text-gray-400">No orders available to assign right now.</p>
+              <p className="py-6 text-center text-sm text-gray-400">No orders for this date.</p>
             ) : (
               availableOrdersQuery.data!.orders.map((o) => (
                 <button

@@ -10,12 +10,6 @@ import type { VehiclePlanningOrderEntry } from '@shared/schema';
 // Vehicle Planning — a Gantt-style "when is each vehicle free" view over a configurable slice of
 // the fleet, so a planner can see which vehicle to assign a pending order to.
 //
-// TEST MODE — remove once this page is trusted: every WRITE here (assign) is restricted to
-// these three dummy order numbers only, so a bug in this brand-new page can't touch a real
-// order. Read-only display (the Gantt itself) is NOT restricted to these — it shows the real
-// fleet. Delete TEST_MODE_ORDER_NUMBERS and the one check that reads it to lift the restriction.
-const TEST_MODE_ORDER_NUMBERS = ['1111111111', '2222222222', '3333333333'];
-
 const router = Router();
 
 const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
@@ -525,46 +519,47 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
       };
     });
 
-    res.json({ vehicles: rows, testModeOrderNumbers: TEST_MODE_ORDER_NUMBERS, companyFilters });
+    res.json({ vehicles: rows, companyFilters });
   } catch (error) {
     console.error('Error building vehicle planning fleet view:', error);
     res.status(500).json({ message: 'Failed to load vehicle planning data' });
   }
 });
 
-// GET /api/vehicle-planning/available-orders — TEST MODE: only ever these three dummy orders,
-// straight from the local DB (whatever's already there right now).
+// GET /api/vehicle-planning/available-orders?date=YYYY-MM-DD&q= — the orders of one order date (default today)
+// from our own system, any of which can be assigned a vehicle. Orders with no vehicle yet come first.
 router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-planning'), async (req: Request, res: Response) => {
   try {
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+      ? req.query.date
+      : new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
+    const params: any[] = [date];
+    let search = '';
+    if (q) { params.push(`%${q}%`); search = ` AND (LOWER(order_number) LIKE $2 OR LOWER(COALESCE(party_name,'')) LIKE $2)`; }
     const { rows } = await pool.query(
       `SELECT order_number AS "orderNumber", party_name AS "partyName", plant,
               order_date::text AS "orderDate", vehicle_number AS "vehicleNumber",
               notion_status AS "notionStatus"
        FROM proforma_slips
-       WHERE order_number = ANY($1)
-       ORDER BY order_number`,
-      [TEST_MODE_ORDER_NUMBERS],
+       WHERE (order_date AT TIME ZONE 'Asia/Kolkata')::date = $1::date${search}
+       ORDER BY (vehicle_number IS NOT NULL AND vehicle_number <> ''), order_number
+       LIMIT 200`,
+      params,
     );
-    res.json({ orders: rows });
+    res.json({ orders: rows, date });
   } catch (error) {
     console.error('Error listing available orders for vehicle planning:', error);
     res.status(500).json({ message: 'Failed to load available orders' });
   }
 });
 
-// POST /api/vehicle-planning/assign — body: { orderNumber, vehicleId }. TEST MODE: orderNumber
-// must be one of TEST_MODE_ORDER_NUMBERS, checked before anything else happens.
+// POST /api/vehicle-planning/assign — body: { orderNumber, vehicleId }. Any order can be assigned.
 router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
   try {
     const orderNumber = String(req.body?.orderNumber ?? '').trim();
     const vehicleId = req.body?.vehicleId != null ? Number(req.body.vehicleId) : null;
     if (!orderNumber || !vehicleId) return res.status(400).json({ message: 'orderNumber and vehicleId are required' });
-
-    if (!TEST_MODE_ORDER_NUMBERS.includes(orderNumber)) {
-      return res.status(403).json({
-        message: `Vehicle Planning is in test mode — only orders ${TEST_MODE_ORDER_NUMBERS.join(', ')} can be assigned right now.`,
-      });
-    }
 
     let slip = await storage.getProformaSlipByOrderNumber(orderNumber);
     // Not found locally — try a scoped live pull from Notion before giving up, since a brand new

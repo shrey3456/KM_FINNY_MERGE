@@ -1,4 +1,5 @@
 import { db, pool } from '../db';
+import { v2Purchase } from './stockV2';
 import { orderImportSessions, orderImportItems } from '../../shared/schema';
 import { eq, and, asc, inArray } from 'drizzle-orm';
 import { reconcileProductPlantStockBarcode } from './stockBarcodeReconcile';
@@ -482,6 +483,8 @@ export async function applyLiveScanStock(
      VALUES ($1, $2, $3, $4, $5, 'receive', 'Order scan', $6, NOW())`,
     [barcode, productId, plant, totalQty, extraQty, sessionId],
   );
+  // Stock (New): the same purchase, on the CSV's day.
+  await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: totalQty, extraQty });
 }
 
 // Reverses applyLiveScanStock — used when an admin voids a mistaken scan. Subtracts back out
@@ -529,6 +532,8 @@ export async function reverseLiveScanStock(
      VALUES ($1, $2, $3, $4, $5, 'adjust', 'Voided scan', $6, 'void', NOW())`,
     [barcode, productId, plant, -totalQty, -extraQty, sessionId],
   );
+  // Stock (New): taken back out of the same day's purchase.
+  await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: -totalQty, extraQty: -extraQty });
 }
 
 // Makes the "already covered by an earlier part" credit REAL instead of a display-only

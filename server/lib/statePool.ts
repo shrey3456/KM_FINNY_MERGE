@@ -14,6 +14,7 @@
 // plant's own row, which would otherwise leave a borrowed-from plant permanently short.
 import type { Pool, PoolClient } from 'pg';
 import { reconcileProductPlantStockBarcode } from './stockBarcodeReconcile';
+import { v2Sale, loadingUsesV2, v2StockByPlant } from './stockV2';
 
 type DbClient = Pool | PoolClient;
 
@@ -55,6 +56,11 @@ export async function getPooledStock(
   plant: string,
 ): Promise<{ total: number; statePlants: string[]; byPlant: Map<string, number> }> {
   const statePlants = await getStatePlantNames(client, plant);
+  // Stock (New) is the source once switched on (Stock (New) > Compare).
+  if (await loadingUsesV2(client)) {
+    const v2 = await v2StockByPlant(client, barcode, statePlants);
+    return { total: [...v2.values()].reduce((s, v) => s + v, 0), statePlants, byPlant: v2 };
+  }
   const { rows } = await client.query(
     `SELECT plant, in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = ANY($2::text[])`,
     [barcode, statePlants],
@@ -81,13 +87,18 @@ export async function debitStatePool(
 ): Promise<StockPullContribution[]> {
   if (qty <= 0) return [];
   const statePlants = await getStatePlantNames(client, plant);
+  // The old rows are always locked (they are still kept in step); the AMOUNTS come from Stock (New) when it is the source.
   const { rows } = await client.query(
     `SELECT plant, in_stock AS "inStock" FROM product_plant_stock
      WHERE barcode = $1 AND plant = ANY($2::text[]) FOR UPDATE`,
     [barcode, statePlants],
   );
   const stockByPlant = new Map<string, number>(statePlants.map((p) => [p, 0]));
-  for (const r of rows) stockByPlant.set(r.plant, r.inStock ?? 0);
+  if (await loadingUsesV2(client)) {
+    for (const [p, q] of await v2StockByPlant(client, barcode, statePlants, true)) stockByPlant.set(p, q);
+  } else {
+    for (const r of rows) stockByPlant.set(r.plant, r.inStock ?? 0);
+  }
 
   const total = [...stockByPlant.values()].reduce((s, v) => s + v, 0);
   if (total < qty) {
@@ -168,6 +179,13 @@ export async function recordStockPulls(
       [loadingScanEventId, c.plant, c.qty],
     );
   }
+  // Stock (New): the same boxes, as a sale on the slip's day at each plant that gave them.
+  await v2Sale(client, { eventId: loadingScanEventId, barcode: await eventBarcode(client, loadingScanEventId), contributions, sign: 1 });
+}
+
+async function eventBarcode(client: DbClient, eventId: number): Promise<string> {
+  const r = await client.query(`SELECT barcode FROM loading_scan_events WHERE id = $1`, [eventId]);
+  return String(r.rows[0]?.barcode ?? '');
 }
 
 // Reads back and credits an event's exact pull breakdown, then clears those rows (an event is
@@ -189,5 +207,6 @@ export async function reverseStockPullsForEvent(
   if (contributions.length === 0) return contributions;
   await creditStatePool(client, barcode, contributions);
   await client.query(`DELETE FROM loading_stock_pulls WHERE loading_scan_event_id = $1`, [loadingScanEventId]);
+  await v2Sale(client, { eventId: loadingScanEventId, barcode, contributions, sign: -1 });
   return contributions;
 }

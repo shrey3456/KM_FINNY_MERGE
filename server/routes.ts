@@ -120,6 +120,7 @@ import settingsAdminRoutes from "./routes/settings-admin";
 import unloadingRoutes from "./routes/unloading";
 import openingStockRoutes from "./routes/opening-stock";
 import plantStockAdminRoutes from "./routes/plant-stock-admin";
+import stockV2Routes from "./routes/stock-v2";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
 import { requirePageWrite, requirePageAccess } from "./lib/pageAccess";
@@ -8206,6 +8207,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount Overall Stock > per-row Edit/Delete admin routes
   apiRouter.use(plantStockAdminRoutes);
+
+  // Stock (New) — report / compare / rebuild (new stock system, runs beside the old one)
+  apiRouter.use(stockV2Routes);
 
   // Mount Unloading routes (vehicle-wise receiving)
   apiRouter.use(unloadingRoutes);

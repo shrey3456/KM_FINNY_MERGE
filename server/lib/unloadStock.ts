@@ -1,4 +1,5 @@
 import type { PoolClient, Pool } from 'pg';
+import { v2Purchase, v2Transfer } from './stockV2';
 
 // Unloading can name TWO plants for a batch (a whole CSV, chosen once at import and locked):
 //   - the STOCK plant   (unload_import_sessions.plant)          — where the boxes are added to the live
@@ -47,7 +48,10 @@ export async function postUnloadMovement(client: Db, p: {
 
   // Purchase side — at the purchase plant when there is a different one, otherwise the stock plant.
   await insert(purchasePlant, p.qty, p.extraQty ?? 0, p.type, p.origin ?? null, p.reason, null, null);
+  // Stock (New): the same purchase (and transfer, below) on the batch's day.
+  await v2Purchase(client, { source: 'unload', sessionId: p.sessionId, plant: purchasePlant, barcode: p.barcode, qty: p.qty, extraQty: p.extraQty ?? 0 });
   if (sameName || p.qty === 0) return;
+  await v2Transfer(client, { sessionId: p.sessionId, purchasePlant, stockPlant, barcode: p.barcode, qty: p.qty });
 
   const note = `Transfer ${purchasePlant} → ${stockPlant}: ${p.reason}`;
   await insert(purchasePlant, -p.qty, 0, 'transfer', 'transfer', note, 'out', stockPlant);

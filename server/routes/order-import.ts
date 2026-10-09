@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { v2Purchase } from '../lib/stockV2';
 import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
@@ -899,6 +900,7 @@ router.delete('/order-import/sessions/:id', requireOrderImportWrite, async (req:
            VALUES ($1, $2, $3, $4, $5, 'adjust', 'Order CSV deleted — rollback', $6, NOW())`,
           [r.barcode, productId, session.plant, -actualQty, -actualExtraQty, id],
         );
+        await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode: r.barcode, qty: -actualQty, extraQty: -actualExtraQty });
         stockReversed.push({ barcode: r.barcode, qty: actualQty, extraQty: actualExtraQty });
       }
 
