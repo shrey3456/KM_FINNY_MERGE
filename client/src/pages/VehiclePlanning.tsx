@@ -260,7 +260,10 @@ export default function VehiclePlanning() {
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/settings"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
     },
-    onError: (err: any) => toast({ title: "Could not save company filter", description: parseApiErrorMessage(err), variant: "destructive" }),
+    onError: (err: any) => {
+      setPendingCompanies(null);
+      toast({ title: "Could not save company filter", description: parseApiErrorMessage(err), variant: "destructive" });
+    },
   });
 
   const resolveMismatchMutation = useMutation({
@@ -281,7 +284,25 @@ export default function VehiclePlanning() {
 
   const allVehicles = fleetQuery.data?.vehicles ?? [];
   const availableCompanies = settingsQuery.data?.availableCompanies ?? [];
-  const activeCompanyFilters = fleetQuery.data?.companyFilters ?? [];
+  // What is saved (server) vs what the boxes show right now: the boxes follow a click straight away and
+  // fall back to the saved list when it changes or a save fails.
+  const savedCompanyFilters = fleetQuery.data?.companyFilters ?? [];
+  const [pendingCompanies, setPendingCompanies] = useState<string[] | null>(null);
+  useEffect(() => { setPendingCompanies(null); }, [savedCompanyFilters.join("|")]);
+  const matchesFilter = (company: string, filters: string[]) => filters.some((f) => company.toLowerCase().includes(f.toLowerCase()));
+  // The companies that are ticked, as exact names — a saved filter like "km" can cover several companies,
+  // and unticking one of them has to leave the others ticked.
+  const checkedCompanies = pendingCompanies ?? availableCompanies.filter((c) => matchesFilter(c, savedCompanyFilters));
+  const activeCompanyFilters = checkedCompanies;
+  function toggleCompany(company: string, next: boolean) {
+    const nextChecked = next ? Array.from(new Set([...checkedCompanies, company])) : checkedCompanies.filter((c) => c !== company);
+    if (nextChecked.length === 0) {
+      toast({ title: "Keep at least one company", description: "Tick another company first, then untick this one." });
+      return;
+    }
+    setPendingCompanies(nextChecked);
+    settingsMutation.mutate(nextChecked.map((c) => c.toLowerCase()));
+  }
 
   // Distinct values actually present in the current fleet — what the Plant/State/Driver filter
   // checkboxes offer, so the list only ever shows real options, never a stale/empty one.
@@ -378,18 +399,12 @@ export default function VehiclePlanning() {
             <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Include companies</div>
             <div className="max-h-56 space-y-1.5 overflow-y-auto">
               {availableCompanies.map((company) => {
-                const checked = activeCompanyFilters.some((f) => company.toLowerCase().includes(f.toLowerCase()));
+                const checked = checkedCompanies.includes(company);
                 return (
                   <label key={company} className="flex items-center gap-2 text-xs text-gray-700">
                     <Checkbox
                       checked={checked}
-                      onCheckedChange={(next) => {
-                        const nextFilters = next
-                          ? Array.from(new Set([...activeCompanyFilters, company.toLowerCase()]))
-                          : activeCompanyFilters.filter((f) => !company.toLowerCase().includes(f.toLowerCase()));
-                        if (nextFilters.length === 0) return; // never let it go empty
-                        settingsMutation.mutate(nextFilters);
-                      }}
+                      onCheckedChange={(next) => toggleCompany(company, next === true)}
                     />
                     {company}
                   </label>

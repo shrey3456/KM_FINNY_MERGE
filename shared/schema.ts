@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, jsonb, customType } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, uniqueIndex, index, jsonb, customType } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1736,3 +1736,95 @@ export const stockMovements = pgTable("stock_movements", {
 
 export type ProductPlantStock = typeof productPlantStock.$inferSelect;
 export type StockMovement = typeof stockMovements.$inferSelect;
+
+// ============================================================================
+// STOCK (NEW) — plant-wise stock lines and the day-by-day book (server/lib/stockV2.ts).
+// Also created at server start by server/lib/stockV2Schema.ts (CREATE ... IF NOT EXISTS), so either
+// db:generate + db:migrate or just starting the server gives the same tables.
+// ============================================================================
+
+// One row = one item at one plant: name + barcode + the state's SAP code. Details are copied from the
+// Product Master by barcode when the line is made. stock_qty is the single total Loading draws from.
+export const stockV2Lines = pgTable("stock_v2_lines", {
+  id: serial("id").primaryKey(),
+  plant: text("plant").notNull(),
+  state: text("state"),
+  barcode: text("barcode").notNull(),
+  itemName: text("item_name").notNull(),
+  sapCode: text("sap_code"),
+  sapIsFallback: boolean("sap_is_fallback").notNull().default(false),
+  srNo: text("sr_no"),
+  brand: text("brand"),
+  category: text("category"),
+  hsnCode: text("hsn_code"),
+  palletSize: integer("pallet_size"),
+  productId: integer("product_id"),
+  stockQty: integer("stock_qty").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("stock_v2_lines_identity").on(sql`LOWER(${t.plant})`, sql`LOWER(${t.barcode})`, sql`LOWER(${t.itemName})`, sql`LOWER(COALESCE(${t.sapCode}, ''))`),
+  index("stock_v2_lines_barcode").on(sql`LOWER(${t.barcode})`, sql`LOWER(${t.plant})`),
+]);
+
+// One row per day + line. Purchase and Sale already contain their Extra; the extra_* columns only say how
+// much of it was extra. Opening / Closing are never stored.
+export const stockV2Daily = pgTable("stock_v2_daily", {
+  id: serial("id").primaryKey(),
+  stockDate: date("stock_date", { mode: "string" }).notNull(),
+  lineId: integer("line_id").notNull().references(() => stockV2Lines.id, { onDelete: "cascade" }),
+  purchaseQty: integer("purchase_qty").notNull().default(0),
+  extraPurchaseQty: integer("extra_purchase_qty").notNull().default(0),
+  saleQty: integer("sale_qty").notNull().default(0),
+  extraSaleQty: integer("extra_sale_qty").notNull().default(0),
+  transferInQty: integer("transfer_in_qty").notNull().default(0),
+  transferOutQty: integer("transfer_out_qty").notNull().default(0),
+}, (t) => [
+  unique().on(t.stockDate, t.lineId),
+  index("stock_v2_daily_line").on(t.lineId, t.stockDate),
+]);
+
+// Corrections (Adjust, Opening, Clear, Exchange, void credits) — one row each.
+export const stockV2Ledger = pgTable("stock_v2_ledger", {
+  id: serial("id").primaryKey(),
+  lineId: integer("line_id").notNull().references(() => stockV2Lines.id, { onDelete: "cascade" }),
+  stockDate: date("stock_date", { mode: "string" }).notNull(),
+  kind: text("kind").notNull(),
+  qty: integer("qty").notNull(),
+  extraQty: integer("extra_qty").notNull().default(0),
+  source: text("source"),
+  sourceRef: integer("source_ref"),
+  origin: text("origin"),
+  reason: text("reason"),
+  createdByCode: text("created_by_code"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("stock_v2_ledger_line").on(t.lineId, t.stockDate),
+]);
+
+// A CSV / unloading batch / slip line pointing at its stock line, made when it is activated.
+// kind: 'order_session' | 'unload_session' | 'slip'; ref_key: lower-cased "sessionId|barcode|plant".
+export const stockV2Links = pgTable("stock_v2_links", {
+  id: serial("id").primaryKey(),
+  kind: text("kind").notNull(),
+  refKey: text("ref_key").notNull(),
+  lineId: integer("line_id").notNull().references(() => stockV2Lines.id, { onDelete: "cascade" }),
+  purchaseLineId: integer("purchase_line_id").references(() => stockV2Lines.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  unique().on(t.kind, t.refKey),
+]);
+
+// Single row (id = 1): the Loading stock source switch and the fresh-start opening window.
+export const stockV2Config = pgTable("stock_v2_config", {
+  id: integer("id").primaryKey().default(1),
+  loadingUsesV2: boolean("loading_uses_v2").notNull().default(false),
+  lastRebuildAt: timestamp("last_rebuild_at"),
+  lastRebuildBy: text("last_rebuild_by"),
+  openingOpen: boolean("opening_open").notNull().default(false),
+  openingDate: date("opening_date", { mode: "string" }),
+});
+
+export type StockV2Line = typeof stockV2Lines.$inferSelect;
+export type StockV2Daily = typeof stockV2Daily.$inferSelect;
+export type StockV2LedgerRow = typeof stockV2Ledger.$inferSelect;
