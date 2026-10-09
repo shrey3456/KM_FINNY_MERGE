@@ -453,7 +453,15 @@ async function diffOrder(orderData: OrderData): Promise<OrderDiff> {
   };
 }
 
-export async function detectProformaChanges(startDate: string, endDate: string, triggeredBy: string): Promise<SyncReport> {
+// existingOnly: skip orders that have no slip in the DB yet, so only slips already in Proforma
+// are refreshed from Notion (used by the 5-hour scheduler). New orders are neither counted nor
+// kept pending.
+export async function detectProformaChanges(
+  startDate: string,
+  endDate: string,
+  triggeredBy: string,
+  options: { existingOnly?: boolean } = {},
+): Promise<SyncReport> {
   if (isSyncing) throw new Error('A sync is already in progress — please wait');
   isSyncing = true;
   try {
@@ -465,6 +473,10 @@ export async function detectProformaChanges(startDate: string, endDate: string, 
 
     for (const [, orderData] of Array.from(ordersMap.entries())) {
       const diff = await diffOrder(orderData);
+      if (diff.isNew && options.existingOnly) {
+        ordersMap.delete(orderData.orderNumber);
+        continue;
+      }
       if (diff.isNew) {
         newCount++;
         diffs.push(diff);
@@ -577,4 +589,61 @@ export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string): 
      ON CONFLICT (id) DO UPDATE SET auto_apply_enabled = EXCLUDED.auto_apply_enabled, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
     [enabled, updatedBy],
   );
+}
+
+
+// ─── Scheduled refresh of the latest day's existing slips (Order DB only) ─────
+// Used by the 5-hour scheduler. Finds the most recent order date that already has slips in
+// Proforma and, for that date only, re-reads the Notion ORDER database (Plant / Finny Status /
+// Proforma Qty) and updates those existing slips. It never touches the dispatch DB, never
+// creates slips, never looks at earlier dates, and does not go through the pending-review state.
+export async function syncLatestDateFromOrderDb(): Promise<{ date: string | null; checked: number; updated: number }> {
+  const { rows } = await pool.query(`SELECT to_char(MAX(order_date), 'YYYY-MM-DD') AS d FROM proforma_slips`);
+  const date: string | null = rows[0]?.d ?? null;
+  if (!date) return { date: null, checked: 0, updated: 0 };
+
+  const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+  if (!ORDER_DATABASE_ID) throw new Error('ORDER_DATABASE_ID environment variable is not set');
+  const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
+
+  let checked = 0;
+  let updated = 0;
+  let cursor: string | undefined = undefined;
+  let hasMore = true;
+  while (hasMore) {
+    const res: any = await notion.databases.query({
+      database_id: ORDER_DATABASE_ID,
+      page_size: 100,
+      start_cursor: cursor,
+      filter: {
+        and: [
+          { property: 'Ord Date :', date: { on_or_after: date } },
+          { property: 'Ord Date :', date: { on_or_before: date } },
+        ],
+      },
+    });
+    for (const page of res.results) {
+      if (!('properties' in page)) continue;
+      const props = page.properties;
+      const orderNumber = extractText(props['Order No. :']);
+      if (!orderNumber) continue;
+      const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+      if (!slip) continue; // existing slips only
+      checked++;
+      const plant = extractText(props['Stk Plant :']) || slip.plant;
+      const status = extractText(props['Finny Status :']) || null;
+      const qty = props['Proforma Qty :']?.rollup?.number ?? props['For Qty :']?.formula?.number ?? undefined;
+      const changes: Partial<InsertProformaSlip> = {};
+      if (plant && plant !== slip.plant) changes.plant = plant;
+      if (status && status !== slip.notionStatus) changes.notionStatus = status;
+      if (qty !== undefined && qty !== slip.totalQuantity) changes.totalQuantity = qty;
+      if (Object.keys(changes).length > 0) {
+        await storage.updateProformaSlip(slip.id, changes);
+        updated++;
+      }
+    }
+    hasMore = res.has_more;
+    cursor = res.next_cursor ?? undefined;
+  }
+  return { date, checked, updated };
 }

@@ -8303,34 +8303,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // on the Proforma Slips page calls manually (server/services/proformaNotionSync.ts), so a
   // scheduled run and a manual one behave identically and share the same pending-review state.
   if (process.env.NOTION_PAGE_URL && process.env.ORDER_DATABASE_ID) {
-    const { detectProformaChanges, applyPendingProformaChanges, getAutoApplyEnabled: getProformaAutoApplyEnabled } =
-      await import('./services/proformaNotionSync');
+    const { syncLatestDateFromOrderDb } = await import('./services/proformaNotionSync');
     const PROFORMA_SYNC_INTERVAL_MS = 5 * 60 * 60 * 1000;
-    // Local calendar date (not UTC) -- in India (UTC+5:30) toISOString() would still read
-    // yesterday until 5:30am, same reasoning as the manual dialog's date default.
-    const todayLocalDate = (): string => {
-      const now = new Date();
-      const y = now.getFullYear();
-      const m = String(now.getMonth() + 1).padStart(2, '0');
-      const d = String(now.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    };
+    // Refreshes only the latest order date's existing slips from the Notion Order DB.
     const runScheduledProformaSync = async () => {
       try {
-        const today = todayLocalDate();
-        const autoApplyEnabled = await getProformaAutoApplyEnabled();
-        console.log(`[Proforma Sync] Running scheduled detect${autoApplyEnabled ? ' + apply' : ' (auto-apply is off — review required)'} for ${today}...`);
-        const detectReport = await detectProformaChanges(today, today, 'system');
-        const hasChanges = detectReport.newCount + detectReport.changedCount > 0;
-        if (hasChanges && autoApplyEnabled) {
-          console.log(`[Proforma Sync] ${detectReport.newCount} new, ${detectReport.changedCount} changed — applying now...`);
-          await applyPendingProformaChanges();
-          console.log('[Proforma Sync] Auto-apply complete.');
-        } else if (hasChanges) {
-          console.log(`[Proforma Sync] ${detectReport.newCount} new, ${detectReport.changedCount} changed — left pending for review (auto-apply is off).`);
-        } else {
-          console.log('[Proforma Sync] No changes found, nothing to apply.');
-        }
+        const r = await syncLatestDateFromOrderDb();
+        console.log(r.date
+          ? `[Proforma Sync] ${r.date}: checked ${r.checked} existing slip(s), updated ${r.updated}.`
+          : '[Proforma Sync] No slips yet, nothing to sync.');
       } catch (err) {
         console.error('[Proforma Sync] Scheduled sync failed:', err);
       }
