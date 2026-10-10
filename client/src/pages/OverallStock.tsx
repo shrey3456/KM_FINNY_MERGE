@@ -266,68 +266,185 @@ function buildUrl(base: string, params: Record<string, string | number | undefin
   return q ? `${base}?${q}` : base;
 }
 
-function downloadCsv(filename: string, rows: Array<Array<string | number>>) {
-  const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+// ─── Export (CSV / Excel / PDF) ──────────────────────────────────────────────
+// One column list drives all three formats. CSV and Excel keep every column (a spreadsheet has no width limit,
+// so each quantity has its own Qty and Pallets columns); the PDF is one compact A3 table where each quantity is
+// a single cell — the number with its pallets (and, for Purchase, its extra) underneath — and a few columns
+// (HSN, System, Last Updated) are left out. The merged report (All plants / a State) is one row per product, plants
+// added together; the plant-wise breakdown that follows it is one row per product per plant.
+type ExportCell = string | number;
+type ExportColumn = {
+  csvHead: string[];                       // heading(s) in CSV / Excel
+  pdfHead: string | null;                  // heading in the PDF; null = not in the PDF
+  pdfWidth: number;                        // mm on A3 landscape
+  text?: (r: PlantStockRow) => string;     // a text column
+  qty?: (r: PlantStockRow) => number | null | undefined; // a quantity column
+  plt?: (r: PlantStockRow) => number | null | undefined; // its pallets (shown under the quantity in the PDF)
+  extra?: (r: PlantStockRow) => number | null | undefined; // Purchase only: the extra included in it (PDF note)
+  signed?: boolean;                        // show + for positive (Adjust)
+};
+const pltNum = (v: number | null | undefined) => (v != null ? Number(v.toFixed(2)) : "");
+const purchaseOf = (r: PlantStockRow) => r.inStock;
+const purchasePltOf = (r: PlantStockRow) => {
+  const ipp = r.itemsPerPallet ? Number(r.itemsPerPallet) : 0;
+  return ipp > 0 ? r.inStock / ipp : null;
+};
+const totalStockOf = (r: PlantStockRow) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0);
+const plantsOf = (r: PlantStockRow) => (r.combinedPlants && r.combinedPlants.length > 1 ? r.combinedPlants.join(", ") : r.plant);
+const EXPORT_COLUMNS: ExportColumn[] = [
+  { csvHead: ["Sr No"], pdfHead: "Sr", pdfWidth: 11, text: (r) => r.srNo ?? "" },
+  { csvHead: ["Item"], pdfHead: "Item", pdfWidth: 60, text: (r) => r.itemName },
+  { csvHead: ["Barcode"], pdfHead: "Barcode", pdfWidth: 30, text: (r) => r.barcode ?? "" },
+  { csvHead: ["SAP Code"], pdfHead: "SAP", pdfWidth: 18, text: (r) => r.sapCode ?? "" },
+  { csvHead: ["HSN Code"], pdfHead: null, pdfWidth: 0, text: (r) => r.hsnCode ?? "" },
+  { csvHead: ["Category"], pdfHead: "Category", pdfWidth: 24, text: (r) => r.category ?? "" },
+  { csvHead: ["Brand"], pdfHead: "Brand", pdfWidth: 22, text: (r) => r.brand ?? "" },
+  { csvHead: ["Plant"], pdfHead: "Plant", pdfWidth: 26, text: plantsOf },
+  { csvHead: ["Expected Purchase Qty", "Expected Purchase Pallets"], pdfHead: "Expected\nPurchase", pdfWidth: 20, qty: (r) => r.expectedQty, plt: (r) => r.expectedPallets },
+  { csvHead: ["Opening Qty", "Opening Pallets"], pdfHead: "Opening", pdfWidth: 19, qty: (r) => r.openingStock, plt: (r) => r.openingPallets },
+  { csvHead: ["Purchase Qty", "Purchase Pallets"], pdfHead: "Purchase", pdfWidth: 21, qty: purchaseOf, plt: purchasePltOf, extra: (r) => r.extraQty },
+  { csvHead: ["Extra Qty (within Purchase)", "Extra Pallets"], pdfHead: null, pdfWidth: 0, qty: (r) => r.extraQty, plt: (r) => r.extraPallets },
+  { csvHead: ["Adjust Qty"], pdfHead: "Adjust", pdfWidth: 16, qty: (r) => r.adjustQty ?? 0, signed: true },
+  { csvHead: ["Total Stock (Opening + Purchase + Adjust)"], pdfHead: "Total\nStock", pdfWidth: 17, qty: totalStockOf },
+  { csvHead: ["System (Clear Stock)"], pdfHead: null, pdfWidth: 0, qty: (r) => r.systemQty ?? 0 },
+  { csvHead: ["Expected Sale Qty", "Expected Sale Pallets"], pdfHead: "Expected\nSale", pdfWidth: 19, qty: (r) => r.expectedSaleQty, plt: (r) => r.expectedSalePallets },
+  { csvHead: ["Sale Qty (loaded)", "Sale Pallets"], pdfHead: "Sale\n(loaded)", pdfWidth: 19, qty: (r) => r.saleQty, plt: (r) => r.salePallets },
+  { csvHead: ["Closing Qty", "Closing Pallets"], pdfHead: "Closing", pdfWidth: 19, qty: (r) => r.closingStock, plt: (r) => r.closingPallets },
+  { csvHead: ["Last Updated"], pdfHead: null, pdfWidth: 0, text: (r) => (r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "") },
+];
+
+function sumOf(rows: PlantStockRow[], get: (r: PlantStockRow) => number | null | undefined): number | null {
+  let any = false;
+  let total = 0;
+  for (const r of rows) { const v = get(r); if (v != null) { any = true; total += Number(v); } }
+  return any ? total : null;
+}
+
+// The table as rows of cells — heading row, one row per item, then a Total row.
+function csvTable(rows: PlantStockRow[]): ExportCell[][] {
+  const head = EXPORT_COLUMNS.flatMap((c) => c.csvHead);
+  const body = rows.map((r) => EXPORT_COLUMNS.flatMap((c): ExportCell[] => {
+    if (c.text) return [c.text(r)];
+    const q = c.qty!(r);
+    return c.plt ? [q ?? "", pltNum(c.plt(r))] : [q ?? ""];
+  }));
+  const total = EXPORT_COLUMNS.flatMap((c, i): ExportCell[] => {
+    if (c.text) return [i === 1 ? `Total (${rows.length} items)` : ""];
+    const q = sumOf(rows, c.qty!);
+    if (!c.plt) return [q ?? ""];
+    const p = sumOf(rows, c.plt);
+    return [q ?? "", p != null ? Number(p.toFixed(2)) : ""];
+  });
+  return [head, ...body, total];
+}
+
+function pdfTable(rows: PlantStockRow[]): { head: string[]; body: string[][]; widths: number[]; numeric: boolean[] } {
+  const cols = EXPORT_COLUMNS.filter((c) => c.pdfHead);
+  const fmtQty = (v: number | null | undefined, signed?: boolean) => (v == null ? "" : `${signed && v > 0 ? "+" : ""}${v.toLocaleString()}`);
+  const cell = (c: ExportColumn, r: PlantStockRow) => {
+    if (c.text) return c.text(r);
+    const q = c.qty!(r);
+    if (q == null) return "";
+    const plt = c.plt?.(r);
+    const extra = c.extra?.(r);
+    return fmtQty(q, c.signed) + (plt != null && plt > 0 ? `\n${plt.toFixed(2)} plt` : "") + (extra != null && extra > 0 ? `\n+${extra.toLocaleString()} extra` : "");
+  };
+  const body = rows.map((r) => cols.map((c) => cell(c, r)));
+  body.push(cols.map((c, i) => {
+    if (c.text) return i === 1 ? `Total (${rows.length} items)` : "";
+    const q = sumOf(rows, c.qty!);
+    const p = c.plt ? sumOf(rows, c.plt) : null;
+    return q == null ? "" : fmtQty(q, c.signed) + (p != null && p > 0 ? `\n${p.toFixed(2)} plt` : "");
+  }));
+  return { head: cols.map((c) => c.pdfHead!), body, widths: cols.map((c) => c.pdfWidth), numeric: cols.map((c) => !c.text) };
+}
+
+type ExportSection = { title: string; rows: PlantStockRow[] };
+
+function downloadCsv(filename: string, sections: ExportSection[]) {
+  const lines: string[] = [];
+  sections.forEach((s, i) => {
+    if (i > 0) lines.push("");
+    if (sections.length > 1) lines.push(`"${s.title}"`);
+    for (const r of csvTable(s.rows)) lines.push(r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","));
+  });
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.href = URL.createObjectURL(new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" }));
   a.download = filename; a.click();
 }
 
-function downloadExcel(filename: string, rows: Array<Array<string | number>>) {
-  const sheet = XLSX.utils.aoa_to_sheet(rows);
-  const book  = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(book, sheet, "Overall Stock");
+function downloadExcel(filename: string, sections: ExportSection[]) {
+  const book = XLSX.utils.book_new();
+  sections.forEach((s, i) => {
+    const aoa = csvTable(s.rows);
+    const sheet = XLSX.utils.aoa_to_sheet(aoa);
+    // Column widths from the longest cell (capped), and a filter on the heading row.
+    sheet["!cols"] = aoa[0].map((_, ci) => ({ wch: Math.min(48, Math.max(10, ...aoa.map((row) => String(row[ci] ?? "").length)) + 2) }));
+    sheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: aoa.length - 2, c: aoa[0].length - 1 } }) };
+    XLSX.utils.book_append_sheet(book, sheet, (sections.length > 1 ? (i === 0 ? "Merged" : "Plant-wise") : "Overall Stock").slice(0, 31));
+  });
   XLSX.writeFile(book, filename);
 }
 
-// Business-report layout: a branded header band (title + scope/filter line + generated-on/row
-// count), a bordered grid table with zebra striping and right-aligned numeric columns, and a
-// footer with page numbers — instead of a bare title + default-styled table.
-function downloadPdf(
-  filename: string,
-  rows: Array<Array<string | number>>,
-  meta: { title: string; scope: string },
-) {
-  const doc = new jsPDF({ orientation: "landscape" });
+// Business-report layout: a branded header band (title + scope line + generated-on), then each section as a
+// bordered grid table with zebra striping, right-aligned quantities and a Total row; page numbers in the footer.
+function downloadPdf(filename: string, sections: ExportSection[], meta: { title: string; scope: string }) {
+  const doc = new jsPDF({ orientation: "landscape", format: "a3" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 14;
 
-  // ── Header band ──
-  doc.setFillColor(0, 29, 110); // brand navy — matches the app's header treatment
-  doc.rect(0, 0, pageWidth, 24, "F");
-  doc.setTextColor(255, 255, 255);
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(15);
-  doc.text(meta.title, margin, 14);
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(9);
-  doc.text(meta.scope, margin, 20);
+  const band = () => {
+    doc.setFillColor(0, 29, 110);
+    doc.rect(0, 0, pageWidth, 24, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(15);
+    doc.text(meta.title, margin, 14);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text(meta.scope, margin, 20);
+    doc.setFontSize(8);
+    doc.text(`Generated ${format(new Date(), "MMM d, yyyy 'at' h:mm a")}`, pageWidth - margin, 17, { align: "right" });
+    doc.setTextColor(0, 0, 0);
+  };
 
-  doc.setFontSize(8);
-  doc.text(`Generated ${format(new Date(), "MMM d, yyyy 'at' h:mm a")}`, pageWidth - margin, 17, { align: "right" });
-  doc.setTextColor(0, 0, 0);
-
-  const [header, ...body] = rows;
-  // Right-align every numeric/quantity column — matches exportRows' header order: #, Item,
-  // Barcode, SAP Code, HSN Code, Category, Brand, Plant (indices 0-7, "#" excepted), then every
-  // quantity column from index 8 onward (Expected/Opening/Purchase/Extra/Expected Sale/Sale/Closing) through to the end.
-  const columnStyles: Record<number, { halign: "right" }> = { 0: { halign: "right" } };
-  for (let i = 8; i < header.length; i++) columnStyles[i] = { halign: "right" };
-
-  autoTable(doc, {
-    head: [header as string[]],
-    body: body as string[][],
-    startY: 30,
-    theme: "grid",
-    styles: { fontSize: 7, cellPadding: 2.2, lineColor: [210, 210, 210], lineWidth: 0.15 },
-    headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold", halign: "left" },
-    alternateRowStyles: { fillColor: [245, 247, 251] },
-    columnStyles,
-    margin: { left: margin, right: margin },
+  sections.forEach((s, si) => {
+    if (si > 0) doc.addPage();
+    if (si === 0) band();
+    const startY = si === 0 ? 30 : 18;
+    if (sections.length > 1) {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(11);
+      doc.setTextColor(0, 29, 110);
+      doc.text(s.title, margin, startY - 3);
+      doc.setTextColor(0, 0, 0);
+    }
+    const t = pdfTable(s.rows);
+    const columnStyles: Record<number, { halign?: "right" | "left"; cellWidth: number }> = {};
+    t.widths.forEach((w, i) => { columnStyles[i] = { cellWidth: w, ...(t.numeric[i] ? { halign: "right" as const } : {}) }; });
+    autoTable(doc, {
+      head: [t.head],
+      body: t.body,
+      startY,
+      theme: "grid",
+      tableWidth: "wrap",
+      styles: { fontSize: 7.5, cellPadding: 1.8, lineColor: [210, 210, 210], lineWidth: 0.15, overflow: "linebreak", valign: "middle" },
+      headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold", halign: "center", valign: "middle" },
+      alternateRowStyles: { fillColor: [245, 247, 251] },
+      columnStyles,
+      margin: { left: margin, right: margin },
+      showHead: "everyPage",
+      // The Total row (last body row) stands out.
+      didParseCell: (d) => {
+        if (d.section === "body" && d.row.index === t.body.length - 1) {
+          d.cell.styles.fontStyle = "bold";
+          d.cell.styles.fillColor = [225, 231, 245];
+        }
+      },
+    });
   });
 
-  // ── Footer: page numbers + brand, on every page ──
   const pageCount = doc.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i);
@@ -336,10 +453,8 @@ function downloadPdf(
     doc.text("KM Finny — Confidential", margin, pageHeight - 8);
     doc.text(`Page ${i} of ${pageCount}`, pageWidth - margin, pageHeight - 8, { align: "right" });
   }
-
   doc.save(filename);
 }
-
 
 const PAGE_SIZE = 20;
 
@@ -1326,39 +1441,20 @@ export default function OverallStock() {
     }
   }, [search, activeFilters, columnConditions]);
 
-  // Export rows — same order as the table's own columns.
-  const exportRows = (src: PlantStockRow[]): Array<Array<string | number>> => [
-    [
-      "Sr No", "Item", "Barcode", "SAP Code", "HSN Code", "Category", "Brand", "Plant",
-      "Expected Qty", "Expected Pallets",
-      "Opening Stock", "Opening Pallets",
-      "Purchase Qty", "Purchase Pallets", "Extra Qty (within Purchase)", "Extra Pallets",
-      "Adjust Qty", "Total Stock (Opening + Purchase + Adjust)", "System (Clear Stock)",
-      "Expected Sale Qty", "Expected Sale Pallets",
-      "Sale Qty (loaded)", "Sale Pallets",
-      "Closing Stock", "Closing Pallets",
-      "Last Updated",
-    ],
-    ...src.map((r) => {
-      // inStock already IS the full physical purchase (extras included) — never add extraQty.
-      const purchaseQty = r.inStock;
-      const ipp = r.itemsPerPallet ? Number(r.itemsPerPallet) : 0;
-      const purchasePallets = ipp > 0 ? purchaseQty / ipp : null;
-      const plt = (v: number | null | undefined) => (v != null ? v.toFixed(2) : "");
-      return [
-        r.srNo ?? "", r.itemName, r.barcode ?? "", r.sapCode ?? "", r.hsnCode ?? "",
-        r.category ?? "", r.brand ?? "", r.plant,
-        r.expectedQty ?? "", plt(r.expectedPallets),
-        r.openingStock ?? "", plt(r.openingPallets),
-        purchaseQty, plt(purchasePallets), r.extraQty, plt(r.extraPallets),
-        r.adjustQty ?? 0, (r.openingStock ?? 0) + purchaseQty + (r.adjustQty ?? 0), r.systemQty ?? 0,
-        r.expectedSaleQty ?? "", plt(r.expectedSalePallets),
-        r.saleQty ?? "", plt(r.salePallets),
-        r.closingStock ?? "", plt(r.closingPallets),
-        r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "",
-      ];
-    }),
-  ];
+  // What the Export menu writes. With All plants or a State picked: the merged report (one row per product,
+  // plants added together — what the table shows) followed by the plant-wise breakdown (one row per product per
+  // plant). With one plant picked: just that plant's rows.
+  const exportSections = (): ExportSection[] => {
+    const plantRows = filtered.filter((r) => !r.isEmptyBox);
+    if (!isMergedView) return [{ title: `Stock — ${activePlant}`, rows: plantRows }];
+    const merged = groupedByState.filter((r) => !r.isEmptyBox);
+    const breakdown = [...plantRows].sort((x, y) => (x.itemName || "").localeCompare(y.itemName || "") || (x.plant || "").localeCompare(y.plant || ""));
+    const scope = activeState || "All plants";
+    return [
+      { title: `Merged report — ${scope} (one row per product, plants added together)`, rows: merged },
+      { title: `Plant-wise breakdown — ${scope} (one row per product per plant)`, rows: breakdown },
+    ];
+  };
 
   const dash = <span className="text-gray-300">—</span>;
   // Crisper grid lines (was border-gray-100) — a typical business/report table reads as an
@@ -2751,15 +2847,15 @@ export default function OverallStock() {
                       <DropdownMenuItem
                         key={fmt}
                         onSelect={() => {
-                          const exp = exportRows(filtered);
-                          const suffix = `${activePlant ? "-" + activePlant : activeState ? "-" + activeState : ""}-${format(new Date(), "yyyy-MM-dd")}`;
-                          if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, exp);
-                          if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, exp);
+                          const sections = exportSections();
+                          const suffix = `${activePlant ? "-" + activePlant : activeState ? "-" + activeState + "-merged" : "-all-merged"}-${format(new Date(), "yyyy-MM-dd")}`;
+                          if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, sections);
+                          if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, sections);
                           if (fmt === "PDF") {
                             const plantScope = activePlant
                               || (activeState ? `${activeState} (${activeStateGroup?.plants.map((p) => p.name).join(", ") ?? activeState})` : "")
                               || (allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants");
-                            downloadPdf(`overall-stock${suffix}.pdf`, exp, { title: "Stock Overview Report", scope: plantScope });
+                            downloadPdf(`overall-stock${suffix}.pdf`, sections, { title: "Stock Overview Report", scope: plantScope });
                           }
                         }}
                       >
