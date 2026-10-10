@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, jsonb, customType } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, date, real, unique, index, jsonb, customType } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1731,3 +1731,42 @@ export const stockMovements = pgTable("stock_movements", {
 
 export type ProductPlantStock = typeof productPlantStock.$inferSelect;
 export type StockMovement = typeof stockMovements.$inferSelect;
+
+// ============================================================================
+// MANUAL SALES — a day's sales uploaded from a CSV (Settings > Data Management) for dates with no load
+// operation. Stock comes off the plant's whole state pool like a Loading scan; manual_sale_pulls keeps what
+// each plant gave so a reversal returns it there. Also created at server start by server/index.ts.
+// ============================================================================
+export const manualSaleBatches = pgTable("manual_sale_batches", {
+  id: serial("id").primaryKey(),
+  saleDate: date("sale_date", { mode: "string" }).notNull(),
+  plant: text("plant").notNull(),
+  csvFileName: text("csv_file_name"),
+  rowCount: integer("row_count").notNull().default(0),
+  totalQty: integer("total_qty").notNull().default(0),
+  status: text("status").notNull().default("active"), // 'active' | 'reversed'
+  createdByCode: text("created_by_code"),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  reversedAt: timestamp("reversed_at"),
+  reversedByCode: text("reversed_by_code"),
+});
+
+export const manualSaleRows = pgTable("manual_sale_rows", {
+  id: serial("id").primaryKey(),
+  batchId: integer("batch_id").notNull().references(() => manualSaleBatches.id, { onDelete: "cascade" }),
+  barcode: text("barcode").notNull(),
+  itemName: text("item_name"),
+  productId: integer("product_id"),
+  qty: integer("qty").notNull(),
+  nameDiffers: boolean("name_differs").notNull().default(false),
+}, (t) => [index("manual_sale_rows_batch").on(t.batchId)]);
+
+export const manualSalePulls = pgTable("manual_sale_pulls", {
+  id: serial("id").primaryKey(),
+  rowId: integer("row_id").notNull().references(() => manualSaleRows.id, { onDelete: "cascade" }),
+  sourcePlant: text("source_plant").notNull(),
+  qty: integer("qty").notNull(),
+}, (t) => [index("manual_sale_pulls_row").on(t.rowId)]);
+
+export type ManualSaleBatch = typeof manualSaleBatches.$inferSelect;

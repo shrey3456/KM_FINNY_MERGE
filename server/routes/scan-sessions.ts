@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { ensureManualSalesTables } from '../lib/manualSalesSchema';
 import { format } from 'date-fns';
 import { db, pool } from '../db';
 import {
@@ -1669,6 +1670,7 @@ router.get('/reports/stock-adjustments', async (req: Request, res: Response) => 
 // boxes, extras included) AND extraQty (the over-order portion, shown separately).
 router.get('/reports/plant-stock', async (req: Request, res: Response) => {
   try {
+    await ensureManualSalesTables(); // Sale reads manual_sale_* — never run the report before they exist
     const allowed = getUserPlants(req.user); // null = admin (all plants)
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
     const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
@@ -1810,6 +1812,14 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         LEFT JOIN proforma_slips ps ON ps.order_number = lse.order_number
         LEFT JOIN loading_stock_pulls sp ON sp.loading_scan_event_id = lse.id
         WHERE lse.voided IS NOT TRUE AND lse.barcode IS NOT NULL AND lse.plant IS NOT NULL
+        -- Manual Sales (Settings > Data Management): sales added by CSV for a day, taken from the plant(s) in
+        -- manual_sale_pulls and dated the batch's sale date. A reversed batch drops out of Sale again.
+        UNION ALL
+        SELECT mr.barcode, mp.source_plant AS plant, mp.qty AS total_qty, mb.sale_date AS d
+        FROM manual_sale_pulls mp
+        JOIN manual_sale_rows mr ON mr.id = mp.row_id
+        JOIN manual_sale_batches mb ON mb.id = mr.batch_id
+        WHERE mb.status = 'active'
       ),
       sales AS (
         SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,

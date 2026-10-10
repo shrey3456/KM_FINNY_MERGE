@@ -35,6 +35,7 @@ import * as XLSX from 'xlsx';
 import { apiRequest } from '@/lib/queryClient';
 import { SyncProgressDialog, type SyncProgress } from '@/components/SyncProgressDialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import ManualSalesCard from '@/components/settings/ManualSalesCard';
 import { hasPageWriteAccess } from '@/lib/permissions';
 import {
   AlertDialog,
@@ -1294,6 +1295,8 @@ const Settings = () => {
                         Import Opening Stock
                       </Button>
                     </div>
+
+                    <ManualSalesCard isAdmin={isAdminUser} />
 
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>

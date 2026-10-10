@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { pool } from "./db";
 import { tagStockMovementSources } from './lib/stockRecalc';
+import { ensureManualSalesSchema } from './lib/manualSalesSchema';
 
 
 const app = express();
@@ -67,6 +68,13 @@ app.use((req, res, next) => {
 
   // Initialize database and run migrations
   console.log('Initializing database...');
+
+  // Manual Sales tables — created here on every start (no `npm run db` step), before the long chain below.
+  try {
+    await ensureManualSalesSchema(pool);
+  } catch (error) {
+    console.error('Could not create the Manual Sales tables:', error);
+  }
 
   // Run migrations
   try {
