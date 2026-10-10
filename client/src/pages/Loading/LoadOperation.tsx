@@ -28,7 +28,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlantFilter } from "@/components/PlantFilter";
@@ -487,7 +487,7 @@ export default function LoadOperation() {
       setRecordsPage(1);
     }
   }, [recordsFilterSignature]);
-  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; slipsCount: number; loadingCount: number; readyDespCount: number }>({
+  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; totals?: { slips: number; qty: number; loadedQty: number; volume: number; loadedVolume: number }; slipsCount: number; loadingCount: number; readyDespCount: number }>({
     queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab, createdByMe],
     queryFn: async () => {
       const params = new URLSearchParams({ limit: String(recordsPageSize), offset: String(recordsOffset) });
@@ -597,6 +597,11 @@ export default function LoadOperation() {
       }
       return dir * (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     });
+
+  // Totals over the WHOLE list for the current filters (every page), computed by the server.
+  const listTotals = recordsQuery.data?.totals ?? { slips: 0, qty: 0, loadedQty: 0, volume: 0, loadedVolume: 0 };
+  const totalsLeftQty = Math.max(0, listTotals.qty - listTotals.loadedQty);
+  const totalsLeftVolume = Math.max(0, listTotals.volume - listTotals.loadedVolume);
 
   function refreshOwnerHistory(orderNumber: string | null | undefined) {
     if (!orderNumber) return;
@@ -3053,10 +3058,30 @@ export default function LoadOperation() {
                         );
                       })}
                     </TableBody>
+                    {listTotals.slips > 0 && (
+                      <TableFooter className="sticky bottom-0 z-10 bg-[#001d6e] text-white [&>tr]:border-0 hover:[&>tr]:bg-[#001d6e]">
+                        <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
+                          <TableCell colSpan={3} className="font-semibold">Total · {listTotals.slips.toLocaleString()} slip{listTotals.slips === 1 ? "" : "s"}</TableCell>
+                          <TableCell colSpan={6} className="text-right text-xs">
+                            Needed {listTotals.qty.toLocaleString()} · Loaded {listTotals.loadedQty.toLocaleString()} · Left {totalsLeftQty.toLocaleString()}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap tabular-nums font-semibold">{listTotals.loadedQty.toLocaleString()} / {listTotals.qty.toLocaleString()}</TableCell>
+                          <TableCell className="whitespace-nowrap tabular-nums font-semibold" title={`${totalsLeftVolume.toFixed(2)} left to load`}>{listTotals.loadedVolume.toFixed(2)} / {listTotals.volume.toFixed(2)}</TableCell>
+                          <TableCell colSpan={4} />
+                        </TableRow>
+                      </TableFooter>
+                    )}
                   </Table>
                 </div>
 
                 {/* Mobile View - card list */}
+                {listTotals.slips > 0 && (
+                  <div className={`rounded-md bg-[#001d6e] px-3 py-2 text-xs text-white ${bigView ? "" : "xl:hidden"}`}>
+                    <div className="font-semibold">Total · {listTotals.slips.toLocaleString()} slip{listTotals.slips === 1 ? "" : "s"}</div>
+                    <div className="mt-0.5 tabular-nums">Qty: needed {listTotals.qty.toLocaleString()} · loaded {listTotals.loadedQty.toLocaleString()} · left {totalsLeftQty.toLocaleString()}</div>
+                    <div className="tabular-nums">Volume: {listTotals.loadedVolume.toFixed(2)} / {listTotals.volume.toFixed(2)} · left {totalsLeftVolume.toFixed(2)}</div>
+                  </div>
+                )}
                 <div className={`grid grid-cols-1 gap-2 md:grid-cols-2 2xl:grid-cols-3 ${bigView ? "" : "xl:hidden"}`}>
                   {filteredRecords.map((r) => {
                     return (

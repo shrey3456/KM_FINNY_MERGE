@@ -36,6 +36,8 @@ import { apiRequest } from '@/lib/queryClient';
 import { SyncProgressDialog, type SyncProgress } from '@/components/SyncProgressDialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import ManualSalesCard from '@/components/settings/ManualSalesCard';
+import LoadingFromSalesCard from '@/components/settings/LoadingFromSalesCard';
+import OpeningStockEditorCard from '@/components/settings/OpeningStockEditorCard';
 import { hasPageWriteAccess } from '@/lib/permissions';
 import {
   AlertDialog,
@@ -794,6 +796,8 @@ const Settings = () => {
   // planned to take effect on a future date) land in the right place instead of always being
   // "as of today".
   const [osAsOfDate, setOsAsOfDate] = useState(osTodayLocalDateStr());
+  // 'add' = put the CSV's quantities on top (the original behaviour); 'set' = make each item's opening for this date equal to the CSV's quantity.
+  const [osMode, setOsMode] = useState<'add' | 'set'>('add');
   const [osFile, setOsFile] = useState<File | null>(null);
   const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; quantity: number }[] | null>(null);
   const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number } | null>(null);
@@ -810,7 +814,7 @@ const Settings = () => {
   const handleOpeningStockDialogOpenChange = (open: boolean) => {
     setShowOpeningStockDialog(open);
     if (!open) {
-      setOsPlant(''); setOsAsOfDate(osTodayLocalDateStr()); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
+      setOsPlant(''); setOsMode('add'); setOsAsOfDate(osTodayLocalDateStr()); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
       setShowOsMappingDialog(false); setOsCsvData(null);
     }
   };
@@ -885,8 +889,8 @@ const Settings = () => {
     if (!osPlant || !osRows) return;
     setOsImporting(true);
     try {
-      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows, asOfDate: osAsOfDate }, false, true);
-      toast({ title: 'Opening stock added', description: `${data.rowsSet} barcode(s) added to current stock and Opening Stock for ${osPlant}.` });
+      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows, asOfDate: osAsOfDate, mode: osMode }, false, true);
+      toast({ title: osMode === 'set' ? 'Opening stock set' : 'Opening stock added', description: osMode === 'set' ? `${data.rowsSet} barcode(s) now have the CSV's quantity as their Opening Stock for ${osPlant}.` : `${data.rowsSet} barcode(s) added to current stock and Opening Stock for ${osPlant}.` });
       queryClient.invalidateQueries({ queryKey: ['/api/products'] });
       queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
       handleOpeningStockDialogOpenChange(false);
@@ -1285,7 +1289,7 @@ const Settings = () => {
                     
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Opening Stock</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">Bulk-set a plant's baseline stock from a CSV (Barcode + Quantity) — overwrites whatever's currently there, admin only.</p>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">Import a plant's opening stock from a CSV (Barcode + Quantity) — it is added on top of the stock that is there, or, in "Set" mode, each item's opening becomes the CSV's quantity. Admin only. Use Edit Opening Stock below to change what was imported.</p>
                       <Button
                         variant="outline" size="sm"
                         onClick={() => setShowOpeningStockDialog(true)}
@@ -1296,7 +1300,11 @@ const Settings = () => {
                       </Button>
                     </div>
 
+                    <OpeningStockEditorCard isAdmin={isAdminUser} />
+
                     <ManualSalesCard isAdmin={isAdminUser} />
+
+                    <LoadingFromSalesCard isAdmin={isAdminUser} />
 
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>
@@ -2395,6 +2403,20 @@ const Settings = () => {
               <p className="text-xs text-gray-500">
                 The day this count was taken — Stock Overview will show it as Opening Stock for any period starting on or after this date.
               </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>What to do with the quantities</Label>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button type="button" onClick={() => setOsMode('add')}
+                  className={`rounded-md border px-2 py-1.5 text-left text-xs ${osMode === 'add' ? 'border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+                  <span className="font-semibold">Add on top</span><br />the CSV's quantities are added to the stock and to the opening
+                </button>
+                <button type="button" onClick={() => setOsMode('set')}
+                  className={`rounded-md border px-2 py-1.5 text-left text-xs ${osMode === 'set' ? 'border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+                  <span className="font-semibold">Set (replace)</span><br />each item's opening for this date becomes the CSV's quantity
+                </button>
+              </div>
             </div>
 
             <div className="space-y-2">

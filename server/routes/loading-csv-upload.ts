@@ -63,6 +63,9 @@ const MONTHS: Record<string, string> = {
 
 // "1-Oct-26" -> "2026-10-01"
 export function parseCsvDate(raw: string): string | null {
+  // 10/01/2026 (month/day/year, as the Sales Orders export writes Bill Date)
+  const sl = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(raw.trim());
+  if (sl) return `${sl[3]}-${sl[1].padStart(2, '0')}-${sl[2].padStart(2, '0')}`;
   const m = /^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/.exec(raw.trim());
   if (!m) return null;
   const mm = MONTHS[m[2].toLowerCase()];
@@ -140,22 +143,47 @@ router.post('/loading/csv-upload/preview', requireUploadAdmin, async (req: Reque
     const rows = parseCsv(csvText);
     type CsvLine = { date: string | null; orderNumber: string; party: string; sapCode: string | null; csvName: string; csvQty: number | null; unit: string };
     const lines: CsvLine[] = [];
-    for (const r of rows) {
-      if (!r[0] || !DATE_CELL.test(r[0].trim())) continue;
-      const item = parseItemCell(r[3] ?? '');
-      const qty = parseQtyCell(r[4] ?? '');
-      lines.push({
-        date: parseCsvDate(r[0]),
-        orderNumber: String(r[1] ?? '').trim(),
-        party: String(r[2] ?? '').trim(),
-        sapCode: item.sapCode,
-        csvName: item.name,
-        csvQty: qty.qty,
-        unit: qty.unit,
-      });
+    // Two layouts: the older one (Date, Order Number, Party, "SAP (name)", "60.0000 CAR") and the newer Sales Orders export
+    // ([Date,] Order No., Bill Date, Party Name, State, SAP, Product name, Qty) — recognised from the header row.
+    const norm2 = (v: string) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const headerIdx = rows.findIndex((r) => r.some((c) => norm2(c) === 'orderno') && r.some((c) => norm2(c) === 'sap'));
+    if (headerIdx >= 0) {
+      const h = rows[headerIdx].map(norm2);
+      const col = (...names: string[]) => h.findIndex((x) => names.includes(x));
+      const cOrder = col('orderno', 'ordernumber'), cDate = col('date', 'billdate'), cParty = h.findIndex((x) => x.startsWith('partyname')),
+        cSap = col('sap', 'sapcode'), cName = h.findIndex((x) => x.includes('products') || x.includes('itemname') || x === 'nameofitem'), cQty = col('qty', 'quantity');
+      for (const r of rows.slice(headerIdx + 1)) {
+        const orderNumber = String(r[cOrder] ?? '').trim();
+        if (!orderNumber || !/\d/.test(orderNumber)) continue;
+        const q = Number(String(r[cQty] ?? '').replace(/,/g, '').trim());
+        lines.push({
+          date: cDate >= 0 ? parseCsvDate(String(r[cDate] ?? '')) : null,
+          orderNumber,
+          party: cParty >= 0 ? String(r[cParty] ?? '').trim() : '',
+          sapCode: String(r[cSap] ?? '').trim() || null,
+          csvName: String(r[cName] ?? '').replace(/\s+/g, ' ').trim(),
+          csvQty: Number.isFinite(q) ? q : null,
+          unit: '',
+        });
+      }
+    } else {
+      for (const r of rows) {
+        if (!r[0] || !DATE_CELL.test(r[0].trim())) continue;
+        const item = parseItemCell(r[3] ?? '');
+        const qty = parseQtyCell(r[4] ?? '');
+        lines.push({
+          date: parseCsvDate(r[0]),
+          orderNumber: String(r[1] ?? '').trim(),
+          party: String(r[2] ?? '').trim(),
+          sapCode: item.sapCode,
+          csvName: item.name,
+          csvQty: qty.qty,
+          unit: qty.unit,
+        });
+      }
     }
     if (lines.length === 0) {
-      return res.status(400).json({ message: 'No order lines found. The file should have a Date column in the form 1-Oct-26.' });
+      return res.status(400).json({ message: 'No order lines found. The file needs an Order No. column and a SAP column (and a Date, e.g. 1-Oct-26).' });
     }
 
     // 2. Product Master, once.
@@ -242,12 +270,29 @@ router.post('/loading/csv-upload/preview', requireUploadAdmin, async (req: Reque
         } else {
           const candidates = l.sapCode ? (sapMap.get(norm(l.sapCode)) ?? []) : [];
           if (candidates.length !== 1) {
-            const suggestions = productRows
-              .map((p) => ({ id: p.id, barcode: String(p.barcode), name: String(p.name ?? ''), score: similarity(l.csvName, String(p.name ?? '')) }))
-              .filter((s) => s.score >= 0.3)
+            // Suggestions: a product whose BARCODE is written in the line (its SAP cell or its name) first, then this order's own
+            // slip lines that look like it (same SAP code or a similar name — the slip carries the barcode), then similar names.
+            const out: Array<{ id: number; barcode: string; name: string; score: number; reason: string }> = [];
+            const seen = new Set<number>();
+            const add = (p: ProductRow | undefined, score: number, reason: string) => {
+              if (!p || seen.has(p.id)) return; seen.add(p.id);
+              out.push({ id: p.id, barcode: String(p.barcode), name: String(p.name ?? ''), score: Math.round(score * 100) / 100, reason });
+            };
+            const byBarcodeNorm = new Map<string, ProductRow[]>();
+            for (const p of productRows) { const k = norm(p.barcode); const list = byBarcodeNorm.get(k) ?? []; list.push(p); byBarcodeNorm.set(k, list); }
+            const tokens = new Set<string>([...(String(l.csvName).match(/d{8,}/g) ?? []), ...(l.sapCode && l.sapCode.length >= 8 ? [l.sapCode] : [])]);
+            for (const t of tokens) for (const p of byBarcodeNorm.get(norm(t)) ?? []) add(p, 1, 'Barcode matches');
+            for (const it of slipItems) {
+              const sameSap = !!l.sapCode && norm(it.sap_code) === norm(l.sapCode);
+              const sim = similarity(l.csvName, String(it.item_name ?? ''));
+              if (sameSap || sim >= 0.3) for (const p of byBarcodeNorm.get(norm(it.barcode)) ?? []) add(p, sameSap ? 0.99 : sim, "On this order's slip");
+            }
+            for (const p of productRows
+              .map((p) => ({ p, score: similarity(l.csvName, String(p.name ?? '')) }))
+              .filter((x) => x.score >= 0.3)
               .sort((a, b) => b.score - a.score)
-              .slice(0, 5)
-              .map(({ id, barcode, name, score }) => ({ id, barcode, name, score: Math.round(score * 100) / 100 }));
+              .slice(0, 5)) add(p.p, p.score, 'Similar name');
+            const suggestions = out.slice(0, 8);
             return {
               ...base2,
               status: candidates.length === 0 ? 'unmatched' as const : 'ambiguous' as const,

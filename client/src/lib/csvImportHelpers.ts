@@ -51,24 +51,58 @@ function readFileAsGrid(file: File): Promise<string[][]> {
   });
 }
 
-// Picks the real header row (the one with the most filled cells in the first 15 — an export with a report title
-// above the headers would otherwise hand the title row over) and returns every later line keyed by header.
+const looksNumeric = (c: string) => /^[\d.,\s-]+$/.test(c.trim());
+const colLetter = (i: number) => { let n = i; let out = ""; do { out = String.fromCharCode(65 + (n % 26)) + out; n = Math.floor(n / 26) - 1; } while (n >= 0); return out; };
+
+// Finds the header and keys every later line by it. Built for real exports, which are not tidy:
+//  - the header row is the one with the most TEXT cells in the first 15 lines (a data row full of codes and numbers
+//    can have more filled cells than a header with blank cells at its edges, so cell count alone is not used);
+//  - a header cell left blank keeps its place and is named "Column A", "Column B"… — dropping it would shift every
+//    other column one to the left;
+//  - when the line right under the header holds only a few text cells (a "TOTAL SALES" title under a blank header
+//    cell, or "Number" under "Order"), they complete the header and that line is not data.
 export async function parseCsvRaw(file: File): Promise<{ name: string; headers: string[]; rows: Record<string, string>[] } | null> {
   const rawRows = await readFileAsGrid(file);
   if (rawRows.length === 0) return null;
   let headerRowIdx = 0;
-  let maxCols = 0;
+  let bestScore = -1;
   for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
-    const nonEmpty = rawRows[i].filter((c) => c.trim() !== "").length;
-    if (nonEmpty > maxCols) { maxCols = nonEmpty; headerRowIdx = i; }
+    const score = rawRows[i].filter((c) => c.trim() !== "" && !looksNumeric(c)).length;
+    if (score > bestScore) { bestScore = score; headerRowIdx = i; }
   }
-  const headers = rawRows[headerRowIdx].map((h) => cleanHeader(h)).filter((h) => h !== "");
-  if (headers.length === 0) return null;
-  const rows = rawRows.slice(headerRowIdx + 1).map((row) => {
-    const obj: Record<string, string> = {};
-    headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
-    return obj;
-  });
+  const headerRow = rawRows[headerRowIdx].map((h) => cleanHeader(h));
+  if (headerRow.every((h) => h === "")) return null;
+
+  let firstDataIdx = headerRowIdx + 1;
+  const next = rawRows[firstDataIdx];
+  if (next) {
+    const filled = next.map((c, i) => ({ c: cleanHeader(c), i })).filter((x) => x.c !== "");
+    const afterNext = rawRows[firstDataIdx + 1];
+    if (filled.length > 0 && filled.length <= 3 && afterNext
+      && filled.every((x) => !looksNumeric(x.c) && (afterNext[x.i] ?? "").trim() !== "")) {
+      // under a blank header cell the text is the header; under a filled one it is its second line ("Order" / "Number")
+      filled.forEach((x) => { headerRow[x.i] = ((headerRow[x.i] ?? "") + " " + x.c).trim(); });
+      firstDataIdx++;
+    }
+  }
+
+  const width = Math.max(headerRow.length, ...rawRows.slice(firstDataIdx, firstDataIdx + 200).map((r) => r.length));
+  const seen = new Map<string, number>();
+  const headers: string[] = [];
+  for (let i = 0; i < width; i++) {
+    let name = headerRow[i] ? headerRow[i] : "Column " + colLetter(i);
+    const n = (seen.get(name) ?? 0) + 1;
+    seen.set(name, n);
+    if (n > 1) name = name + " (" + n + ")";
+    headers.push(name);
+  }
+  const rows = rawRows.slice(firstDataIdx)
+    .filter((row) => row.some((c) => c.trim() !== ""))
+    .map((row) => {
+      const obj: Record<string, string> = {};
+      headers.forEach((h, i) => { obj[h] = row[i] ?? ""; });
+      return obj;
+    });
   return { name: file.name, headers, rows };
 }
 

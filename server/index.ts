@@ -4,6 +4,7 @@ import { setupVite, serveStatic, log } from "./vite";
 import { pool } from "./db";
 import { tagStockMovementSources } from './lib/stockRecalc';
 import { ensureManualSalesSchema } from './lib/manualSalesSchema';
+import { ensureLoadingSalesSchema } from './lib/loadingSalesSchema';
 
 
 const app = express();
@@ -74,6 +75,11 @@ app.use((req, res, next) => {
     await ensureManualSalesSchema(pool);
   } catch (error) {
     console.error('Could not create the Manual Sales tables:', error);
+  }
+  try {
+    await ensureLoadingSalesSchema(pool);
+  } catch (error) {
+    console.error('Could not create the Loading-from-sales-file tables:', error);
   }
 
   // Run migrations
@@ -491,8 +497,8 @@ app.use((req, res, next) => {
     // function Settings > Recalculate Stock runs.
     await tagStockMovementSources(pool);
     // loading_scan_events.is_adjust — marks the Loading Items table's +/- corrections ("Loading
-    // Adjust"). Older ones are found through the stock ledger row the same request wrote (same
-    // order, barcode, plant, opposite qty, within a few seconds); a negative qty is always one.
+    // Adjust"). Set when the correction is written (loading.ts). Rows from before this column existed are no longer
+    // back-filled at start-up: that scan was very slow on a large database (see git history of this file).
     await pool.query(`ALTER TABLE loading_scan_events ADD COLUMN IF NOT EXISTS is_adjust BOOLEAN DEFAULT false`);
     // proforma_slips.notion_store_keeper_push — which loads push StoreKeeper Info to Notion (see
     // shared/schema.ts). Defaults false, so every slip that exists today is left alone.
@@ -609,20 +615,6 @@ app.use((req, res, next) => {
         WHERE origin IS NULL AND type IN ('adjust', 'exchange')`);
       if (rowCount) console.log(`[migration] tagged ${rowCount} existing stock correction(s) with where they came from`);
     }
-    await pool.query(`
-      UPDATE loading_scan_events lse SET is_adjust = true
-      WHERE lse.is_adjust IS NOT TRUE AND (
-        lse.total_qty < 0
-        OR EXISTS (
-          SELECT 1 FROM stock_movements sm
-          WHERE sm.type = 'adjust' AND sm.reason LIKE 'Loaded quantity manually %'
-            AND sm.reason LIKE '% for order ' || lse.order_number
-            AND LOWER(TRIM(sm.barcode)) = LOWER(TRIM(lse.barcode))
-            AND LOWER(TRIM(sm.plant)) = LOWER(TRIM(lse.plant))
-            AND sm.qty = -lse.total_qty
-            AND ABS(EXTRACT(EPOCH FROM (sm.created_at - lse.scanned_at))) < 10
-        )
-      )`);
     await pool.query(`UPDATE stock_movements SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE order_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE order_scan_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);

@@ -1759,7 +1759,10 @@ export const manualSaleRows = pgTable("manual_sale_rows", {
   itemName: text("item_name"),
   productId: integer("product_id"),
   qty: integer("qty").notNull(),
-  nameDiffers: boolean("name_differs").notNull().default(false),
+  nameDiffers: boolean("name_differs").notNull().default(false), // true when the person chose the product (the CSV barcode/name disagreed)
+  csvBarcode: text("csv_barcode"),                               // what the CSV row said
+  csvName: text("csv_name"),
+  requestedQty: integer("requested_qty"),                       // what the CSV asked for; qty is what the stock covered
 }, (t) => [index("manual_sale_rows_batch").on(t.batchId)]);
 
 export const manualSalePulls = pgTable("manual_sale_pulls", {
@@ -1768,5 +1771,30 @@ export const manualSalePulls = pgTable("manual_sale_pulls", {
   sourcePlant: text("source_plant").notNull(),
   qty: integer("qty").notNull(),
 }, (t) => [index("manual_sale_pulls_row").on(t.rowId)]);
+
+// Settings > "Load from Sales Orders file": one batch per upload + the loading_scan_events it created (so it can be reversed).
+export const loadingSalesBatches = pgTable("loading_sales_batches", {
+  id: serial("id").primaryKey(),
+  saleDate: date("sale_date"),
+  csvFileName: text("csv_file_name"),
+  orderCount: integer("order_count").notNull().default(0),
+  eventCount: integer("event_count").notNull().default(0),
+  totalQty: integer("total_qty").notNull().default(0),
+  note: text("note"),
+  status: text("status").notNull().default("active"),
+  createdByCode: text("created_by_code"),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  reversedAt: timestamp("reversed_at"),
+  reversedByCode: text("reversed_by_code"),
+  createdRecordIds: integer("created_record_ids").array(),
+});
+
+export const loadingSalesBatchEvents = pgTable("loading_sales_batch_events", {
+  id: serial("id").primaryKey(),
+  batchId: integer("batch_id").notNull().references(() => loadingSalesBatches.id, { onDelete: "cascade" }),
+  eventId: integer("event_id").notNull(),
+  orderNumber: text("order_number").notNull(),
+}, (t) => [index("loading_sales_batch_events_batch").on(t.batchId)]);
 
 export type ManualSaleBatch = typeof manualSaleBatches.$inferSelect;

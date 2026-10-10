@@ -1251,7 +1251,7 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
     const limitIdx = params.length - 1;
     const offsetIdx = params.length;
 
-    const [dataRes, totalRes, loadingCountRes, readyDespCountRes] = await Promise.all([
+    const [dataRes, totalRes, loadingCountRes, readyDespCountRes, totalsRes] = await Promise.all([
       pool.query(
         `SELECT lr.id, lr.order_number AS "orderNumber", lr.proforma_slip_id AS "proformaSlipId",
                 lr.party_name AS "partyName", lr.plant, lr.vehicle_number AS "vehicleNumber",
@@ -1300,6 +1300,28 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
         `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ps.loading_completed_at IS NOT NULL` : 'WHERE ps.loading_completed_at IS NOT NULL'}`,
         listParams,
       ),
+      pool.query(
+        `SELECT COUNT(*)::int AS slips, COALESCE(SUM(t.qty),0)::int AS qty, COALESCE(SUM(t.loaded),0)::int AS "loadedQty",
+                COALESCE(SUM(t.vol),0)::float AS volume, COALESCE(SUM(t.lvol),0)::float AS "loadedVolume"
+           FROM (
+             SELECT COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0) AS qty,
+                    COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0) AS loaded,
+                    CASE WHEN ps.total_volume ~ '^[0-9]+([.][0-9]+)?$' THEN ps.total_volume::numeric ELSE 0 END AS vol,
+                    COALESCE((
+                      SELECT SUM(ev.q * iv.vol)
+                      FROM (SELECT barcode, SUM(total_qty) AS q FROM loading_scan_events
+                             WHERE order_number = lr.order_number AND voided IS NOT TRUE GROUP BY barcode) ev
+                      JOIN LATERAL (
+                        SELECT CASE WHEN i.volume_in_cu_ft ~ '^[0-9]+([.][0-9]+)?$' THEN i.volume_in_cu_ft::numeric ELSE 0 END AS vol
+                        FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id AND i.barcode = ev.barcode LIMIT 1
+                      ) iv ON TRUE
+                    ), 0) AS lvol
+               FROM loading_records lr
+               LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
+               ${listWhere}
+           ) t`,
+        listParams,
+      ),
     ]);
 
     const loadingCount = parseInt(loadingCountRes.rows[0]?.total ?? '0', 10);
@@ -1308,6 +1330,8 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
     res.json({
       records: dataRes.rows,
       total: parseInt(totalRes.rows[0]?.total ?? '0', 10),
+      // Whole-list totals (every page of the current filters), for the totals row under the table.
+      totals: totalsRes.rows[0] ?? { slips: 0, qty: 0, loadedQty: 0, volume: 0, loadedVolume: 0 },
       // Counts for the SLIPS/LOADING/READY≈DESP tiles — scoped to the date/search/plant filter
       // currently applied, but deliberately NOT to the tab itself, since all three tiles need to
       // stay visible (and clickable, to switch tabs) at once.
@@ -2149,7 +2173,7 @@ router.post('/loading/proforma/:orderNumber/reset', requireLoadingVoidAccess, as
 // regular/extra boundary was always inserted as two separate rows (see insertEvent below), never
 // one row with a mixed qty, so this only ever flips a whole row's flag — it never needs to split
 // or merge rows.
-async function reclassifyLoadingEvents(client: any, orderNumber: string, barcode: string, expectedQty: number): Promise<void> {
+export async function reclassifyLoadingEvents(client: any, orderNumber: string, barcode: string, expectedQty: number): Promise<void> {
   const { rows } = await client.query(
     `SELECT id, total_qty, is_extra FROM loading_scan_events
       WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE

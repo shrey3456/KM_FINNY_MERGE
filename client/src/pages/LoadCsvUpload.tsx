@@ -3,12 +3,15 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { ArrowLeft, FileText, Loader2, Upload } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
+import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-// CSV upload for loads that already left the warehouse. PREVIEW ONLY: nothing is saved here.
+// CSV upload for loads that already left the warehouse. The preview saves nothing; "Create loading" (after the preview) records the
+// matched lines as loading entries through /api/loading-sales (server/routes/loading-sales-import.ts), using the matches and the
+// link / skip picks made here.
 // The plant comes from each order's slip. Only an order whose slip has no plant asks for one, and
 // that pick is used for this preview only (never written to the slip).
 
@@ -24,7 +27,7 @@ type PreviewLine = {
   linked?: boolean;
   product?: Product;
   candidates?: Product[];
-  suggestions?: Array<Product & { score: number }>;
+  suggestions?: Array<Product & { score: number; reason?: string }>;
   slipQty?: number;
   difference?: number;
 };
@@ -75,8 +78,37 @@ const ORDER_LABEL: Record<PreviewOrder["status"], string> = {
   notInSystem: "Not in system — skipped",
 };
 
+type StockLine = { orderNumber: string; party: string | null; plant: string | null; itemName: string | null; sapCode: string | null; barcode: string; fileQty: number; alreadyLoaded: number; requested: number; loads: number; stock: number; noStock: boolean };
+type StockCheck = { boxes: number; shortBoxes: number; lines: StockLine[]; lineCount: number } | null;
+
+// Every matched line of every ready order (same / extra / less / not on slip), with the product the preview matched it to.
+function linesOf(p: PreviewResponse | null | undefined) {
+  return (p?.orders ?? [])
+    .filter((o) => o.status === "ready")
+    .flatMap((o) => o.lines
+      .filter((l) => l.product && l.status !== "skipped" && l.status !== "unmatched" && l.status !== "ambiguous" && (l.csvQty ?? 0) > 0)
+      .map((l) => ({ orderNumber: o.orderNumber, party: o.party, sapCode: l.sapCode, itemName: l.csvName, quantity: l.csvQty, barcode: l.product!.barcode })));
+}
+
 export default function LoadCsvUpload() {
   const { user } = useAuth();
+  const { toast } = useToast();
+  const [creating, setCreating] = useState(false);
+  const [stockCheck, setStockCheck] = useState<StockCheck>(null);
+  const [stockChecking, setStockChecking] = useState(false);
+
+  // Which matched items have no stock / not enough, worked out by the same code that Create loading uses (nothing is saved).
+  async function checkStock(p: PreviewResponse) {
+    const lines = linesOf(p);
+    if (lines.length === 0) { setStockCheck(null); return; }
+    setStockChecking(true);
+    try {
+      const pv: any = await apiRequest("POST", "/api/loading-sales/preview", { lines }, false, true);
+      const short = (pv.shortLines ?? []) as StockLine[];
+      setStockCheck({ boxes: pv.summary?.boxes ?? 0, shortBoxes: short.reduce((n, l) => n + Math.max(0, l.requested - l.loads), 0), lines: short, lineCount: lines.length });
+    } catch { setStockCheck(null); }
+    finally { setStockChecking(false); }
+  }
   const role = String((user as any)?.role ?? "").toLowerCase();
   const isAdmin = ["admin", "super-admin", "super admin", "super_admin"].includes(role);
 
@@ -107,7 +139,7 @@ export default function LoadCsvUpload() {
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Preview failed");
       return (await res.json()) as PreviewResponse;
     },
-    onSuccess: (data) => { setPreview(data); setError(""); },
+    onSuccess: (data) => { setPreview(data); setError(""); checkStock(data); },
     onError: (err: any) => { setPreview(null); setError(err?.message ?? "Preview failed"); },
   });
 
@@ -173,6 +205,31 @@ export default function LoadCsvUpload() {
 
   const hasText = !!csvText;
 
+  // Every matched line of every ready order (same / extra / less / not on slip), with the product the preview matched it to.
+  const loadLines = linesOf(preview);
+
+  async function createLoading() {
+    if (loadLines.length === 0) return;
+    setCreating(true);
+    try {
+      let reverseManualSales = false;
+      const pv: any = await apiRequest("POST", "/api/loading-sales/preview", { lines: loadLines }, false, true);
+      const sm = pv.summary;
+      if (pv.manualSales?.length) {
+        if (!window.confirm(`Manual sales already exist for ${pv.dates.join(", ")} (${pv.manualSales.length} batch(es)). Reverse them first, so the same sales are not counted twice?\n\nOK = reverse them and continue. Cancel = stop.`)) { setCreating(false); return; }
+        reverseManualSales = true;
+      }
+      const lead = `Create loading entries for ${sm.ordersFound} order(s): ${sm.boxes.toLocaleString()} boxes.`;
+      const warn = [sm.short ? `${sm.short} item(s) have no stock and will be skipped` : "", sm.partial ? `${sm.partial} item(s) will load only what is in stock` : "", sm.unmatched ? `${sm.unmatched} line(s) not matched` : "", sm.alreadyCovered ? `${sm.alreadyCovered} item(s) already loaded` : ""].filter(Boolean).join("; ");
+      if (!window.confirm(`${lead}${warn ? "\n\n" + warn + "." : ""}\n\nSlip status is not changed and nothing is sent to Notion. Continue?`)) { setCreating(false); return; }
+      const r: any = await apiRequest("POST", "/api/loading-sales/apply", { lines: loadLines, csvFileName: fileName || null, reverseManualSales }, false, true);
+      toast({ title: "Loading created", description: `${r.ordersLoaded} order(s), ${r.events} entr${r.events === 1 ? "y" : "ies"}, ${(r.boxes ?? 0).toLocaleString()} boxes. It can be reversed from Settings > Load from Sales Orders file.` });
+      rerun({});
+    } catch (e: any) {
+      toast({ title: "Could not create the loading", description: e?.message || "Nothing was changed.", variant: "destructive" });
+    } finally { setCreating(false); }
+  }
+
   return (
     <div className="container-fluid max-w-full space-y-5 overflow-x-hidden px-3 py-6 sm:px-4 md:px-6">
       <div className="flex items-center gap-3">
@@ -189,8 +246,8 @@ export default function LoadCsvUpload() {
       />
 
       <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-        Preview only. The plant comes from each order's slip. Orders whose slip has no plant ask you
-        for one here. Your picks are not saved to the slip.
+        Check the preview first, then press Create loading. The plant comes from each order's slip. Orders whose slip has no plant ask you
+        for one here (your pick is not saved to the slip). Creating the loading records the matched lines as loading entries and takes the stock off; it does not change a slip's status.
       </div>
 
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
@@ -203,9 +260,55 @@ export default function LoadCsvUpload() {
         {hasText && !runPreview.isPending && (
           <Button variant="outline" size="sm" onClick={() => rerun({})}>Run preview again</Button>
         )}
+        {preview && loadLines.length > 0 && (
+          <Button size="sm" disabled={creating || runPreview.isPending} onClick={createLoading}>
+            {creating ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}Create loading ({loadLines.length} lines)
+          </Button>
+        )}
       </div>
 
       {error && <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+
+      {preview && (stockChecking || stockCheck) && (
+        <div className="space-y-2 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-semibold text-gray-900">Stock check</span>
+            {stockChecking && <Loader2 className="h-4 w-4 animate-spin text-gray-500" />}
+            {stockCheck && (
+              <>
+                <span className="rounded bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-800">{stockCheck.boxes.toLocaleString()} boxes can be loaded</span>
+                {stockCheck.lines.filter((l) => l.noStock).length > 0 && <span className="rounded bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-800">{stockCheck.lines.filter((l) => l.noStock).length} item(s) with no stock</span>}
+                {stockCheck.lines.filter((l) => !l.noStock).length > 0 && <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-800">{stockCheck.lines.filter((l) => !l.noStock).length} item(s) short</span>}
+                {stockCheck.shortBoxes > 0 && <span className="rounded bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-700">{stockCheck.shortBoxes.toLocaleString()} boxes short in total</span>}
+                {stockCheck.lines.length === 0 && <span className="text-xs text-gray-500">Every matched item has enough stock.</span>}
+              </>
+            )}
+          </div>
+          {stockCheck && stockCheck.lines.length > 0 && (
+            <div className="max-h-[40vh] overflow-auto border">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-gray-100"><tr className="text-left text-gray-500"><th className="px-2 py-1.5">Order</th><th>Party</th><th>Plant</th><th>SAP</th><th>Item</th><th>Barcode</th><th className="text-right">Needed</th><th className="text-right">In stock</th><th className="text-right">Short by</th><th className="pr-2">Result</th></tr></thead>
+                <tbody>
+                  {[...stockCheck.lines].sort((a, b) => Number(b.noStock) - Number(a.noStock)).map((l, i) => (
+                    <tr key={i} className="border-t align-top">
+                      <td className="px-2 py-1.5 font-mono">{l.orderNumber}</td>
+                      <td className="max-w-[160px] break-words">{l.party ?? "—"}</td>
+                      <td>{l.plant ?? "—"}</td>
+                      <td className="font-mono">{l.sapCode ?? "—"}</td>
+                      <td className="max-w-[240px] break-words">{l.itemName ?? "—"}</td>
+                      <td className="font-mono">{l.barcode}</td>
+                      <td className="text-right tabular-nums">{l.requested}</td>
+                      <td className="text-right tabular-nums">{l.stock}</td>
+                      <td className="text-right tabular-nums font-semibold text-red-700">{Math.max(0, l.requested - l.loads)}</td>
+                      <td className="pr-2">{l.noStock ? <span className="rounded bg-red-100 px-1.5 py-0.5 font-semibold text-red-800">No stock — skipped</span> : <span className="rounded bg-blue-100 px-1.5 py-0.5 font-semibold text-blue-800">Loads {l.loads}</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {preview && (
         <>
@@ -298,14 +401,14 @@ export default function LoadCsvUpload() {
                                       <div className="mt-2 space-y-1.5">
                                         {(l.suggestions ?? []).map((s) => (
                                           <div key={s.id} className="flex flex-wrap items-center gap-2">
-                                            <span className="text-gray-700">{s.name} <span className="text-gray-400">({s.barcode})</span></span>
+                                            <span className="text-gray-700">{s.name} <span className="text-gray-400">({s.barcode})</span>{s.reason && <span className={`ml-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold ${s.reason === "Similar name" ? "bg-gray-100 text-gray-600" : "bg-green-100 text-green-800"}`}>{s.reason}</span>}</span>
                                             <Button size="sm" variant="outline" className="h-6 px-2 text-[11px]"
                                               onClick={() => setPending({ key: l.key, product: { id: s.id, barcode: s.barcode, name: s.name } })}>
                                               Pick
                                             </Button>
                                           </div>
                                         ))}
-                                        {(l.suggestions ?? []).length === 0 && <p className="text-gray-500">No similar product names found.</p>}
+                                        {(l.suggestions ?? []).length === 0 && <p className="text-gray-500">No barcode, slip line or similar name found.</p>}
                                         <div className="flex gap-2 pt-1">
                                           <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px] text-gray-600" onClick={() => skipLine(l.key)}>Skip this line</Button>
                                         </div>
