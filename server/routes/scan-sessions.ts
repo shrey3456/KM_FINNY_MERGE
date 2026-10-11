@@ -2067,7 +2067,15 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // rule (the batch's own order date), same plant scope.
     {
       const uexpParams: any[] = [periodStart];
-      const uexpConds: string[] = ['uis.order_date >= $1', 'uis.is_deleted = false'];
+      // A batch dated BEFORE the period start that is still open (not scanned yet, or being scanned) is stock that is still
+      // to arrive, and its scans land in the default period — so with NO date picked it counts as expected here, or Purchase
+      // would run ahead of Expected. Once any date or range is picked, only the batches dated inside it count, as before.
+      // A completed batch never counts before the start.
+      const reachesToday = !dateMode;
+      const uexpConds: string[] = [
+        reachesToday ? `(uis.order_date >= $1 OR uis.scan_status IN ('available', 'active'))` : 'uis.order_date >= $1',
+        'uis.is_deleted = false',
+      ];
       if (periodEnd) { uexpParams.push(periodEnd); uexpConds.push(`uis.order_date <= $${uexpParams.length}`); }
       if (allowed !== null) { uexpParams.push(allowed); uexpConds.push(`LOWER(uii.plant) = ANY($${uexpParams.length}::text[])`); }
       if (plantFilterList) { uexpParams.push(plantFilterList); uexpConds.push(`LOWER(uii.plant) = ANY($${uexpParams.length}::text[])`); }

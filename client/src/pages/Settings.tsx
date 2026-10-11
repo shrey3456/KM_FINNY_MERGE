@@ -800,7 +800,7 @@ const Settings = () => {
   const [osMode, setOsMode] = useState<'add' | 'set'>('add');
   const [osFile, setOsFile] = useState<File | null>(null);
   const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; quantity: number }[] | null>(null);
-  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number } | null>(null);
+  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number; mode?: 'add' | 'set'; lines?: { barcode: string; itemName: string | null; current: number; change: number; after: number; known: boolean }[] } | null>(null);
   const [osPreviewLoading, setOsPreviewLoading] = useState(false);
   const [osImporting, setOsImporting] = useState(false);
   const [osConfirmText, setOsConfirmText] = useState('');
@@ -876,12 +876,12 @@ const Settings = () => {
   useEffect(() => {
     if (!osPlant || !osRows) { setOsPreview(null); return; }
     setOsPreviewLoading(true);
-    apiRequest('POST', '/api/opening-stock/preview', { plant: osPlant, items: osRows }, false, true)
+    apiRequest('POST', '/api/opening-stock/preview', { plant: osPlant, items: osRows, mode: osMode, asOfDate: osAsOfDate }, false, true)
       .then((data) => setOsPreview(data))
       .catch((err: any) => toast({ title: 'Failed to load preview', description: err?.message, variant: 'destructive' }))
       .finally(() => setOsPreviewLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [osPlant, osRows]);
+  }, [osPlant, osRows, osMode, osAsOfDate]);
 
   const osExpectedConfirmText = `ADD ${osPlant}`.toUpperCase();
 
@@ -2447,7 +2447,54 @@ const Settings = () => {
                   </div>
                 </div>
 
-                {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && (
+                {/* What this file does to each item: stock now, the change, and stock after. Updates with the mode and the date above. */}
+                {(osPreview?.lines?.length ?? 0) > 0 && (
+                  <div className="rounded border bg-white">
+                    <div className="flex items-center justify-between border-b bg-gray-50 px-3 py-2 text-xs">
+                      <span className="font-semibold text-gray-700">Stock change for {osPlant}, item by item</span>
+                      <span className="text-gray-500">
+                        {osPreview!.lines!.filter((l) => l.change > 0).length} up · {osPreview!.lines!.filter((l) => l.change < 0).length} down · {osPreview!.lines!.filter((l) => l.change === 0).length} unchanged
+                      </span>
+                    </div>
+                    <div className="max-h-64 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="sticky top-0 bg-gray-50 text-left text-gray-600">
+                          <tr>
+                            <th className="px-2 py-1.5 font-semibold">Item</th>
+                            <th className="px-2 py-1.5 text-right font-semibold">Stock now</th>
+                            <th className="px-2 py-1.5 text-right font-semibold">Change</th>
+                            <th className="px-2 py-1.5 text-right font-semibold">Stock after</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {osPreview!.lines!.map((l) => (
+                            <tr key={l.barcode} className="border-t">
+                              <td className="px-2 py-1.5">
+                                <div className="font-medium text-gray-900">{l.itemName ?? <span className="text-amber-700">Not in Product Master</span>}</div>
+                                <div className="font-mono text-[11px] text-gray-400">{l.barcode}</div>
+                              </td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">{l.current}</td>
+                              <td className={`px-2 py-1.5 text-right font-semibold tabular-nums ${l.change > 0 ? 'text-emerald-600' : l.change < 0 ? 'text-red-600' : 'text-gray-400'}`}>
+                                {l.change > 0 ? `+${l.change}` : l.change}
+                              </td>
+                              <td className="px-2 py-1.5 text-right font-semibold tabular-nums text-[#001d6e]">{l.after}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot className="sticky bottom-0 bg-[#001d6e] text-white">
+                          <tr>
+                            <td className="px-2 py-1.5 font-semibold">Total · {osPreview!.lines!.length} item{osPreview!.lines!.length === 1 ? '' : 's'}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{osPreview!.lines!.reduce((t, l) => t + l.current, 0)}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{(() => { const c = osPreview!.lines!.reduce((t, l) => t + l.change, 0); return c > 0 ? `+${c}` : c; })()}</td>
+                            <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{osPreview!.lines!.reduce((t, l) => t + l.after, 0)}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && osMode === 'add' && (
                   <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
                     {osPreview?.barcodesWithExistingStock} barcode(s) already have stock at {osPlant} — this ADDS on top of it,
                     it doesn't replace it. Only re-import these if you mean to add more.

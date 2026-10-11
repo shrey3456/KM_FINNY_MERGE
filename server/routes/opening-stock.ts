@@ -52,9 +52,11 @@ function dayBefore(dateStr: string): string {
 // POST /api/opening-stock/preview — body: { plant, items } — impact counts for the confirm dialog.
 router.post('/opening-stock/preview', requireAdminRole, async (req: Request, res: Response) => {
   try {
-    const { plant, items } = req.body as { plant: string; items: OpeningStockRow[] };
+    const { plant, items, mode: modeRaw, asOfDate: asOfDateRaw } = req.body as { plant: string; items: OpeningStockRow[]; mode?: string; asOfDate?: string };
     if (!plant || !String(plant).trim()) return res.status(400).json({ message: 'Plant is required' });
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ message: 'CSV has no rows' });
+    const mode: 'add' | 'set' = modeRaw === 'set' ? 'set' : 'add';
+    const effectiveDate = dayBefore(typeof asOfDateRaw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(asOfDateRaw) ? asOfDateRaw : todayDateStr());
 
     const rows = normalizeRows(items);
     if (rows.length === 0) return res.status(400).json({ message: 'No valid barcodes in this CSV' });
@@ -67,11 +69,40 @@ router.post('/opening-stock/preview', requireAdminRole, async (req: Request, res
     const existingByBarcode = new Map<string, number>(existingRows.map((r: any) => [r.barcode, Number(r.in_stock ?? 0)]));
     const barcodesWithExistingStock = barcodes.filter((b) => (existingByBarcode.get(b) ?? 0) > 0).length;
 
+    // One line per barcode for the dialog: what this item has now, how much the import changes it, and what it will have after.
+    // The same barcode twice in the file counts once per row, exactly as the import applies it. In 'set' mode the change is the
+    // difference to the opening already written for that date (what the import itself would add or take off).
+    const { rows: nameRows } = await pool.query(
+      `SELECT DISTINCT ON (LOWER(TRIM(barcode))) LOWER(TRIM(barcode)) AS k, name FROM products WHERE LOWER(TRIM(barcode)) = ANY($1::text[]) ORDER BY LOWER(TRIM(barcode)), id`,
+      [barcodes.map((b) => b.toLowerCase())],
+    );
+    const nameByBarcode = new Map<string, string>(nameRows.map((r: any) => [r.k, r.name]));
+    const perBarcode = new Map<string, { barcode: string; itemName: string | null; current: number; change: number; qty: number }>();
+    for (const r of rows) {
+      const cur = existingByBarcode.get(r.barcode) ?? 0;
+      let entry = perBarcode.get(r.barcode);
+      if (!entry) {
+        entry = { barcode: r.barcode, itemName: nameByBarcode.get(r.barcode.toLowerCase()) ?? null, current: cur, change: 0, qty: 0 };
+        perBarcode.set(r.barcode, entry);
+      }
+      entry.qty = r.quantity;
+      if (mode === 'add') entry.change += r.quantity;
+    }
+    if (mode === 'set') {
+      for (const entry of perBarcode.values()) {
+        const opening = await currentOpening(pool, plant, entry.barcode, effectiveDate);
+        entry.change = entry.qty - opening;
+      }
+    }
+    const lines = [...perBarcode.values()].map((e) => ({ barcode: e.barcode, itemName: e.itemName, current: e.current, change: e.change, after: e.current + e.change, known: nameByBarcode.has(e.barcode.toLowerCase()) }));
+
     res.json({
       totalRows: rows.length,
       distinctBarcodes: barcodes.length,
       barcodesWithExistingStock,
       totalQtyToSet: rows.reduce((s, r) => s + r.quantity, 0),
+      mode,
+      lines,
     });
   } catch (error) {
     console.error('Error building opening-stock preview:', error);
