@@ -1004,50 +1004,6 @@ export default function ProformaSlips() {
     }
   };
   
-  // State for volume recalculation loading
-  const [isRecalculatingVolumes, setIsRecalculatingVolumes] = useState(false);
-  
-  // Function to recalculate all slip volumes
-  const handleRecalculateVolumes = async () => {
-    try {
-      setIsRecalculatingVolumes(true);
-      toast({
-        title: "Processing",
-        description: "Recalculating volumes for all slips...",
-      });
-      
-      const response = await fetch('/api/proforma-slips/recalculate-volumes', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-      
-      if (!response.ok) {
-        throw new Error('Failed to recalculate volumes');
-      }
-      
-      const result = await response.json();
-      
-      toast({
-        title: "Success",
-        description: result.message || `Successfully recalculated volumes for ${result.updatedCount} proforma slips`,
-      });
-      
-      // Refresh the slips data
-      queryClient.invalidateQueries({ queryKey: ['/api/proforma-slips'] });
-    } catch (error) {
-      console.error("Error recalculating volumes:", error);
-      toast({
-        title: "Error",
-        description: `Failed to recalculate volumes: ${error instanceof Error ? error.message : String(error)}`,
-        variant: "destructive",
-      });
-    } finally {
-      setIsRecalculatingVolumes(false);
-    }
-  };
-  
   // Get unique order dates for dropdown filter
   const getUniqueOrderDates = () => {
     if (!proformaSlips) return [];
@@ -2096,25 +2052,15 @@ export default function ProformaSlips() {
   };
 
   return (
-    <div className="container mx-auto py-6">
-      <div className="flex justify-between items-center mb-6">
-        <div>
+    <div className="w-full max-w-none px-4 py-6">
+      <div className="flex justify-between items-start gap-3 mb-6">
+        <div className="shrink-0">
           <PageHeader
             icon={FileText}
             title="Proforma Slips"
           />
-          <div className="text-xs text-muted-foreground flex items-center gap-2 mt-1">
-            <span className="flex items-center gap-1">
-              {!userInteracting && <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>}
-              Auto-refresh {userInteracting ? 'paused' : 'active'} (every 10s)
-            </span>
-            <span>·</span>
-            <span title={`Next refresh in ${Math.max(0, Math.floor((AUTO_REFRESH_INTERVAL - (Date.now() - lastRefreshTimeRef.current)) / 1000))} seconds`}>
-              Last updated: {new Date(lastRefreshTimeRef.current).toLocaleTimeString()}
-            </span>
-          </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-1 flex-wrap items-center justify-end gap-1.5 min-w-0 [&_button]:h-8 [&_button]:px-2 [&_button]:text-xs [&_button_svg]:mr-1 [&_button_svg]:h-3.5 [&_button_svg]:w-3.5 xl:gap-2 xl:[&_button]:h-9 xl:[&_button]:px-3 xl:[&_button]:text-sm xl:[&_button_svg]:mr-2 xl:[&_button_svg]:h-4 xl:[&_button_svg]:w-4">
           {/* Refresh Button */}
           <Button 
             variant="outline" 
@@ -2132,25 +2078,6 @@ export default function ProformaSlips() {
           >
               <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
-
-          {/* Export button - Visible to Read-Only AND Admin/Super */}
-          {(isread || isAdminOrSuper || isReadWriteUser) && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => handleExportCSV()}
-              title={
-                proformaSlips && getFilteredSlips().length !== proformaSlips.length
-                  ? `Export the ${getFilteredSlips().length} filtered slip(s) currently shown`
-                  : "Export all proforma slips"
-              }
-            >
-              <FileDown className="mr-2 h-4 w-4" />
-              {proformaSlips && getFilteredSlips().length !== proformaSlips.length
-                ? `Export Filtered (${getFilteredSlips().length})`
-                : "Export All"}
-            </Button>
-          )}
 
           {/* Admin/Super/Write Access only buttons */}
           {(isAdminOrSuper || isReadWriteUser) && !isread && (
@@ -2196,16 +2123,6 @@ export default function ProformaSlips() {
                   />
                 </DialogContent>
               </Dialog>
-
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRecalculateVolumes}
-                disabled={isRecalculatingVolumes}
-              >
-                <RefreshCw className={`mr-2 h-4 w-4 ${isRecalculatingVolumes ? 'animate-spin' : ''}`} />
-                Recalc Volumes
-              </Button>
             </>
           )}
 
