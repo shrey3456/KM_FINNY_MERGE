@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { ensureManualSalesTables } from '../lib/manualSalesSchema';
+import { ensureStockResetTables } from '../lib/stockResetSchema';
 import { format } from 'date-fns';
 import { db, pool } from '../db';
 import {
@@ -1671,6 +1672,7 @@ router.get('/reports/stock-adjustments', async (req: Request, res: Response) => 
 router.get('/reports/plant-stock', async (req: Request, res: Response) => {
   try {
     await ensureManualSalesTables(); // Sale reads manual_sale_* — never run the report before they exist
+    await ensureStockResetTables(); // the report reads stock_movements.effective_date
     const allowed = getUserPlants(req.user); // null = admin (all plants)
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
     const plantParam = typeof req.query.plant === 'string' ? req.query.plant.trim() : '';
@@ -1734,6 +1736,10 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     );
     const SALES_TRACKING_START = salesSettingsRows[0]?.salesTrackingStartDate ?? '2026-08-01';
     const periodStart = from || SALES_TRACKING_START;
+    // Stock Tracking Start is the hard start of the ledger: nothing dated before it counts, except the opening-stock lines
+    // (they are dated the day BEFORE the day the count was taken). Inlined (a validated date, never user text) so the many
+    // $n numbers below stay as they are.
+    const TRACK_FLOOR = /^\d{4}-\d{2}-\d{2}$/.test(String(SALES_TRACKING_START).slice(0, 10)) ? String(SALES_TRACKING_START).slice(0, 10) : '1900-01-01';
     const periodEnd = to || null; // null = open-ended, through today
     // Set only when exactly one date is in play — the "(date)" shown in the tile labels.
     const singleDate: string | null = from && (!to || to === from) ? from : null;
@@ -1741,16 +1747,18 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // $1 / $2 are the period bounds, pushed first because they appear first in the SQL text.
     const params: any[] = [periodStart, periodEnd];
     // Hide rows with nothing at all to show for this period (no opening, purchase, sale or extra).
-    const conds: string[] = ['(pps.opening_stock <> 0 OR pps.in_stock <> 0 OR pps.sale_qty <> 0 OR pps.extra_qty <> 0)'];
+    const conds: string[] = ['(pps.opening_stock <> 0 OR pps.in_stock <> 0 OR pps.sale_qty <> 0 OR pps.extra_qty <> 0 OR pps.adjust_qty <> 0)'];
     const inPeriod = (dateExpr: string) => `(${dateExpr} >= $1::date AND ($2::date IS NULL OR ${dateExpr} <= $2::date))`;
     const sourceSql = `(
       WITH purchase_rows AS (
         SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty, sm.product_id, sm.created_at, sm.type,
                COALESCE(sm.origin, CASE WHEN sm.source = 'manual' THEN 'page' ELSE 'operation' END) AS origin,
-               COALESCE(
-                 CASE WHEN sm.source = 'unloading' THEN uis.order_date::date ELSE ois.order_date::date END,
-                 sm.created_at::date
-               ) AS d
+               -- An unloading line counts on the day it was SCANNED (the batch's own date is only for the entry); a void or a
+               -- quantity correction counts on the day of the scan it cancels (effective_date). Everything else keeps the
+               -- order date it always had.
+               COALESCE(sm.effective_date,
+                 CASE WHEN sm.source = 'unloading' THEN sm.created_at::date
+                      ELSE COALESCE(ois.order_date::date, sm.created_at::date) END) AS d
         FROM stock_movements sm
         LEFT JOIN order_import_sessions ois ON sm.source IS DISTINCT FROM 'unloading' AND ois.id = sm.session_id
         LEFT JOIN unload_import_sessions uis ON sm.source = 'unloading' AND uis.id = sm.session_id
@@ -1794,6 +1802,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
                MAX(created_at) FILTER (WHERE qty > 0) AS last_arrived,
                MAX(product_id) AS product_id
         FROM purchase_rows
+        WHERE (d >= '${TRACK_FLOOR}'::date OR (origin = 'opening' AND d >= '${TRACK_FLOOR}'::date - 1))
         GROUP BY 1, 2
       ),
       -- A load is attributed to the plant the boxes were actually TAKEN FROM, not to the plant on
@@ -1812,6 +1821,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         LEFT JOIN proforma_slips ps ON ps.order_number = lse.order_number
         LEFT JOIN loading_stock_pulls sp ON sp.loading_scan_event_id = lse.id
         WHERE lse.voided IS NOT TRUE AND lse.barcode IS NOT NULL AND lse.plant IS NOT NULL
+          AND COALESCE(ps.order_date::date, lse.scanned_at::date) >= '${TRACK_FLOOR}'::date
         -- Manual Sales (Settings > Data Management): sales added by CSV for a day, taken from the plant(s) in
         -- manual_sale_pulls and dated the batch's sale date. A reversed batch drops out of Sale again.
         UNION ALL
@@ -1819,7 +1829,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         FROM manual_sale_pulls mp
         JOIN manual_sale_rows mr ON mr.id = mp.row_id
         JOIN manual_sale_batches mb ON mb.id = mr.batch_id
-        WHERE mb.status = 'active'
+        WHERE mb.status = 'active' AND mb.sale_date >= '${TRACK_FLOOR}'::date
       ),
       sales AS (
         SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,

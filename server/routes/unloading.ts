@@ -1447,9 +1447,9 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
       // server/lib/orderGroupReport.ts): lets Overall Stock fold this back into Purchase instead
       // of Adjust, always in the same period as the receive it's reversing (same session_id).
       await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, origin)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading','void')`,
-        [event.barcode, product?.id ?? null, event.plant, -qty, reason ?? 'Unloading scan voided', event.session_id, userCode ?? null],
+        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, origin, effective_date)
+         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading','void',(SELECT scanned_at::date FROM unload_scan_events WHERE id = $8))`,
+        [event.barcode, product?.id ?? null, event.plant, -qty, reason ?? 'Unloading scan voided', event.session_id, userCode ?? null, eventId],
       );
     }
     await client.query(
@@ -1551,9 +1551,9 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
       [oldQty, event.barcode, event.plant],
     );
     await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-       VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
-      [event.barcode, product?.id ?? null, event.plant, -oldQty, `Qty correction — old scan reversed (edited by ${editorLabel})`, event.session_id, userCode ?? null],
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, effective_date)
+       VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading',(SELECT scanned_at::date FROM unload_scan_events WHERE id = $8))`,
+      [event.barcode, product?.id ?? null, event.plant, -oldQty, `Qty correction — old scan reversed (edited by ${editorLabel})`, event.session_id, userCode ?? null, eventId],
     );
 
     await client.query(
@@ -1604,9 +1604,9 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
       [event.barcode, product?.id ?? null, event.plant, newQty],
     );
     await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8,'unloading')`,
-      [event.barcode, product?.id ?? null, event.plant, newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, event.session_id, userCode ?? null],
+      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, effective_date)
+       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8,'unloading',(SELECT scanned_at::date FROM unload_scan_events WHERE id = $9))`,
+      [event.barcode, product?.id ?? null, event.plant, newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, event.session_id, userCode ?? null, eventId],
     );
 
     // This correction just changed how much of this barcode is "scanned" for this session —

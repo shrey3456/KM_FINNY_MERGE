@@ -37,6 +37,7 @@ import { SyncProgressDialog, type SyncProgress } from '@/components/SyncProgress
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import ManualSalesCard from '@/components/settings/ManualSalesCard';
 import LoadingFromSalesCard from '@/components/settings/LoadingFromSalesCard';
+import StockResetCard from '@/components/settings/StockResetCard';
 import OpeningStockEditorCard from '@/components/settings/OpeningStockEditorCard';
 import { hasPageWriteAccess } from '@/lib/permissions';
 import {
@@ -1306,10 +1307,12 @@ const Settings = () => {
 
                     <LoadingFromSalesCard isAdmin={isAdminUser} />
 
+                    <StockResetCard isAdmin={isAdminUser} />
+
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
-                        When no date is picked on Overall Stock, its Purchase, Expected, Expected Sale and Sale columns count from this date onward. Everything before it is still included, as the Opening stock.
+                        Stock Overview counts from this date. Everything dated before it is ignored (it stays in the app's history), except the opening-stock counts, which are dated the day before the start. Set it to the day you start tracking — Reset Stock to Count can do that for you.
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <Input
@@ -1436,11 +1439,8 @@ const Settings = () => {
                     </div>
                     </>)}
 
-                    {/* Backup CSV + Backup Operational Data — hidden from the UI for everyone,
-                        including admin/super-admin (not removed: runCsvBackup/runScopedCsvBackup,
-                        their state, and the backend routes are all still here; re-add these two
-                        Button blocks to bring them back). */}
-                    {false && (<>
+                    {/* Backup CSV + Backup Operational Data — back on for admins (take a backup before any reset). */}
+                    {isAdminUser && (<>
                     <div className="p-4 border rounded-lg">
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Backup CSV</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
@@ -1524,6 +1524,15 @@ const Settings = () => {
                           Remove All Operations Data
                         </Button>
                         </>)}
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => setShowClearStockDialog(true)}
+                          disabled={!isAdminUser}
+                          title={!isAdminUser ? "Admin access required" : "Sets the stock of a plant (or all plants) to zero. Use Reset Stock to Count to set it to a counted stock instead."}
+                        >
+                          Clear Stock (set to zero)
+                        </Button>
                         <Button
                           variant="destructive"
                           size="sm"

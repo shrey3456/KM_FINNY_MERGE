@@ -781,9 +781,9 @@ export default function OverallStock() {
     const d = new Date();
     if (key === "today") return `d:${isoOf(d)}`;
     if (key === "yday") { const y = new Date(d); y.setDate(y.getDate() - 1); return `d:${isoOf(y)}`; }
-    if (key === "week") { const w = new Date(d); w.setDate(w.getDate() - 6); return `r:${isoOf(w)}:${isoOf(d)}`; }
+    if (key === "week") { const w = new Date(d); w.setDate(w.getDate() - 6); return `r:${clampFrom(isoOf(w))}:${isoOf(d)}`; }
     if (key === "lastweek") { const f = new Date(d); f.setDate(f.getDate() - 13); const t = new Date(d); t.setDate(t.getDate() - 7); return `r:${isoOf(f)}:${isoOf(t)}`; }
-    if (key === "month") return `r:${isoOf(new Date(d.getFullYear(), d.getMonth(), 1))}:${isoOf(d)}`;
+    if (key === "month") return `r:${clampFrom(isoOf(new Date(d.getFullYear(), d.getMonth(), 1)))}:${isoOf(d)}`;
     if (key === "lastmonth") return `r:${isoOf(new Date(d.getFullYear(), d.getMonth() - 1, 1))}:${isoOf(new Date(d.getFullYear(), d.getMonth(), 0))}`;
     return "";
   };
@@ -900,6 +900,10 @@ export default function OverallStock() {
   // True when a date range is active: the Stock/Extra numbers then mean "received in this
   // window" rather than "total on hand", so the UI labels them differently.
   const dateMode = stockData?.dateMode ?? false;
+  // Nothing before Stock Tracking Start is counted, so it is not offered in the date filter either.
+  const trackingMin = (stockData?.salesTrackingStart ?? "").slice(0, 10) || undefined;
+  const clampFrom = (iso: string) => (trackingMin && iso < trackingMin ? trackingMin : iso);
+  const presetAllowed = (key: string) => { if (key !== "yday" || !trackingMin) return true; const y = new Date(); y.setDate(y.getDate() - 1); return format(y, "yyyy-MM-dd") >= trackingMin; };
   // Expected Qty (sum of every CSV's ordered quantity across all parts) — an explicit date
   // filter scopes this to that one date's orders; with no filter it sums from the configured
   // Sales Tracking Start date onward (expectedDate is then null).
@@ -1099,7 +1103,7 @@ export default function OverallStock() {
         <div className="space-y-1">
           <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
           <div className="grid grid-cols-2 gap-1.5">
-            {DATE_PRESETS.map((o) => (
+            {DATE_PRESETS.filter((o) => presetAllowed(o.value)).map((o) => (
               <button
                 key={o.value}
                 type="button"
@@ -1145,6 +1149,7 @@ export default function OverallStock() {
             <input
               type="date"
               value={fromDate}
+              min={trackingMin}
               onChange={(e) => {
                 upsertSimpleFilter("date", e.target.value ? `d:${e.target.value}` : "");
                 // A single date is one complete pick — apply and close right away,
@@ -1161,6 +1166,7 @@ export default function OverallStock() {
               <input
                 type="date"
                 value={fromDate}
+                min={trackingMin}
                 max={toDate || undefined}
                 onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
                 className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
@@ -1171,7 +1177,7 @@ export default function OverallStock() {
               <input
                 type="date"
                 value={toDate}
-                min={fromDate || undefined}
+                min={fromDate || trackingMin}
                 onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
                 className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
               />
@@ -1223,6 +1229,7 @@ export default function OverallStock() {
               <input
                 type="date"
                 value={fromDate}
+                min={trackingMin}
                 max={toDate || undefined}
                 onChange={(e) => upsertSimpleFilter("date", `r:${e.target.value}:${toDate}`)}
                 className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
@@ -1233,7 +1240,7 @@ export default function OverallStock() {
               <input
                 type="date"
                 value={toDate}
-                min={fromDate || undefined}
+                min={fromDate || trackingMin}
                 onChange={(e) => upsertSimpleFilter("date", `r:${fromDate}:${e.target.value}`)}
                 className="h-8 w-full rounded-md border border-gray-300 bg-white px-2 text-xs"
               />
@@ -1243,7 +1250,7 @@ export default function OverallStock() {
         <div className="space-y-1">
           <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Quick ranges</label>
           <div className="grid grid-cols-2 gap-1.5">
-            {DATE_PRESETS.map((o) => (
+            {DATE_PRESETS.filter((o) => presetAllowed(o.value)).map((o) => (
               <button
                 key={o.value}
                 type="button"

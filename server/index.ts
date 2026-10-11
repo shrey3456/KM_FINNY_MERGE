@@ -5,6 +5,7 @@ import { pool } from "./db";
 import { tagStockMovementSources } from './lib/stockRecalc';
 import { ensureManualSalesSchema } from './lib/manualSalesSchema';
 import { ensureLoadingSalesSchema } from './lib/loadingSalesSchema';
+import { ensureStockResetSchema } from './lib/stockResetSchema';
 
 
 const app = express();
@@ -80,6 +81,11 @@ app.use((req, res, next) => {
     await ensureLoadingSalesSchema(pool);
   } catch (error) {
     console.error('Could not create the Loading-from-sales-file tables:', error);
+  }
+  try {
+    await ensureStockResetSchema(pool);
+  } catch (error) {
+    console.error('Could not prepare the stock-reset tables:', error);
   }
 
   // Run migrations

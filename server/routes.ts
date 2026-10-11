@@ -121,6 +121,7 @@ import unloadingRoutes from "./routes/unloading";
 import openingStockRoutes from "./routes/opening-stock";
 import manualSalesRoutes from "./routes/manual-sales";
 import loadingSalesImportRoutes from "./routes/loading-sales-import";
+import stockResetRoutes from "./routes/stock-reset";
 import plantStockAdminRoutes from "./routes/plant-stock-admin";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
@@ -8216,6 +8217,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   apiRouter.use(openingStockRoutes);
   apiRouter.use(manualSalesRoutes);
   apiRouter.use(loadingSalesImportRoutes);
+  apiRouter.use(stockResetRoutes);
 
   // Mount the API router
   app.use("/api", apiRouter);

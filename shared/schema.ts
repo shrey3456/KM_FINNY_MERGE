@@ -1797,4 +1797,37 @@ export const loadingSalesBatchEvents = pgTable("loading_sales_batch_events", {
   orderNumber: text("order_number").notNull(),
 }, (t) => [index("loading_sales_batch_events_batch").on(t.batchId)]);
 
+// Settings > "Reset Stock to Count" — one batch per run and every item's stock before / after (so it can be undone).
+export const stockResetBatches = pgTable("stock_reset_batches", {
+  id: serial("id").primaryKey(),
+  plant: text("plant").notNull(),
+  asOfDate: date("as_of_date", { mode: "string" }).notNull(),
+  itemCount: integer("item_count").notNull().default(0),
+  countTotal: integer("count_total").notNull().default(0),
+  liveBeforeTotal: integer("live_before_total").notNull().default(0),
+  liveAfterTotal: integer("live_after_total").notNull().default(0),
+  csvFileName: text("csv_file_name"),
+  prevTrackingStart: date("prev_tracking_start", { mode: "string" }),
+  setTrackingStart: boolean("set_tracking_start").notNull().default(false),
+  status: text("status").notNull().default("active"),
+  createdByCode: text("created_by_code"),
+  createdByName: text("created_by_name"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  undoneAt: timestamp("undone_at"),
+  undoneByCode: text("undone_by_code"),
+});
+
+export const stockResetRows = pgTable("stock_reset_rows", {
+  id: serial("id").primaryKey(),
+  batchId: integer("batch_id").notNull().references(() => stockResetBatches.id, { onDelete: "cascade" }),
+  barcode: text("barcode").notNull(),
+  productId: integer("product_id"),
+  plant: text("plant").notNull(),
+  countQty: integer("count_qty").notNull().default(0),
+  liveBefore: integer("live_before").notNull().default(0),
+  extraBefore: integer("extra_before").notNull().default(0),
+  liveAfter: integer("live_after").notNull().default(0),
+  extraAfter: integer("extra_after").notNull().default(0),
+}, (t) => [index("stock_reset_rows_batch").on(t.batchId)]);
+
 export type ManualSaleBatch = typeof manualSaleBatches.$inferSelect;
