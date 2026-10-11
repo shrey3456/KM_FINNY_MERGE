@@ -146,9 +146,8 @@ export default function LoadingFromSalesCard({ isAdmin }: { isAdmin: boolean }) 
     setBusy(true);
     try {
       const r = await apiRequest("POST", "/api/loading-sales/apply", { lines, csvFileName: csv?.name ?? null, reverseManualSales: reverseManual }, false, true);
-      toast({ title: "Loading created", description: `${r.ordersLoaded} order(s), ${r.events} entr${r.events === 1 ? "y" : "ies"}, ${(r.boxes ?? 0).toLocaleString()} boxes.${r.manualReversed ? ` ${r.manualReversed} manual sale batch(es) reversed first.` : ""}` });
+      toast({ title: "Loading created", description: `${r.ordersLoaded} order(s) marked Ready for Dispatch, ${r.events} entr${r.events === 1 ? "y" : "ies"}, ${(r.boxes ?? 0).toLocaleString()} boxes.${r.manualReversed ? ` ${r.manualReversed} manual sale batch(es) reversed first.` : ""}` });
       queryClient.invalidateQueries({ queryKey: ["/api/loading-sales/batches"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/manual-sales/batches"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       queryClient.invalidateQueries({ queryKey: ["/api/loading"] });
@@ -179,7 +178,7 @@ export default function LoadingFromSalesCard({ isAdmin }: { isAdmin: boolean }) 
     <div className="p-4 border rounded-lg bg-gray-50">
       <h4 className="font-medium flex items-center"><Truck className="h-4 w-4 mr-2" /> Load from Sales Orders file</h4>
       <p className="text-sm text-gray-600 mt-1 mb-3">
-        Upload the Sales Orders file (order number, item, quantity). Each order's slip gets its loading entries, stock comes off the slip plant's state pool and the boxes show in Stock Overview's Sale on the order date. Slip status is not changed and nothing is sent to Notion. Stock never goes below zero. Admin only.
+        Upload the Sales Orders file (order number, item, quantity). Each order's slip gets its loading entries, stock comes off the slip plant's state pool and the boxes show in Stock Overview's Sale on the order date. Each slip is marked Ready for Dispatch in our system only — nothing is sent to Notion. Stock never goes below zero. Admin only.
       </p>
       <Button variant="outline" size="sm" onClick={() => setOpen(true)} disabled={!isAdmin} title={!isAdmin ? "Admin access required" : undefined}>
         Load from Sales File

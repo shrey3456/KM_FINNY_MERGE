@@ -20,7 +20,7 @@ import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { buildPageList } from "@/components/ui/data-table/data-table-pagination";
-import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -163,6 +163,8 @@ type VehicleSuggestion = {
   fromNotion?: boolean;
 };
 type LoadingRecord = {
+  // generated from the Sales Orders file: view only, no Reopen / Delete
+  systemGenerated?: boolean;
   id: number; orderNumber: string; partyName: string | null; plant: string | null;
   vehicleNumber: string; rtoNumber: string | null; volume: string | null;
   createdByCode: string | null; createdByName: string | null;
@@ -456,6 +458,31 @@ export default function LoadOperation() {
   }, [activeViewTab, createdByMe]); // eslint-disable-line react-hooks/exhaustive-deps
   const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate" | "completedAt">("loading:listSortBy", "creationDate");
   const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "desc");
+  // Which columns the landing list shows. Volume and Loaded / Total start hidden; anyone can switch them on from the Columns menu,
+  // and the choice is remembered in this browser. Actions is not hideable, so the open button can never be lost.
+  const RECORD_COLUMN_LABELS: Record<string, string> = {
+    orderDate: "Order Date", loadDate: "Load Date", orderNumber: "Order Number", party: "Party Name", plant: "Plant", vehicle: "Vehicle No.",
+    stv: "Dispatch Directory", status: "Status", owner: "Current Owner", loaded: "Loaded / Total", volume: "Volume", timeTaken: "Time Taken",
+    completedBy: "Completed By", creator: "Creator", actions: "Actions",
+  };
+  const RECORD_DEFAULT_HIDDEN = ["loaded", "volume"];
+  const RECORD_COLUMNS_KEY = "loading:listVisibleColumns";
+  const [recordVisibleCols, setRecordVisibleCols] = useState<Set<string>>(() => {
+    const all = Object.keys(RECORD_COLUMN_LABELS);
+    try {
+      const raw = localStorage.getItem(RECORD_COLUMNS_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(parsed)) return new Set<string>([...parsed.filter((c: string) => all.includes(c)), "actions"]);
+    } catch { /* storage unavailable */ }
+    return new Set(all.filter((c) => !RECORD_DEFAULT_HIDDEN.includes(c)));
+  });
+  useEffect(() => {
+    try { localStorage.setItem(RECORD_COLUMNS_KEY, JSON.stringify(Array.from(recordVisibleCols))); } catch { /* storage unavailable */ }
+  }, [recordVisibleCols]);
+  const showCol = (id: string) => recordVisibleCols.has(id);
+  const recordToggleColumns: DataTableColumn<LoadingRecord>[] = Object.keys(RECORD_COLUMN_LABELS)
+    .filter((id) => id !== "actions")
+    .map((id) => ({ id, header: RECORD_COLUMN_LABELS[id] }));
   // Excel-style column filters for the landing list (see recordFilterColumns below).
   const [recordColumnConditions, setRecordColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("loading:columnFilters", {});
 
@@ -541,7 +568,7 @@ export default function LoadOperation() {
   // Reopen: an admin/super-admin, Supervisor, or the load's current owner (server enforces the
   // same rule).
   const canReopenRecord = (r: LoadingRecord) =>
-    !!r.loadingCompletedAt && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
+    !r.systemGenerated && !!r.loadingCompletedAt && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
   const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
     { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
     { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
@@ -2869,6 +2896,13 @@ export default function LoadOperation() {
                 onClear={clearRecordCondition}
                 className="h-9 shrink-0 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
               />
+              <DataTableColumnToggle<LoadingRecord>
+                columns={recordToggleColumns}
+                visibleColumnIds={recordVisibleCols}
+                onToggleColumn={(id) => setRecordVisibleCols((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; })}
+                onSetAll={(visible) => setRecordVisibleCols(new Set(visible ? Object.keys(RECORD_COLUMN_LABELS) : ["actions", "orderNumber"]))}
+                buttonClassName="h-9 shrink-0"
+              />
             </div>
 
             {recordsQuery.isLoading ? (
@@ -2913,21 +2947,21 @@ export default function LoadOperation() {
                           instead of the plain shadcn default (muted-gray text on white) — makes
                           the header read as a header rather than blending into the rows. */}
                       <TableRow className="border-b border-white/20 bg-[#001d6e] hover:bg-[#001d6e]">
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">{recordColumnHeader("orderDate", "Order Date")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="When this load operation was started">{recordColumnHeader("loadDate", "Load Date")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("orderNumber", "Order Number")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("party", "Party Name")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("plant", "Plant")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The Dispatch Directory this load was started on — set once at Create Operation">{recordColumnHeader("stv", "Dispatch Directory")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Quantity loaded so far out of the order's total quantity">Loaded / Total</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Volume loaded so far out of the order's total volume">Volume</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>
-                        <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("creator", "Creator")}</TableHead>
-                        <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>
+                        {showCol("orderDate") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">{recordColumnHeader("orderDate", "Order Date")}</TableHead>}
+                        {showCol("loadDate") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="When this load operation was started">{recordColumnHeader("loadDate", "Load Date")}</TableHead>}
+                        {showCol("orderNumber") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("orderNumber", "Order Number")}</TableHead>}
+                        {showCol("party") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("party", "Party Name")}</TableHead>}
+                        {showCol("plant") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("plant", "Plant")}</TableHead>}
+                        {showCol("vehicle") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>}
+                        {showCol("stv") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The Dispatch Directory this load was started on — set once at Create Operation">{recordColumnHeader("stv", "Dispatch Directory")}</TableHead>}
+                        {showCol("status") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>}
+                        {showCol("owner") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>}
+                        {showCol("loaded") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Quantity loaded so far out of the order's total quantity">Loaded / Total</TableHead>}
+                        {showCol("volume") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Volume loaded so far out of the order's total volume">Volume</TableHead>}
+                        {showCol("timeTaken") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>}
+                        {showCol("completedBy") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>}
+                        {showCol("creator") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("creator", "Creator")}</TableHead>}
+                        {showCol("actions") && <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -2937,122 +2971,152 @@ export default function LoadOperation() {
                             {/* A plain row: the click-to-open History / Owners panel was removed on
                                 request. The row's own action buttons are still the way in. */}
                             <TableRow>
-                              <TableCell>
-                                {r.orderDate
-                                  ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
-                                  : "-"}
-                              </TableCell>
-                              <TableCell>
-                                {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
-                              </TableCell>
-                              <TableCell>#{r.orderNumber}</TableCell>
-                              <TableCell>{r.partyName || "-"}</TableCell>
-                              <TableCell>{r.plant ? <PlantBadge plant={r.plant} /> : "-"}</TableCell>
-                              <TableCell>
-                                <div className="flex flex-col">
-                                  <span>{r.vehicleNumber || "-"}</span>
-                                  {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                {r.loadingStv
-                                  ? <span className="inline-flex items-center whitespace-nowrap rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
-                                  : <span className="text-muted-foreground">-</span>}
-                              </TableCell>
-                              <TableCell>
-                                <div className="flex flex-wrap items-center gap-1"><NotionStatusBadge status={recordStatus(r)} />{r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}</div>
-                              </TableCell>
-                              <TableCell onClick={(e) => e.stopPropagation()}>
-                                {r.loadingCompletedAt ? (
-                                  "-"
-                                ) : r.loadingPausedAt ? (
-                                  <div className="flex flex-col gap-1">
-                                    <span className="text-xs text-amber-700">Paused · {r.loadingOwnerName ?? r.loadingOwnerCode ?? "—"}</span>
-                                    {canWrite && (
+                              {showCol("orderDate") && (
+                                <TableCell>
+                                  {r.orderDate
+                                    ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
+                                    : "-"}
+                                </TableCell>
+                              )}
+                              {showCol("loadDate") && (
+                                <TableCell>
+                                  {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
+                                </TableCell>
+                              )}
+                              {showCol("orderNumber") && (
+                                <TableCell>#{r.orderNumber}</TableCell>
+                              )}
+                              {showCol("party") && (
+                                <TableCell>{r.partyName || "-"}</TableCell>
+                              )}
+                              {showCol("plant") && (
+                                <TableCell>{r.plant ? <PlantBadge plant={r.plant} /> : "-"}</TableCell>
+                              )}
+                              {showCol("vehicle") && (
+                                <TableCell>
+                                  <div className="flex flex-col">
+                                    <span>{r.vehicleNumber || "-"}</span>
+                                    {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
+                                  </div>
+                                </TableCell>
+                              )}
+                              {showCol("stv") && (
+                                <TableCell>
+                                  {r.loadingStv
+                                    ? <span className="inline-flex items-center whitespace-nowrap rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
+                                    : <span className="text-muted-foreground">-</span>}
+                                </TableCell>
+                              )}
+                              {showCol("status") && (
+                                <TableCell>
+                                  <div className="flex flex-wrap items-center gap-1"><NotionStatusBadge status={recordStatus(r)} />{r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}</div>
+                                </TableCell>
+                              )}
+                              {showCol("owner") && (
+                                <TableCell onClick={(e) => e.stopPropagation()}>
+                                  {r.loadingCompletedAt ? (
+                                    "-"
+                                  ) : r.loadingPausedAt ? (
+                                    <div className="flex flex-col gap-1">
+                                      <span className="text-xs text-amber-700">Paused · {r.loadingOwnerName ?? r.loadingOwnerCode ?? "—"}</span>
+                                      {canWrite && (
+                                        <Button
+                                          size="sm"
+                                          className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
+                                          disabled={claimLoadMutation.isPending}
+                                          onClick={() => setClaimTarget(r.orderNumber)}
+                                        >
+                                          Claim
+                                        </Button>
+                                      )}
+                                    </div>
+                                  ) : r.loadingOwnerName || r.loadingOwnerCode ? (
+                                    <span className="text-xs text-gray-600">{r.loadingOwnerName ?? r.loadingOwnerCode}</span>
+                                  ) : (
+                                    <span className="text-xs text-gray-300">—</span>
+                                  )}
+                                </TableCell>
+                              )}
+                              {showCol("loaded") && (
+                                <TableCell className="whitespace-nowrap tabular-nums"><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></TableCell>
+                              )}
+                              {showCol("volume") && (
+                                <TableCell className="whitespace-nowrap tabular-nums">
+                                  {r.orderVolume != null
+                                    ? <><span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.orderVolume.toFixed(2)}</span></>
+                                    : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>}
+                                </TableCell>
+                              )}
+                              {showCol("timeTaken") && (
+                                <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
+                              )}
+                              {showCol("completedBy") && (
+                                <TableCell>
+                                  {r.loadingCompletedAt ? (
+                                    <div className="flex flex-col">
+                                      <span className="text-xs font-medium text-gray-700">{r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "—"}</span>
+                                      <span className="text-[11px] text-gray-400">
+                                        {new Date(r.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span className="text-xs text-gray-300">—</span>
+                                  )}
+                                </TableCell>
+                              )}
+                              {showCol("creator") && (
+                                <TableCell>
+                                  <div className="flex flex-col">
+                                    <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
+                                    <span className="text-xs text-muted-foreground">
+                                      {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}{" "}
+                                      {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
+                                    </span>
+                                  </div>
+                                </TableCell>
+                              )}
+                              {showCol("actions") && (
+                                <TableCell onClick={(e) => e.stopPropagation()}>
+                                  <div className="flex space-x-2 justify-end">
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-9 w-9 rounded-full bg-blue-50 hover:bg-blue-100"
+                                      title="Open this loading slip"
+                                      onClick={() => openOrderFromList(r.orderNumber)}
+                                    >
+                                      <FileText className="h-5 w-5 text-[#001d6e]" />
+                                    </Button>
+                                    {/* Reopening is admin-only (server-enforced too, see
+                                        requireReopenAccess in server/routes/loading.ts) —
+                                        deliberately stricter than completing a load, since it
+                                        un-does a finished, audited state. */}
+                                    {canReopenRecord(r) && (
                                       <Button
-                                        size="sm"
-                                        className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
-                                        disabled={claimLoadMutation.isPending}
-                                        onClick={() => setClaimTarget(r.orderNumber)}
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-9 w-9 rounded-full bg-amber-50 hover:bg-amber-100"
+                                        disabled={reopenMutation.isPending}
+                                        title="Reopen this load"
+                                        onClick={() => setReopenTarget(r.orderNumber)}
                                       >
-                                        Claim
+                                        <RotateCcw className="h-5 w-5 text-amber-600" />
+                                      </Button>
+                                    )}
+                                    {canResetLoad && !r.systemGenerated && (
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
+                                        title="Delete this loading slip"
+                                        onClick={() => setResetTarget(r)}
+                                      >
+                                        <Trash2 className="h-5 w-5 text-red-500" />
                                       </Button>
                                     )}
                                   </div>
-                                ) : r.loadingOwnerName || r.loadingOwnerCode ? (
-                                  <span className="text-xs text-gray-600">{r.loadingOwnerName ?? r.loadingOwnerCode}</span>
-                                ) : (
-                                  <span className="text-xs text-gray-300">—</span>
-                                )}
-                              </TableCell>
-                              <TableCell className="whitespace-nowrap tabular-nums"><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></TableCell>
-                              <TableCell className="whitespace-nowrap tabular-nums">
-                                {r.orderVolume != null
-                                  ? <><span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.orderVolume.toFixed(2)}</span></>
-                                  : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>}
-                              </TableCell>
-                              <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
-                              <TableCell>
-                                {r.loadingCompletedAt ? (
-                                  <div className="flex flex-col">
-                                    <span className="text-xs font-medium text-gray-700">{r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "—"}</span>
-                                    <span className="text-[11px] text-gray-400">
-                                      {new Date(r.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-gray-300">—</span>
-                                )}
-                              </TableCell>
-                              <TableCell>
-                                <div className="flex flex-col">
-                                  <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
-                                  <span className="text-xs text-muted-foreground">
-                                    {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}{" "}
-                                    {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
-                                  </span>
-                                </div>
-                              </TableCell>
-                              <TableCell onClick={(e) => e.stopPropagation()}>
-                                <div className="flex space-x-2 justify-end">
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-9 w-9 rounded-full bg-blue-50 hover:bg-blue-100"
-                                    title="Open this loading slip"
-                                    onClick={() => openOrderFromList(r.orderNumber)}
-                                  >
-                                    <FileText className="h-5 w-5 text-[#001d6e]" />
-                                  </Button>
-                                  {/* Reopening is admin-only (server-enforced too, see
-                                      requireReopenAccess in server/routes/loading.ts) —
-                                      deliberately stricter than completing a load, since it
-                                      un-does a finished, audited state. */}
-                                  {canReopenRecord(r) && (
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-9 w-9 rounded-full bg-amber-50 hover:bg-amber-100"
-                                      disabled={reopenMutation.isPending}
-                                      title="Reopen this load"
-                                      onClick={() => setReopenTarget(r.orderNumber)}
-                                    >
-                                      <RotateCcw className="h-5 w-5 text-amber-600" />
-                                    </Button>
-                                  )}
-                                  {canResetLoad && (
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
-                                      title="Delete this loading slip"
-                                      onClick={() => setResetTarget(r)}
-                                    >
-                                      <Trash2 className="h-5 w-5 text-red-500" />
-                                    </Button>
-                                  )}
-                                </div>
-                              </TableCell>
+                                </TableCell>
+                              )}
                             </TableRow>
                           </Fragment>
                         );
@@ -3061,13 +3125,16 @@ export default function LoadOperation() {
                     {listTotals.slips > 0 && (
                       <TableFooter className="sticky bottom-0 z-10 bg-[#001d6e] text-white [&>tr]:border-0 hover:[&>tr]:bg-[#001d6e]">
                         <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
-                          <TableCell colSpan={3} className="font-semibold">Total · {listTotals.slips.toLocaleString()} slip{listTotals.slips === 1 ? "" : "s"}</TableCell>
-                          <TableCell colSpan={6} className="text-right text-xs">
-                            Needed {listTotals.qty.toLocaleString()} · Loaded {listTotals.loadedQty.toLocaleString()} · Left {totalsLeftQty.toLocaleString()}
-                          </TableCell>
-                          <TableCell className="whitespace-nowrap tabular-nums font-semibold">{listTotals.loadedQty.toLocaleString()} / {listTotals.qty.toLocaleString()}</TableCell>
-                          <TableCell className="whitespace-nowrap tabular-nums font-semibold" title={`${totalsLeftVolume.toFixed(2)} left to load`}>{listTotals.loadedVolume.toFixed(2)} / {listTotals.volume.toFixed(2)}</TableCell>
-                          <TableCell colSpan={4} />
+                          {/* Spans follow the visible columns, so the totals row always lines up with the table. */}
+                          <TableCell colSpan={Math.max(1, ["orderDate", "loadDate", "orderNumber"].filter(showCol).length)} className="font-semibold">Total · {listTotals.slips.toLocaleString()} slip{listTotals.slips === 1 ? "" : "s"}</TableCell>
+                          {["party", "plant", "vehicle", "stv", "status", "owner"].filter(showCol).length > 0 && (
+                            <TableCell colSpan={["party", "plant", "vehicle", "stv", "status", "owner"].filter(showCol).length} className="text-right text-xs">
+                              Needed {listTotals.qty.toLocaleString()} · Loaded {listTotals.loadedQty.toLocaleString()} · Left {totalsLeftQty.toLocaleString()}
+                            </TableCell>
+                          )}
+                          {showCol("loaded") && <TableCell className="whitespace-nowrap tabular-nums font-semibold">{listTotals.loadedQty.toLocaleString()} / {listTotals.qty.toLocaleString()}</TableCell>}
+                          {showCol("volume") && <TableCell className="whitespace-nowrap tabular-nums font-semibold" title={`${totalsLeftVolume.toFixed(2)} left to load`}>{listTotals.loadedVolume.toFixed(2)} / {listTotals.volume.toFixed(2)}</TableCell>}
+                          <TableCell colSpan={["timeTaken", "completedBy", "creator", "actions"].filter(showCol).length} />
                         </TableRow>
                       </TableFooter>
                     )}
@@ -3139,7 +3206,7 @@ export default function LoadOperation() {
                                 <RotateCcw className="h-4 w-4 text-amber-600" />
                               </Button>
                             )}
-                            {canResetLoad && (
+                            {canResetLoad && !r.systemGenerated && (
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -3559,6 +3626,11 @@ export default function LoadOperation() {
                         <span className="inline-flex items-center gap-1 text-xs text-[#001d6e]">
                           <Lock className="h-3.5 w-3.5 shrink-0" />
                           Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
+                        </span>
+                      )}
+                      {(slip as any)?.systemGenerated && (
+                        <span className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                          System generated — view only
                         </span>
                       )}
                     </div>

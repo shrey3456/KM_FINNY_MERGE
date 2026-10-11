@@ -30,6 +30,11 @@ export async function ensureLoadingSalesSchema(pool: Pool): Promise<void> {
     )`);
   // the Loading-page rows (loading_records) a batch had to create so its orders show in the Loading list — removed again on reverse
   await pool.query(`ALTER TABLE loading_sales_batches ADD COLUMN IF NOT EXISTS created_record_ids INTEGER[]`);
+  // slips this batch marked Ready for Dispatch, with the Notion status each had before ({ slipId: previousStatus }) — put back on reverse
+  await pool.query(`ALTER TABLE loading_sales_batches ADD COLUMN IF NOT EXISTS completed_slips JSONB`);
+  // A slip made from the Sales Orders file is SYSTEM GENERATED: view only in the app (no scan / edit / void / reopen / delete through the
+  // Loading screens or the slip edit) and never written to Notion. Reversing its batch clears the flag.
+  await pool.query(`ALTER TABLE proforma_slips ADD COLUMN IF NOT EXISTS system_generated BOOLEAN NOT NULL DEFAULT false`);
   await pool.query(`CREATE INDEX IF NOT EXISTS loading_sales_batch_events_batch ON loading_sales_batch_events (batch_id)`);
 }
 
@@ -37,7 +42,8 @@ export async function ensureLoadingSalesSchema(pool: Pool): Promise<void> {
 // cleaned while the server is running, the tables are created again instead of every report failing with "relation does not exist".
 let creating: Promise<void> | null = null;
 export async function ensureLoadingSalesTables(): Promise<void> {
-  const { rows } = await defaultPool.query(`SELECT CASE WHEN to_regclass('public.loading_sales_batch_events') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'loading_sales_batches' AND column_name = 'created_record_ids') THEN 1 END AS t`);
+  const { rows } = await defaultPool.query(`SELECT CASE WHEN to_regclass('public.loading_sales_batch_events') IS NOT NULL AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'loading_sales_batches' AND column_name = 'completed_slips')
+                  AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'proforma_slips' AND column_name = 'system_generated') THEN 1 END AS t`);
   if (rows[0]?.t) return;
   if (!creating) creating = ensureLoadingSalesSchema(defaultPool).finally(() => { creating = null; });
   await creating;

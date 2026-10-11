@@ -240,6 +240,7 @@ const ALL_COLUMNS = [
   { key: "expectedSale", label: "Expected Sale (proforma)" },
   { key: "sale",         label: "Sale (loaded)" },
   { key: "closing",      label: "Closing" },
+  { key: "liveStock",    label: "Live Stock (database — same as Loading page)" },
 ] as const;
 
 
@@ -564,6 +565,10 @@ export default function OverallStock() {
       // Adjust and Total In belong beside Purchase for everyone, including people whose saved
       // layout predates them — without this they are built but never shown.
       if (saved.has("purchase")) { saved.add("adjust"); saved.add("totalIn"); }
+      // Live Stock was added later: turn it on once for a layout saved before it existed, then leave the choice alone.
+      try {
+        if (!localStorage.getItem("overallStock:liveColAdded")) { saved.add("liveStock"); localStorage.setItem("overallStock:liveColAdded", "1"); }
+      } catch { /* storage unavailable */ }
       return saved;
     } catch {
       return defaults;
@@ -1066,6 +1071,7 @@ export default function OverallStock() {
       { id: "expectedSale", label: "Expected Sale", filterType: "number", options: numberOptions((r) => r.expectedSaleQty), accessor: (r) => r.expectedSaleQty ?? null },
       { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
       { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
+      { id: "liveStock", label: "Live Stock", filterType: "number", options: numberOptions((r) => r.liveStock), accessor: (r) => r.liveStock ?? 0 },
     ];
   }, [rows]);
 
@@ -1907,6 +1913,27 @@ export default function OverallStock() {
         );
       },
     },
+    // What the database holds right now, per plant — the same number the Loading page checks before a scan.
+    // Not worked out from the period's figures, so it can differ from Closing (and ignores the date filter).
+    {
+      id: "liveStock",
+      header: columnHeader("liveStock", "Live Stock"),
+      width: 110,
+      align: "right",
+      sortable: true,
+      accessor: (row) => row.liveStock ?? 0,
+      total: (rows) => {
+        const qty = rows.reduce((sum, r) => sum + (r.liveStock ?? 0), 0);
+        return <span className="font-semibold tabular-nums">{qty}</span>;
+      },
+      headerClassName: headerBorder,
+      cellClassName: cellBorder,
+      render: (row) => (
+        <span className="font-semibold tabular-nums" title="Stock in the database right now — the figure the Loading page uses. Ignores the date filter.">
+          {row.liveStock ?? 0}
+        </span>
+      ),
+    },
     ...(isAdminOrSuper ? [{
       id: "actions",
       header: "",
@@ -1970,7 +1997,7 @@ export default function OverallStock() {
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Opening</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Purchase</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Adjust</th>
-            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Stock</th>
+            <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold" title="Stock in the database right now — the figure the Loading page uses">Stock</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Extra</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Sale</th>
             <th className="border-r border-gray-300 px-2 py-2 text-right font-semibold">Expected Sale</th>
@@ -1989,7 +2016,7 @@ export default function OverallStock() {
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.openingStock ? stock.openingStock : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.inStock ? stock.inStock : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-gray-700">{stock?.adjustQty ? stock.adjustQty : <span className="text-gray-300">—</span>}</td>
-              <td className="border-r border-gray-200 px-2 py-2 text-right font-bold tabular-nums text-[#001d6e]">{stock?.closingStock ?? 0}</td>
+              <td className="border-r border-gray-200 px-2 py-2 text-right font-bold tabular-nums text-[#001d6e]">{stock?.liveStock ?? 0}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-amber-600">{stock?.extraQty ? stock.extraQty : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right tabular-nums text-emerald-600">{stock?.saleQty != null ? stock.saleQty : <span className="text-gray-300">—</span>}</td>
               <td className="border-r border-gray-200 px-2 py-2 text-right">{stackedCell(stock?.expectedSaleQty, stock?.expectedSalePallets, "text-purple-700")}</td>

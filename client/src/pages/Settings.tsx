@@ -35,7 +35,6 @@ import * as XLSX from 'xlsx';
 import { apiRequest } from '@/lib/queryClient';
 import { SyncProgressDialog, type SyncProgress } from '@/components/SyncProgressDialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import ManualSalesCard from '@/components/settings/ManualSalesCard';
 import LoadingFromSalesCard from '@/components/settings/LoadingFromSalesCard';
 import StockResetCard from '@/components/settings/StockResetCard';
 import OpeningStockEditorCard from '@/components/settings/OpeningStockEditorCard';
@@ -1290,7 +1289,7 @@ const Settings = () => {
                     
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Opening Stock</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">Import a plant's opening stock from a CSV (Barcode + Quantity) — it is added on top of the stock that is there, or, in "Set" mode, each item's opening becomes the CSV's quantity. Admin only. Use Edit Opening Stock below to change what was imported.</p>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">Import a plant's opening stock from a CSV (Barcode + Quantity) — it is added on top of the stock that is there, or, in "Set" mode, each item's opening becomes the CSV's quantity. Admin only.</p>
                       <Button
                         variant="outline" size="sm"
                         onClick={() => setShowOpeningStockDialog(true)}
@@ -1301,9 +1300,8 @@ const Settings = () => {
                       </Button>
                     </div>
 
-                    <OpeningStockEditorCard isAdmin={isAdminUser} />
-
-                    <ManualSalesCard isAdmin={isAdminUser} />
+                    {/* Edit Opening Stock — hidden from the UI (not removed: the card, its routes and the Opening Stock "set" mode all still exist). Re-add this line to bring it back. */}
+                    {false && <OpeningStockEditorCard isAdmin={isAdminUser} />}
 
                     <LoadingFromSalesCard isAdmin={isAdminUser} />
 
@@ -1524,15 +1522,6 @@ const Settings = () => {
                           Remove All Operations Data
                         </Button>
                         </>)}
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={() => setShowClearStockDialog(true)}
-                          disabled={!isAdminUser}
-                          title={!isAdminUser ? "Admin access required" : "Sets the stock of a plant (or all plants) to zero. Use Reset Stock to Count to set it to a counted stock instead."}
-                        >
-                          Clear Stock (set to zero)
-                        </Button>
                         <Button
                           variant="destructive"
                           size="sm"

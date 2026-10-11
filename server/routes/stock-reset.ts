@@ -59,7 +59,8 @@ async function computePlan(db: Db, plant: string, asOf: string, items: CountItem
       WHERE sm.source IS DISTINCT FROM 'loading' AND sm.type <> 'dispatch' AND COALESCE(sm.origin,'') NOT IN ('settings','opening')
         AND LOWER(TRIM(sm.plant)) = LOWER(TRIM($1))
         AND COALESCE(sm.effective_date, CASE WHEN sm.source = 'unloading' THEN sm.created_at::date ELSE COALESCE(ois.order_date::date, sm.created_at::date) END) >= $2::date
-      GROUP BY 1`, [plant, asOf]);
+        AND ($3::boolean OR sm.type = 'receive' OR sm.origin = 'void')
+      GROUP BY 1`, [plant, asOf, keepSince]);
   const { rows: sal } = await db.query(
     `SELECT LOWER(TRIM(x.barcode)) AS b, SUM(x.q)::int AS q FROM (
         SELECT lse.barcode, COALESCE(sp.source_plant, lse.plant) AS plant, COALESCE(sp.qty, lse.total_qty) AS q, COALESCE(ps.order_date::date, lse.scanned_at::date) AS d
@@ -76,16 +77,14 @@ async function computePlan(db: Db, plant: string, asOf: string, items: CountItem
 
   const keys = new Set<string>([...count.keys(), ...liveBy.keys(), ...purBy.keys(), ...salBy.keys()]);
   const rows: PlanRow[] = [];
-  let soldSince = 0; // sales dated on/after the start day — they cannot be thrown away, only warned about
   for (const k of keys) {
     const lr = liveBy.get(k); const prod = prodByBarcode.get(k);
     const c = count.get(k) ?? 0; const p = purBy.get(k); const sold = salBy.get(k) ?? 0;
-    const since = keepSince ? (p?.q ?? 0) - sold : 0;
+    const since = (p?.q ?? 0) - sold;
     const target = Math.max(0, c + since);
-    const extraTarget = keepSince ? Math.min(target, Math.max(0, p?.x ?? 0)) : 0;
+    const extraTarget = Math.min(target, Math.max(0, p?.x ?? 0));
     const liveBefore = Number(lr?.in_stock ?? 0); const extraBefore = Number(lr?.extra_qty ?? 0);
     if (!lr && c === 0 && target === 0) continue;
-    if (!keepSince) soldSince += sold;
     rows.push({ barcode: lr?.barcode ?? prod?.barcode ?? k, productId: lr?.product_id ?? prod?.id ?? null, name: prod?.name ?? null, count: c, liveBefore, extraBefore, since, target, extraTarget });
   }
   rows.sort((a, b) => Math.abs(b.target - b.liveBefore) - Math.abs(a.target - a.liveBefore));
@@ -105,7 +104,7 @@ async function computePlan(db: Db, plant: string, asOf: string, items: CountItem
       openLoadSlips: Number((openLoad as any[])[0]?.n ?? 0),
       openUnloadVehicles: (openUnload as any[]).map((r) => `${r.vehicle_number} (${r.d})`),
       futureDate: asOf > todayStr(),
-      salesInScope: soldSince,
+      salesInScope: 0,
     },
   };
 }
@@ -134,7 +133,8 @@ async function plantsFor(db: Db, plant: string): Promise<string[]> {
   return out.sort((x, y) => x.localeCompare(y));
 }
 const zeroOnlyOf = (req: Request) => req.body?.zeroOnly === true;
-const keepSinceOf = (req: Request) => req.body?.keepSince !== false;
+// Default: the manual adjustments (Adjust column) already made on/after the start day are thrown away; the scans (purchases) and loads of that day stay. Only an explicit keepSince:true keeps the adjustments too.
+const keepSinceOf = (req: Request) => req.body?.keepSince === true;
 
 // POST /api/stock-reset/preview — { plant | 'all', asOfDate, zeroOnly?, items?:[{barcode, quantity}] }. Nothing is changed.
 // zeroOnly = no count file: every item goes to what was already scanned on/after the day (usually 0); the opening stock is
@@ -218,7 +218,7 @@ router.post('/stock-reset/apply', requireAdminRole, async (req: Request, res: Re
           `INSERT INTO stock_reset_discards (batch_id, movement_id, prev_effective_date)
            SELECT $1, sm.id, sm.effective_date FROM stock_movements sm
              LEFT JOIN order_import_sessions ois ON sm.source IS DISTINCT FROM 'unloading' AND ois.id = sm.session_id
-            WHERE sm.source IS DISTINCT FROM 'loading' AND sm.type <> 'dispatch' AND COALESCE(sm.origin,'') NOT IN ('settings','opening')
+            WHERE sm.source IS DISTINCT FROM 'loading' AND sm.type <> 'dispatch' AND COALESCE(sm.origin,'') NOT IN ('settings','opening','void') AND sm.type <> 'receive'
               AND LOWER(TRIM(sm.plant)) = LOWER(TRIM($2))
               AND COALESCE(sm.effective_date, CASE WHEN sm.source = 'unloading' THEN sm.created_at::date ELSE COALESCE(ois.order_date::date, sm.created_at::date) END) >= $3::date`,
           [batchId, plan.plantName, asOf]);

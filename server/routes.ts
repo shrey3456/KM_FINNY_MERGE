@@ -43,7 +43,7 @@ import {
   InsertMpOperation,
   InsertMpOperationItem,
 } from "@shared/schema";
-import { db } from "./db";
+import { db, pool } from "./db";
 import { eq, isNotNull } from "drizzle-orm";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
@@ -119,7 +119,6 @@ import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import settingsAdminRoutes from "./routes/settings-admin";
 import unloadingRoutes from "./routes/unloading";
 import openingStockRoutes from "./routes/opening-stock";
-import manualSalesRoutes from "./routes/manual-sales";
 import loadingSalesImportRoutes from "./routes/loading-sales-import";
 import stockResetRoutes from "./routes/stock-reset";
 import plantStockAdminRoutes from "./routes/plant-stock-admin";
@@ -4423,6 +4422,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   apiRouter.put("/proforma-slips/:id", requirePageWrite("proforma"), async (req: Request, res: Response) => {
     try {
+      const { rows: sg } = await pool.query(`SELECT system_generated FROM proforma_slips WHERE id = $1`, [Number(req.params.id)]);
+      if (sg[0]?.system_generated === true) return res.status(409).json({ message: 'This slip was generated from the Sales Orders file — it is view only. To change it, reverse its batch in Settings > Load from Sales Orders file.' });
+    } catch { /* column is created at server start */ }
+    try {
       const id = parseInt(req.params.id);
       console.log(`PUT /api/proforma-slips/${id} - Request body:`, req.body);
 
@@ -8215,7 +8218,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount Settings > Opening Stock import routes
   apiRouter.use(openingStockRoutes);
-  apiRouter.use(manualSalesRoutes);
   apiRouter.use(loadingSalesImportRoutes);
   apiRouter.use(stockResetRoutes);
 

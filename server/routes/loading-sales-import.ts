@@ -9,7 +9,8 @@ import { getPooledStock, getStatePlantNames, debitStatePool, recordStockPulls, r
 import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 import { getPlantStateCode, resolvePalletSizeOrQty } from './order-scan';
 import { reclassifyLoadingEvents } from './loading';
-import { reverseManualSaleBatch } from './manual-sales';
+import { reverseManualSaleBatch } from '../lib/manualSalesReverse';
+import { NOTION_LOADING_COMPLETE_STATUS } from '../services/notionOrderStatusSync';
 
 // Settings > Data Management > "Load from Sales Orders file". The file lists, per ORDER NUMBER, the items and quantities that
 // were really loaded (Date, Order Number, Party, Name of Item "SAP (name)", Balance Quantity). For each order the system finds
@@ -17,7 +18,8 @@ import { reverseManualSaleBatch } from './manual-sales';
 // asks, an Extra row for anything beyond it), the per-plant stock pulls (stock comes off the slip plant's whole state pool,
 // own plant first), and the stock ledger lines — so Load Master, Stock Overview's Sale and the slip pages all show it.
 //
-// What it deliberately does NOT do: change a slip's status, mark it complete, or send anything to Notion. Stock never goes
+// Each slip it loads is marked Ready for Dispatch (loading complete) in OUR system only — nothing is sent to Notion, and a reverse puts
+// the slip back as it was. What it deliberately does NOT do: send anything to Notion or touch a slip it did not load. Stock never goes
 // below zero — an item the pool cannot cover loads what there is. The file is the day's TOTAL for each order + item, so boxes
 // already loaded on the slip are counted first and only the difference is added (uploading the same file twice adds nothing).
 // Everything is one batch that can be reversed. Entries are stamped at 12:00 on the slip's order date (the app stores local time).
@@ -323,7 +325,15 @@ router.post('/loading-sales/apply', requireAdminRole, async (req: Request, res: 
         [p.slip.order_number, p.slip.id, p.slip.party_name, p.slip.plant, p.slip.vehicle_number ?? '', userCode ?? null, `${userName ?? userCode ?? 'Admin'} (sales file)`, `${p.slip.order_date} 12:00:00`]);
       createdRecordIds.push(ins[0].id);
     }
-    await client.query(`UPDATE loading_sales_batches SET event_count = $2, total_qty = $3, created_record_ids = $4 WHERE id = $1`, [batchId, events, boxes, createdRecordIds]);
+    // Ready for Dispatch, in our system only (the same fields the Complete button sets) — no Notion call at all.
+    const completedSlips: Record<string, string | null> = {};
+    for (const slipId of seenSlips) {
+      const { rows: cur } = await client.query(`SELECT notion_status FROM proforma_slips WHERE id = $1 AND loading_completed_at IS NULL FOR UPDATE`, [slipId]);
+      if (!cur[0]) continue;
+      completedSlips[String(slipId)] = cur[0].notion_status ?? null;
+      await client.query(`UPDATE proforma_slips SET loading_completed_at = NOW(), loading_completed_by_code = $2, notion_status = $3, system_generated = true WHERE id = $1`, [slipId, userCode ?? null, NOTION_LOADING_COMPLETE_STATUS]);
+    }
+    await client.query(`UPDATE loading_sales_batches SET event_count = $2, total_qty = $3, created_record_ids = $4, completed_slips = $5::jsonb WHERE id = $1`, [batchId, events, boxes, createdRecordIds, JSON.stringify(completedSlips)]);
     await client.query(
       `UPDATE products pr SET in_stock = COALESCE((SELECT SUM(pps.in_stock) FROM product_plant_stock pps WHERE LOWER(pps.barcode) = LOWER(pr.barcode)), 0)
         WHERE LOWER(pr.barcode) IN (SELECT LOWER(TRIM(x)) FROM unnest($1::text[]) AS x)`, [toWrite.map((p) => p.item.barcode)]);
@@ -336,7 +346,7 @@ router.post('/loading-sales/apply', requireAdminRole, async (req: Request, res: 
         userCode, userName,
       });
     } catch { /* the loading matters more than its log line */ }
-    res.json({ success: true, batchId, ordersLoaded: new Set(toWrite.map((p) => p.slip.order_number)).size, events, boxes, summary: summarise(r), manualReversed: manual.length });
+    res.json({ success: true, batchId, ordersLoaded: new Set(toWrite.map((p) => p.slip.order_number)).size, events, boxes, summary: summarise(r), manualReversed: manual.length, markedReady: Object.keys(completedSlips).length });
   } catch (error: any) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('Error creating loading from sales file:', error);
@@ -397,6 +407,10 @@ router.post('/loading-sales/batches/:id/reverse', requireAdminRole, async (req: 
     await client.query(
       `UPDATE products pr SET in_stock = COALESCE((SELECT SUM(pps.in_stock) FROM product_plant_stock pps WHERE LOWER(pps.barcode) = LOWER(pr.barcode)), 0)
         WHERE LOWER(pr.barcode) IN (SELECT LOWER(TRIM(x)) FROM unnest($1::text[]) AS x)`, [[...touched].map((k) => k.split('|')[1])]);
+    // slips this batch marked Ready for Dispatch go back to being open, with their old Notion status
+    for (const [slipId, prev] of Object.entries((b[0].completed_slips ?? {}) as Record<string, string | null>)) {
+      await client.query(`UPDATE proforma_slips SET loading_completed_at = NULL, loading_completed_by_code = NULL, notion_status = $2, system_generated = false WHERE id = $1 AND loading_completed_at IS NOT NULL`, [Number(slipId), prev ?? null]);
+    }
     // the Loading-list rows this batch created go with it (only if the order has no other live entries)
     for (const rid of (b[0].created_record_ids ?? []) as number[]) {
       await client.query(`DELETE FROM loading_records lr WHERE lr.id = $1 AND NOT EXISTS (SELECT 1 FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE)`, [rid]);

@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import { pool as defaultPool } from '../db';
 
-// Manual Sales tables (Settings > Data Management > Manual Sales; server/routes/manual-sales.ts). Created with
+// Manual Sales tables (the Manual Sales screen was removed — batches made before that still count in Sale and can be reversed by Load from Sales Orders file, see manualSalesReverse.ts). Created with
 // CREATE ... IF NOT EXISTS, so a plain server start is enough on any database — no `npm run db:*` needed.
 // Also described in shared/schema.ts, for anyone who prefers generate + migrate; the two are the same shape.
 export async function ensureManualSalesSchema(pool: Pool): Promise<void> {

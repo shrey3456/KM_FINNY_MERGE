@@ -32,6 +32,28 @@ import { computeLoadDateReport, computeLoadDateActivity } from '../lib/loadDateR
 // domain logic, not the legacy feature this page was told not to depend on.
 const router = Router();
 
+// Slips generated from the Sales Orders file are VIEW ONLY: nothing about them can be changed through the Loading routes (scan,
+// adjust, complete, reopen, reset, pause/claim, vehicle, Sync to Notion, and voiding / editing one of their entries). To change one,
+// reverse its batch in Settings (that clears the flag).
+const SYSTEM_GENERATED_MESSAGE = 'This slip was generated from the Sales Orders file — it is view only. To change it, reverse its batch in Settings > Load from Sales Orders file.';
+router.use(async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+    let orderNumber: string | null = null;
+    const byOrder = /\/loading\/proforma\/([^/]+)\//.exec(req.path);
+    const byEvent = /\/loading\/events\/(\d+)/.exec(req.path);
+    if (byOrder) orderNumber = decodeURIComponent(byOrder[1]);
+    else if (byEvent) {
+      const { rows } = await pool.query(`SELECT order_number FROM loading_scan_events WHERE id = $1`, [Number(byEvent[1])]);
+      orderNumber = rows[0]?.order_number ?? null;
+    }
+    if (!orderNumber) return next();
+    const { rows } = await pool.query(`SELECT system_generated FROM proforma_slips WHERE order_number = $1`, [orderNumber]);
+    if (rows[0]?.system_generated === true) return res.status(409).json({ message: SYSTEM_GENERATED_MESSAGE });
+    next();
+  } catch { next(); } // the column is created at server start; never let this check break normal loading
+});
+
 function actor(req: Request): { userCode?: string; userName?: string } {
   const u = req.user as any;
   return { userCode: u?.userCode, userName: u?.name || u?.username || u?.userCode };
@@ -1265,7 +1287,7 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 CASE WHEN ps.loading_completed_by_code = 'system' THEN 'System' ELSE (SELECT u.name FROM users u WHERE u.user_code = ps.loading_completed_by_code LIMIT 1) END AS "loadingCompletedByName",
                 ps.loading_owner_code AS "loadingOwnerCode", ps.loading_owner_name AS "loadingOwnerName",
                 ps.loading_paused_at AS "loadingPausedAt",
-                ps.loading_stv AS "loadingStv",
+                ps.loading_stv AS "loadingStv", ps.system_generated AS "systemGenerated",
                 COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0)::int AS "totalQty",
                 COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0)::int AS "loadedQty",
                 -- The order's own cargo volume, and how much of it is on the vehicle so far: each
@@ -1301,25 +1323,37 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
         listParams,
       ),
       pool.query(
-        `SELECT COUNT(*)::int AS slips, COALESCE(SUM(t.qty),0)::int AS qty, COALESCE(SUM(t.loaded),0)::int AS "loadedQty",
-                COALESCE(SUM(t.vol),0)::float AS volume, COALESCE(SUM(t.lvol),0)::float AS "loadedVolume"
-           FROM (
-             SELECT COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0) AS qty,
-                    COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0) AS loaded,
-                    CASE WHEN ps.total_volume ~ '^[0-9]+([.][0-9]+)?$' THEN ps.total_volume::numeric ELSE 0 END AS vol,
-                    COALESCE((
-                      SELECT SUM(ev.q * iv.vol)
-                      FROM (SELECT barcode, SUM(total_qty) AS q FROM loading_scan_events
-                             WHERE order_number = lr.order_number AND voided IS NOT TRUE GROUP BY barcode) ev
-                      JOIN LATERAL (
-                        SELECT CASE WHEN i.volume_in_cu_ft ~ '^[0-9]+([.][0-9]+)?$' THEN i.volume_in_cu_ft::numeric ELSE 0 END AS vol
-                        FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id AND i.barcode = ev.barcode LIMIT 1
-                      ) iv ON TRUE
-                    ), 0) AS lvol
+        // Whole-list totals, worked out set-wise: each table is read ONCE and aggregated (no per-row sub-queries), so the cost grows with
+        // the data, not with the data times the number of rows. Same numbers as the per-row version it replaced.
+        `WITH base AS (
+             SELECT ps.id AS slip_id, lr.order_number,
+                    CASE WHEN ps.total_volume ~ '^[0-9]+([.][0-9]+)?$' THEN ps.total_volume::numeric ELSE 0 END AS vol
                FROM loading_records lr
                LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
                ${listWhere}
-           ) t`,
+           ),
+           need AS (
+             SELECT i.proforma_slip_id AS slip_id, SUM(i.quantity)::numeric AS q
+               FROM proforma_slip_items i WHERE i.proforma_slip_id IN (SELECT slip_id FROM base WHERE slip_id IS NOT NULL) GROUP BY 1
+           ),
+           item_vol AS (
+             SELECT DISTINCT ON (i.proforma_slip_id, i.barcode) i.proforma_slip_id AS slip_id, i.barcode,
+                    CASE WHEN i.volume_in_cu_ft ~ '^[0-9]+([.][0-9]+)?$' THEN i.volume_in_cu_ft::numeric ELSE 0 END AS vol
+               FROM proforma_slip_items i WHERE i.proforma_slip_id IN (SELECT slip_id FROM base WHERE slip_id IS NOT NULL)
+              ORDER BY i.proforma_slip_id, i.barcode, i.id
+           ),
+           done AS (
+             SELECT e.order_number, e.barcode, SUM(e.total_qty)::numeric AS q
+               FROM loading_scan_events e
+              WHERE e.voided IS NOT TRUE AND e.order_number IN (SELECT order_number FROM base) GROUP BY 1, 2
+           )
+           SELECT (SELECT COUNT(*) FROM base)::int AS slips,
+                  COALESCE((SELECT SUM(q) FROM need), 0)::int AS qty,
+                  COALESCE((SELECT SUM(q) FROM done), 0)::int AS "loadedQty",
+                  COALESCE((SELECT SUM(vol) FROM base), 0)::float AS volume,
+                  COALESCE((SELECT SUM(d.q * COALESCE(v.vol, 0)) FROM done d
+                              JOIN base b ON b.order_number = d.order_number
+                              LEFT JOIN item_vol v ON v.slip_id = b.slip_id AND v.barcode = d.barcode), 0)::float AS "loadedVolume"`,
         listParams,
       ),
     ]);

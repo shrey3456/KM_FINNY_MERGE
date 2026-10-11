@@ -221,7 +221,7 @@ export default function LoadCsvUpload() {
       }
       const lead = `Create loading entries for ${sm.ordersFound} order(s): ${sm.boxes.toLocaleString()} boxes.`;
       const warn = [sm.short ? `${sm.short} item(s) have no stock and will be skipped` : "", sm.partial ? `${sm.partial} item(s) will load only what is in stock` : "", sm.unmatched ? `${sm.unmatched} line(s) not matched` : "", sm.alreadyCovered ? `${sm.alreadyCovered} item(s) already loaded` : ""].filter(Boolean).join("; ");
-      if (!window.confirm(`${lead}${warn ? "\n\n" + warn + "." : ""}\n\nSlip status is not changed and nothing is sent to Notion. Continue?`)) { setCreating(false); return; }
+      if (!window.confirm(`${lead}${warn ? "\n\n" + warn + "." : ""}\n\nEach slip is marked Ready for Dispatch in our system only — nothing is sent to Notion. Continue?`)) { setCreating(false); return; }
       const r: any = await apiRequest("POST", "/api/loading-sales/apply", { lines: loadLines, csvFileName: fileName || null, reverseManualSales }, false, true);
       toast({ title: "Loading created", description: `${r.ordersLoaded} order(s), ${r.events} entr${r.events === 1 ? "y" : "ies"}, ${(r.boxes ?? 0).toLocaleString()} boxes. It can be reversed from Settings > Load from Sales Orders file.` });
       rerun({});
@@ -247,7 +247,7 @@ export default function LoadCsvUpload() {
 
       <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
         Check the preview first, then press Create loading. The plant comes from each order's slip. Orders whose slip has no plant ask you
-        for one here (your pick is not saved to the slip). Creating the loading records the matched lines as loading entries and takes the stock off; it does not change a slip's status.
+        for one here (your pick is not saved to the slip). Creating the loading records the matched lines as loading entries and takes the stock off; each slip is marked Ready for Dispatch in our system only (nothing is sent to Notion).
       </div>
 
       <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">

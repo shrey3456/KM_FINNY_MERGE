@@ -118,8 +118,18 @@ function resolveStoreKeeperTags(parts: string[], existing: string[]): string[] {
 // Replaces the StoreKeeper tags on every ORDER-database page for this order with the app's current
 // value. Same best-effort rules as the status push below: never throws, a Notion failure never
 // blocks the Loading action that triggered it.
+// Slips generated from the Sales Orders file (proforma_slips.system_generated) are never written to Notion —
+// not their status, vehicle or StoreKeeper Info — whoever asks (opening the load, Complete, Sync to Notion, a vehicle change).
+async function isNotionBlocked(orderNumber: string): Promise<boolean> {
+  try {
+    const { rows } = await pool.query(`SELECT system_generated FROM proforma_slips WHERE order_number = $1`, [orderNumber]);
+    return rows[0]?.system_generated === true;
+  } catch { return false; } // the column is created at server start; never let this check break a normal push
+}
+
 export async function pushStoreKeeperInfoToNotion(orderNumber: string, storeKeeperInfo: string | null | undefined): Promise<void> {
   try {
+    if (await isNotionBlocked(orderNumber)) return;
     const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
     if (!ORDER_DATABASE_ID) {
       console.warn('[Notion storekeeper sync] ORDER_DATABASE_ID not set — skipping push');
@@ -157,6 +167,7 @@ export async function pushStoreKeeperInfoToNotion(orderNumber: string, storeKeep
 // on any failure (missing env vars, Notion API error, no matching page, etc).
 export async function pushOrderStatusToNotion(orderNumber: string, statusName: string): Promise<void> {
   try {
+    if (await isNotionBlocked(orderNumber)) return;
     const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
     if (!ORDER_DATABASE_ID) {
       console.warn('[Notion status sync] ORDER_DATABASE_ID not set — skipping status push');
@@ -324,6 +335,7 @@ async function runNotionAttempt(orderNumber: string, entry: PendingNotionSync): 
 // it went); any later tries carry on in the background. Never throws.
 export async function syncOrderToNotion(orderNumber: string, want: NotionWanted, who?: NotionWho): Promise<NotionSyncOutcome> {
   try {
+    if (await isNotionBlocked(orderNumber)) return { state: 'skipped', message: 'This slip was generated from the Sales Orders file — it is not sent to Notion.' };
     const previous = pendingNotionSyncs.get(orderNumber);
     if (previous?.timer) clearTimeout(previous.timer);
     const entry: PendingNotionSync = { want: { ...(previous?.want ?? {}), ...want }, tries: 0, who };
@@ -352,6 +364,7 @@ export async function reconcileOrderWithNotion(
   orderNumber: string, who?: NotionWho, opts?: { throttleMs?: number; keepCurrentStatus?: boolean },
 ): Promise<NotionSyncOutcome | null> {
   try {
+    if (await isNotionBlocked(orderNumber)) return null;
     if (opts?.throttleMs) {
       const last = lastReconcileAt.get(orderNumber) ?? 0;
       if (Date.now() - last < opts.throttleMs) return null;

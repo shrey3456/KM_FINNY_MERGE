@@ -356,6 +356,8 @@ export const proformaSlips = pgTable("proforma_slips", {
   invoiceNumber: text("invoice_number"),
   partyState: text("party_state"),
   notionStatus: text("notion_status"), // Notion's "+ / - Status :" property
+  // Slips the Sales Orders tools generated: view only in the app and never written to Notion.
+  systemGenerated: boolean("system_generated").notNull().default(false),
   storeKeeperInfo: text("storekeeper_info"),
   // Full raw property map read off the Notion page at import time (property name -> extracted
   // display value), so any Notion column not mapped to its own DB field above is still kept
@@ -1788,6 +1790,7 @@ export const loadingSalesBatches = pgTable("loading_sales_batches", {
   reversedAt: timestamp("reversed_at"),
   reversedByCode: text("reversed_by_code"),
   createdRecordIds: integer("created_record_ids").array(),
+  completedSlips: jsonb("completed_slips"),
 });
 
 export const loadingSalesBatchEvents = pgTable("loading_sales_batch_events", {

@@ -43,8 +43,8 @@ export default function StockResetCard({ isAdmin }: { isAdmin: boolean }) {
   const [plant, setPlant] = useState("");
   const [asOf, setAsOf] = useState(todayLocal());
   const [setTracking, setSetTracking] = useState(true);
-  // Keep what was already scanned / adjusted on or after the start day (default). Off = start from nothing: those lines are thrown away too.
-  const [keepSince, setKeepSince] = useState(true);
+  // Off (default) = the manual adjustments (Adjust column) made on/after the start day are thrown away; scans (purchases) of that day stay. Tick to keep the adjustments too.
+  const [keepSince, setKeepSince] = useState(false);
   const [csv, setCsv] = useState<{ name: string; headers: string[]; rows: Record<string, string>[] } | null>(null);
   const [mapping, setMapping] = useState({ barcode: CSV_SKIP, quantity: CSV_SKIP });
   const [items, setItems] = useState<{ barcode: string; quantity: number }[]>([]);
@@ -60,7 +60,7 @@ export default function StockResetCard({ isAdmin }: { isAdmin: boolean }) {
   });
 
   const reset = () => {
-    setOpen(false); setStep("setup"); setMode("zero"); setPlant(""); setAsOf(todayLocal()); setSetTracking(true); setKeepSince(true); setCsv(null);
+    setOpen(false); setStep("setup"); setMode("zero"); setPlant(""); setAsOf(todayLocal()); setSetTracking(true); setKeepSince(false); setCsv(null);
     setMapping({ barcode: CSV_SKIP, quantity: CSV_SKIP }); setItems([]); setPreview(null); setConfirmText("");
   };
 
@@ -210,7 +210,7 @@ export default function StockResetCard({ isAdmin }: { isAdmin: boolean }) {
               </div>
               <label className="flex items-start gap-2 text-sm">
                 <input type="checkbox" className="mt-1" checked={keepSince} onChange={(e) => setKeepSince(e.target.checked)} />
-                <span>Keep what was already scanned or adjusted on or after the start day <span className="text-gray-500">(untick to start from nothing: manual adjustments and scans of that day and later are thrown away too — loads cannot be)</span></span>
+                <span>Keep the manual adjustments already made on or after the start day <span className="text-gray-500">(unticked = they are removed. Scans — unloading and order-scan purchases — and loads of that day always stay)</span></span>
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" checked={setTracking} onChange={(e) => setSetTracking(e.target.checked)} />

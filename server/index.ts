@@ -6,6 +6,7 @@ import { tagStockMovementSources } from './lib/stockRecalc';
 import { ensureManualSalesSchema } from './lib/manualSalesSchema';
 import { ensureLoadingSalesSchema } from './lib/loadingSalesSchema';
 import { ensureStockResetSchema } from './lib/stockResetSchema';
+import { ensureLoadingIndexes } from './lib/loadingIndexes';
 
 
 const app = express();
@@ -86,6 +87,11 @@ app.use((req, res, next) => {
     await ensureStockResetSchema(pool);
   } catch (error) {
     console.error('Could not prepare the stock-reset tables:', error);
+  }
+  try {
+    await ensureLoadingIndexes(pool);
+  } catch (error) {
+    console.error('Could not create the Loading indexes:', error);
   }
 
   // Run migrations
