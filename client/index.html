@@ -62,6 +62,14 @@
            <main>. The document must therefore never scroll — without this, anything
            that pushes #root past the viewport adds a second, outer scrollbar. */
         overflow: hidden;
+        /* overflow:hidden alone doesn't stop a touch browser (tablet Chrome/Safari) from panning
+           the page sideways or down when anything pokes past the viewport — it then shows a blank
+           white area beyond the app. Pinning the document to the viewport removes that scroll
+           entirely; the app's own panes still scroll inside it. */
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        overscroll-behavior: none;
       }
       #root {
         /* height, not min-height: min-height lets #root grow past the viewport, which
