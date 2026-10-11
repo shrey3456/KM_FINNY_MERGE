@@ -8309,14 +8309,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // on the Proforma Slips page calls manually (server/services/proformaNotionSync.ts), so a
   // scheduled run and a manual one behave identically and share the same pending-review state.
   if (process.env.NOTION_PAGE_URL && process.env.ORDER_DATABASE_ID) {
-    const { syncLatestDateFromOrderDb } = await import('./services/proformaNotionSync');
+    const { syncLatestDateFromOrderDb, getAutoApplyEnabled: getProformaAutoApplyEnabled } = await import('./services/proformaNotionSync');
     const PROFORMA_SYNC_INTERVAL_MS = 5 * 60 * 60 * 1000;
     // Refreshes only the latest order date's existing slips from the Notion Order DB.
     const runScheduledProformaSync = async () => {
       try {
-        const r = await syncLatestDateFromOrderDb();
+        // Auto-apply toggle off: nothing is written, the run only reports what would change.
+        const apply = await getProformaAutoApplyEnabled();
+        const r = await syncLatestDateFromOrderDb(apply);
         console.log(r.date
-          ? `[Proforma Sync] ${r.date}: checked ${r.checked} existing slip(s), updated ${r.updated}.`
+          ? `[Proforma Sync] ${r.date}: checked ${r.checked} existing slip(s), ${apply ? `updated ${r.updated}` : `${r.updated} would change — NOT applied (auto-apply is off)`}.`
           : '[Proforma Sync] No slips yet, nothing to sync.');
       } catch (err) {
         console.error('[Proforma Sync] Scheduled sync failed:', err);
@@ -8324,7 +8326,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
     setInterval(() => runScheduledProformaSync(), PROFORMA_SYNC_INTERVAL_MS);
     setTimeout(() => runScheduledProformaSync(), 20000);
-    console.log('[Proforma Sync] 5-hour auto sync+apply scheduler registered');
+    console.log('[Proforma Sync] 5-hour auto sync scheduler registered');
   }
 
   // Return the HTTP server with WebSocket support

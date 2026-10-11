@@ -597,7 +597,8 @@ export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string): 
 // Proforma and, for that date only, re-reads the Notion ORDER database (Plant / Finny Status /
 // Proforma Qty) and updates those existing slips. It never touches the dispatch DB, never
 // creates slips, never looks at earlier dates, and does not go through the pending-review state.
-export async function syncLatestDateFromOrderDb(): Promise<{ date: string | null; checked: number; updated: number }> {
+// Pass apply=false (auto-apply toggle off) to only report how many slips would change.
+export async function syncLatestDateFromOrderDb(apply: boolean): Promise<{ date: string | null; checked: number; updated: number }> {
   const { rows } = await pool.query(`SELECT to_char(MAX(order_date), 'YYYY-MM-DD') AS d FROM proforma_slips`);
   const date: string | null = rows[0]?.d ?? null;
   if (!date) return { date: null, checked: 0, updated: 0 };
@@ -638,7 +639,8 @@ export async function syncLatestDateFromOrderDb(): Promise<{ date: string | null
       if (status && status !== slip.notionStatus) changes.notionStatus = status;
       if (qty !== undefined && qty !== slip.totalQuantity) changes.totalQuantity = qty;
       if (Object.keys(changes).length > 0) {
-        await storage.updateProformaSlip(slip.id, changes);
+        // apply=false (auto-apply toggle off): only count what would change, write nothing.
+        if (apply) await storage.updateProformaSlip(slip.id, changes);
         updated++;
       }
     }
