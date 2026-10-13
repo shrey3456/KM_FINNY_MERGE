@@ -63,6 +63,7 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, buildPageList, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { productMatchesSearch, stateOfPlant } from "@/lib/sapByState";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -1634,15 +1635,16 @@ export default function ProformaSlips() {
               <div className="relative">
                 <Input
                   type="text"
-                  placeholder="Search items by name or Sr.No..."
+                  placeholder="Search items by name, Sr.No, barcode or SAP..."
                   value={searchQuery}
                   onChange={(e) => {
                     setSearchQuery(e.target.value);
                     if (e.target.value.trim() !== '' && products) {
+                      // Name / Sr.No as before; barcode and SAP follow the slip plant's state (the SAP of another state is not matched).
+                      const sapState = stateOfPlant(slip.plant, dbPlants);
                       const filtered = products.filter(product =>
-                        product.name?.toLowerCase().includes(e.target.value.toLowerCase()) ||
                         product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
-                        product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
+                        productMatchesSearch(product as any, e.target.value, sapState)
                       );
                       setFilteredProducts(filtered);
                     } else if (searchFocused && products) {
@@ -1752,15 +1754,15 @@ export default function ProformaSlips() {
                           <Input
                             autoFocus
                             type="text"
-                            placeholder="Search by name, Sr.No, or barcode..."
+                            placeholder="Search by name, Sr.No, barcode or SAP..."
                             value={skuEditQuery}
                             onChange={(e) => {
                               setSkuEditQuery(e.target.value);
                               if (e.target.value.trim() !== '' && products) {
+                                const sapState = stateOfPlant(slip.plant, dbPlants);
                                 setFilteredSkuProducts(products.filter(product =>
-                                  product.name?.toLowerCase().includes(e.target.value.toLowerCase()) ||
                                   product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
-                                  product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
+                                  productMatchesSearch(product as any, e.target.value, sapState)
                                 ));
                               } else {
                                 setFilteredSkuProducts(products ?? null);

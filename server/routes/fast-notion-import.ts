@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { fetchProformaOrdersFromNotion, writeOrderToDb } from '../services/proformaNotionSync';
+import { fetchProformaOrdersFromNotion, writeOrderToDb, logProformaSync } from '../services/proformaNotionSync';
 import { requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
@@ -32,16 +32,23 @@ router.post('/fast-notion-import', requirePageWrite('proforma'), async (req, res
 
     let slipsCreated = 0;
     let itemsCreated = 0;
+    const createdOrders: string[] = [];
 
     for (const [orderNo, orderData] of Array.from(ordersMap.entries())) {
       try {
         const result = await writeOrderToDb(orderData);
-        if (result.created) slipsCreated++;
+        if (result.created) { slipsCreated++; createdOrders.push(orderNo); }
         itemsCreated += result.itemsCreated;
       } catch (error) {
         console.error(`Error processing order ${orderNo}:`, error);
       }
     }
+
+    const u = req.user as any;
+    void logProformaSync(
+      `Notion import (Proforma Slips) by ${u?.name || u?.username || u?.userCode || 'unknown'}: ${startDate} to ${endDate} — ${ordersMap.size} order(s) read from Notion, ${slipsCreated} slip(s) created${createdOrders.length ? ` [${createdOrders.slice(0, 30).join(', ')}${createdOrders.length > 30 ? `, +${createdOrders.length - 30} more` : ''}]` : ''}, ${itemsCreated} item(s) written`,
+      { userCode: u?.userCode ?? null, userName: u?.name || u?.username || u?.userCode || null },
+    );
 
     return res.status(200).json({
       success: true,

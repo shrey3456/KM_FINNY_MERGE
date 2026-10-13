@@ -11,6 +11,7 @@ import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import { useSidebarContext } from "@/lib/sidebarContext";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { productMatchesSearch, stateOfPlant } from "@/lib/sapByState";
 import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, type FilterOption, matchAllConditions } from "@/lib/columnFilters";
 import { format as formatDay } from "date-fns";
@@ -165,6 +166,8 @@ type VehicleSuggestion = {
 type LoadingRecord = {
   // generated from the Sales Orders file: view only, no Reopen / Delete
   systemGenerated?: boolean;
+  // the status stored on the slip (Notion's "Finny Status"), and whether it was created under Auto Dispatch
+  notionStatus?: string | null; autoDispatch?: boolean; dispatchedAt?: string | null;
   id: number; orderNumber: string; partyName: string | null; plant: string | null;
   vehicleNumber: string; rtoNumber: string | null; volume: string | null;
   createdByCode: string | null; createdByName: string | null;
@@ -514,7 +517,7 @@ export default function LoadOperation() {
       setRecordsPage(1);
     }
   }, [recordsFilterSignature]);
-  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; totals?: { slips: number; qty: number; loadedQty: number; volume: number; loadedVolume: number }; slipsCount: number; loadingCount: number; readyDespCount: number }>({
+  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; totals?: { slips: number; qty: number; loadedQty: number; volume: number; loadedVolume: number }; slipsCount: number; loadingCount: number; readyDespCount: number; dispatchedCount?: number; otherCount?: number }>({
     queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab, createdByMe],
     queryFn: async () => {
       const params = new URLSearchParams({ limit: String(recordsPageSize), offset: String(recordsOffset) });
@@ -533,6 +536,8 @@ export default function LoadOperation() {
   const slipsCount = recordsQuery.data?.slipsCount ?? 0;
   const inProgressCount = recordsQuery.data?.loadingCount ?? 0;
   const readyDespCount = recordsQuery.data?.readyDespCount ?? 0;
+  const dispatchedCount = recordsQuery.data?.dispatchedCount ?? 0;
+  const otherCount = recordsQuery.data?.otherCount ?? 0;
 
   // Plant options for PlantFilter, straight from Plant Management (same source PlantBadge reads),
   // so the filter's colors match the badges rendered in the rows.
@@ -548,7 +553,13 @@ export default function LoadOperation() {
   // "READY≈DESP" once loading is complete, "LOADING" while it's still in progress — the same two
   // Finny Status values this page pushes to Notion (server/services/notionOrderStatusSync.ts), so
   // the status shown here reads identically to Load Operations' own status column.
-  const recordStatus = (r: LoadingRecord) => (r.loadingCompletedAt ? "READY≈DESP" : "LOADING");
+  // A later stage stored on the slip (Dispatched, Delivered ...) is shown as it is; otherwise Loading until completed, then Ready for Dispatch.
+  const LATER_STAGES = ["DISPATCHED", "DELIVERED", "UNLOADING", "SHORTAGE", "CANCELLED"];
+  const laterStageOf = (r: { notionStatus?: string | null }) => {
+    const v = String(r.notionStatus ?? "").trim().toUpperCase();
+    return LATER_STAGES.includes(v) ? v : null;
+  };
+  const recordStatus = (r: LoadingRecord) => laterStageOf(r) ?? (r.loadingCompletedAt ? "READY≈DESP" : "LOADING");
   // The status badge itself takes Notion's own colour for the status (NotionStatusBadge); this is
   // only the left accent strip on the mobile card list, by completed/paused/in-progress.
   const recordAccentBorderClass = (r: LoadingRecord) =>
@@ -567,8 +578,10 @@ export default function LoadOperation() {
     r.loadingCompletedAt ? (r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "") : "";
   // Reopen: an admin/super-admin, Supervisor, or the load's current owner (server enforces the
   // same rule).
+  // A load created under Auto Dispatch cannot be reopened once it has gone out (Dispatched, Delivered ...) — the server refuses it too.
+  const isLockedByDispatch = (r: LoadingRecord) => !!r.autoDispatch && (!!r.dispatchedAt || !!laterStageOf(r));
   const canReopenRecord = (r: LoadingRecord) =>
-    !r.systemGenerated && !!r.loadingCompletedAt && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
+    !r.systemGenerated && !isLockedByDispatch(r) && !!r.loadingCompletedAt && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
   const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
     { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
     { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
@@ -656,6 +669,24 @@ export default function LoadOperation() {
   // each, same Dialog/target pattern Reset already uses, so an accidental tap can't undo a
   // completed load or take ownership away from whoever currently has it.
   const [reopenTarget, setReopenTarget] = useState<string | null>(null);
+
+  // "Sync status" — reads the status of every load from Notion and brings OUR stored status in line (Notion is only read here).
+  // Admin only; the server refuses anyone else.
+  const syncStatusMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/loading/sync-status-from-notion", {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Sync failed");
+      return res.json() as Promise<{ checked: number; updated: number; unchanged: number; notFound: number; changes: { orderNumber: string; from: string | null; to: string }[] }>;
+    },
+    onSuccess: (data) => {
+      toast({
+        title: data.updated > 0 ? `${data.updated} status${data.updated === 1 ? "" : "es"} updated from Notion` : "Statuses are already up to date",
+        description: `${data.checked} load(s) checked · ${data.unchanged} unchanged${data.notFound > 0 ? ` · ${data.notFound} not found in Notion` : ""}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+    },
+    onError: (err: any) => toast({ title: "Could not sync statuses", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
   const [claimTarget, setClaimTarget] = useState<string | null>(null);
 
   const [resetTarget, setResetTarget] = useState<LoadingRecord | null>(null);
@@ -1496,12 +1527,11 @@ export default function LoadOperation() {
   const extraSearchResults = (() => {
     const q = extraSearch.trim().toLowerCase();
     if (!q) return [];
+    // SAP search follows the slip's plant state (GJ / MP / UP); name and barcode are not limited by state, so a barcode two products
+    // share shows both. See lib/sapByState.ts.
+    const sapState = stateOfPlant((slip as any)?.plant, allPlants);
     return (allProductsQuery.data ?? [])
-      .filter((p) =>
-        (p.name ?? "").toLowerCase().includes(q) ||
-        (p.barcode ?? "").toLowerCase().includes(q) ||
-        (p.sapCode ?? "").toLowerCase().includes(q),
-      )
+      .filter((p) => productMatchesSearch(p as any, q, sapState))
       .slice(0, 20);
   })();
   function resetExtraDialog() {
@@ -1835,25 +1865,6 @@ export default function LoadOperation() {
       if (notionNotice.description) toast(notionNotice);
     },
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
-  });
-
-  // "Sync to Notion" — re-checks this load's vehicle and status in Notion right now and fixes
-  // whatever differs (the server only writes to Notion here, never to this app).
-  const syncNotionMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/sync-notion`, {});
-      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Sync failed");
-      return res.json() as Promise<{ notion: { state: string; message: string } }>;
-    },
-    onSuccess: (data) => {
-      const state = data.notion?.state;
-      toast({
-        title: state === "ok" ? "Notion is up to date" : state === "skipped" ? "Nothing changed in Notion" : "Notion not updated yet",
-        description: data.notion?.message,
-        variant: state === "retrying" || state === "failed" ? "destructive" : undefined,
-      });
-    },
-    onError: (err: any) => toast({ title: "Could not sync to Notion", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // Shift handoff — Pause (current owner/admin steps away) and Claim (anyone with write access
@@ -2792,7 +2803,7 @@ export default function LoadOperation() {
                 </Button>
               )}
 
-              <div className="grid shrink-0 grid-cols-4 gap-2">
+              <div className="grid shrink-0 grid-cols-3 gap-2 sm:grid-cols-6">
                 <Button
                   variant="outline"
                   size="sm"
@@ -2829,6 +2840,31 @@ export default function LoadOperation() {
                     <span className="text-sm font-semibold">{readyDespCount}</span>
                   </div>
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-auto min-w-0 justify-start bg-purple-50 px-2 py-1.5 hover:bg-purple-100 sm:px-3"
+                  onClick={() => setActiveViewTab("dispatched")}
+                >
+                  <Truck className="mr-1.5 h-4 w-4 shrink-0 text-purple-600 sm:mr-2" />
+                  <div className="flex flex-col items-start">
+                    <span className="whitespace-nowrap text-xs font-bold">DISPATCHED</span>
+                    <span className="text-sm font-semibold">{dispatchedCount}</span>
+                  </div>
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-auto min-w-0 justify-start bg-gray-50 px-2 py-1.5 hover:bg-gray-100 sm:px-3"
+                  onClick={() => setActiveViewTab("other")}
+                  title="Delivered, Unloading, Shortage, Cancelled"
+                >
+                  <Package className="mr-1.5 h-4 w-4 shrink-0 text-gray-600 sm:mr-2" />
+                  <div className="flex flex-col items-start">
+                    <span className="whitespace-nowrap text-xs font-bold">OTHER</span>
+                    <span className="text-sm font-semibold">{otherCount}</span>
+                  </div>
+                </Button>
                 {/* One click: only the slips THIS user created (link-vehicle's created_by_code),
                     newest first — toggles off back to everyone's, same sort/filter either way. */}
                 <Button
@@ -2857,6 +2893,8 @@ export default function LoadOperation() {
                   <TabsTrigger value="overall" className="flex-1 max-w-[200px]">All Operations</TabsTrigger>
                   <TabsTrigger value="loading" className="flex-1 max-w-[200px]">Loading</TabsTrigger>
                   <TabsTrigger value="ready-desp" className="flex-1 max-w-[200px]">Ready for Dispatch</TabsTrigger>
+                  <TabsTrigger value="dispatched" className="flex-1 max-w-[200px]">Dispatched</TabsTrigger>
+                  <TabsTrigger value="other" className="flex-1 max-w-[200px]">Other</TabsTrigger>
                 </TabsList>
               </Tabs>
             </div>
@@ -2903,6 +2941,19 @@ export default function LoadOperation() {
                 onSetAll={(visible) => setRecordVisibleCols(new Set(visible ? Object.keys(RECORD_COLUMN_LABELS) : ["actions", "orderNumber"]))}
                 buttonClassName="h-9 shrink-0"
               />
+              {admin && canWrite && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-9 shrink-0 gap-1.5 text-xs"
+                  disabled={syncStatusMutation.isPending}
+                  title="Read every load's status from Notion and update it here"
+                  onClick={() => syncStatusMutation.mutate()}
+                >
+                  {syncStatusMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
+                  Sync status
+                </Button>
+              )}
             </div>
 
             {recordsQuery.isLoading ? (
@@ -3668,20 +3719,6 @@ export default function LoadOperation() {
                         onClick={() => setVehiclePanelOpen((v) => !v)}
                       >
                         <Truck className="mr-1 h-3 w-3" /> Vehicle
-                      </Button>
-                    )}
-                    {/* Re-checks this load's vehicle and status in Notion and fixes what differs. */}
-                    {admin && canWrite && !!lockedStv && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-6 rounded-full px-2 text-[11px] sm:h-7 sm:text-xs"
-                        disabled={syncNotionMutation.isPending}
-                        title="Check this load's vehicle and status in Notion and update Notion if it is behind"
-                        onClick={() => syncNotionMutation.mutate()}
-                      >
-                        {syncNotionMutation.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RotateCcw className="mr-1 h-3 w-3" />}
-                        Sync to Notion
                       </Button>
                     )}
                     {canComplete && !locked && (

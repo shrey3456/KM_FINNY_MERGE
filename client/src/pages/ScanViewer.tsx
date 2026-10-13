@@ -101,6 +101,19 @@ type HistoryEvent = {
   orderName: string; partIndex: number | null;
 };
 
+// Barcodes that the files list under more than one SAP code: those are different items and are not merged into one Master View row.
+function sharedBarcodeSetOf(files: Array<{ items: Array<{ barcode?: string | null; sapCode?: string | null }> }>): Set<string> {
+  const saps = new Map<string, Set<string>>();
+  files.forEach((f) => f.items.forEach((i) => {
+    const b = i.barcode?.trim().toLowerCase();
+    const sap = i.sapCode?.trim().toLowerCase();
+    if (!b || !sap) return;
+    if (!saps.has(b)) saps.set(b, new Set());
+    saps.get(b)!.add(sap);
+  }));
+  return new Set(Array.from(saps.entries()).filter(([, set]) => set.size > 1).map(([b]) => b));
+}
+
 const normalize = (v?: string | null) => String(v ?? "").trim().toLowerCase();
 
 // Most-recently-scanned first, so a freshly scanned item surfaces at the top the way it does on
@@ -489,11 +502,14 @@ export default function ScanViewer() {
   // the Scan Order page's own Master View.
   const allMvItems: MvMergedItem[] = useMemo(() => {
     if (!mvQuery.data) return [];
+    const sharedBarcodes = sharedBarcodeSetOf(mvQuery.data.files);
     const groups = new Map<string, MvMergedItem>();
     mvQuery.data.files.forEach((f) => {
       f.items.forEach((item) => {
-        const key = item.barcode?.trim().toLowerCase()
-          || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
+        const bc = item.barcode?.trim().toLowerCase();
+        const key = bc
+          ? (sharedBarcodes.has(bc) ? `${bc}::${item.sapCode?.trim().toLowerCase() ?? ''}` : bc)
+          : (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
           g = {

@@ -7,6 +7,7 @@ import { ensureManualSalesSchema } from './lib/manualSalesSchema';
 import { ensureLoadingSalesSchema } from './lib/loadingSalesSchema';
 import { ensureStockResetSchema } from './lib/stockResetSchema';
 import { ensureLoadingIndexes } from './lib/loadingIndexes';
+import { ensureAutoDispatchSchema } from './lib/autoDispatchSchema';
 
 
 const app = express();
@@ -90,6 +91,7 @@ app.use((req, res, next) => {
   }
   try {
     await ensureLoadingIndexes(pool);
+    await ensureAutoDispatchSchema(pool);
   } catch (error) {
     console.error('Could not create the Loading indexes:', error);
   }
@@ -818,6 +820,11 @@ app.use((req, res, next) => {
     setInterval(() => { runVehiclePlanningSync().catch(logVehiclePlanningSyncFailure); }, VEHICLE_PLANNING_SYNC_INTERVAL_MS);
     // Kick one off shortly after boot so the page isn't empty until the first daily tick.
     setTimeout(() => { runVehiclePlanningSync().catch(logVehiclePlanningSyncFailure); }, 20 * 1000);
+
+    // Auto Dispatch: a load created after this went live becomes Dispatched by itself an hour after it was completed
+    // (app and Notion) — see server/services/autoDispatch.ts. Reads the database, so a restart never loses a dispatch.
+    const { startAutoDispatchScheduler } = await import('./services/autoDispatch');
+    startAutoDispatchScheduler();
   } catch (error) {
     console.error('Error running migrations:', error);
   }

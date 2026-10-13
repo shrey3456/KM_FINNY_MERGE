@@ -318,7 +318,7 @@ const Login = ({ onLogin }: LoginProps) => {
             Created by
           </p>
           <p className="text-xs leading-tight text-gray-500 font-semibold">
-            व्रज पटेल
+            Vraj Patel
           </p>
         </div>
       </div>

@@ -1,5 +1,3 @@
-import { useLocation } from 'wouter';
-import MobileMenu from '@/components/ui/mobile-menu';
 import { 
   Card, 
   CardContent, 
@@ -236,7 +234,6 @@ async function parseOsCsvRaw(file: File): Promise<{ name: string; headers: strin
 }
 
 const Settings = () => {
-  const [location] = useLocation();
   const form = useForm();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1029,19 +1026,6 @@ const Settings = () => {
   
   return (
     <>
-      {/* Mobile Header */}
-      <header className="lg:hidden bg-white border-b border-gray-200 p-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center text-white font-bold">
-              KM
-            </div>
-            <h1 className="text-xl font-bold">KM-Tribe</h1>
-          </div>
-          <MobileMenu currentPath={location} />
-        </div>
-      </header>
-      
       <div className="flex-1 overflow-y-auto p-4 lg:p-6">
         <div className="max-w-4xl mx-auto">
           <div className="mb-6">

@@ -459,3 +459,38 @@ export async function watchStatusAfterVehicleChange(
     console.error('[Notion sync] Could not start the status watch:', error instanceof Error ? error.message : error);
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Reads the current "Finny Status :" of many orders from Notion at once (for the Load Operations "Sync status from Notion"
+// button). Orders are looked up in batches of 40 with one OR filter per batch, so a few hundred slips take a few requests, not
+// one request each. READ ONLY — nothing is written to Notion here. An order with no page is simply absent from the result;
+// when an order has several pages, the first one with a status wins.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+export async function fetchNotionStatusByOrderNumbers(orderNumbers: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const ORDER_DATABASE_ID = (process.env.ORDER_DATABASE_ID ?? '').trim();
+  if (!ORDER_DATABASE_ID || !process.env.NOTION_INTEGRATION_SECRET) throw new Error('Notion is not configured (ORDER_DATABASE_ID / NOTION_INTEGRATION_SECRET)');
+  const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
+  const { extractText } = await import('../lib/notionProperties');
+  const unique = Array.from(new Set(orderNumbers.map((o) => String(o).trim()).filter(Boolean)));
+  const BATCH = 40;
+  for (let i = 0; i < unique.length; i += BATCH) {
+    const chunk = unique.slice(i, i + BATCH);
+    let cursor: string | undefined;
+    do {
+      const response: any = await notion.databases.query({
+        database_id: ORDER_DATABASE_ID,
+        filter: { or: chunk.map((o) => ({ property: 'Order No. :', rich_text: { equals: o } })) } as any,
+        page_size: 100,
+        start_cursor: cursor,
+      });
+      for (const page of response.results as any[]) {
+        const orderNo = String(extractText(page.properties?.['Order No. :']) ?? '').trim();
+        const status = String(page.properties?.['Finny Status :']?.status?.name ?? '').trim();
+        if (orderNo && status && !result.has(orderNo)) result.set(orderNo, status);
+      }
+      cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+    } while (cursor);
+  }
+  return result;
+}

@@ -508,6 +508,24 @@ export async function detectProformaChanges(
   }
 }
 
+// Every Notion sync of Proforma Slips leaves one line in Activities (Notion sync entries): who ran it (or "System" for the scheduled
+// job), what it looked at, and how many slips it created or changed. Never throws — the sync itself has already happened.
+export async function logProformaSync(
+  details: string,
+  who?: { userCode?: string | null; userName?: string | null },
+): Promise<void> {
+  try {
+    await storage.logActivity({
+      pageName: 'Proforma Slips', action: 'update', entityType: 'notion_sync', entityId: 'proforma-slips',
+      details,
+      userCode: who?.userCode ?? undefined,
+      userName: who?.userName ?? 'System',
+    });
+  } catch (error) {
+    console.error('[Proforma sync] Could not write the Activity log entry:', error instanceof Error ? error.message : error);
+  }
+}
+
 export function getPendingProformaReport(): SyncReport | null {
   return pendingReport;
 }
@@ -518,7 +536,7 @@ export function getPendingProformaReport(): SyncReport | null {
 // as before checkbox selection existed.
 export async function applyPendingProformaChanges(
   selectedOrderNumbers?: string[],
-): Promise<{ slipsCreated: number; slipsUpdated: number; itemsCreated: number }> {
+): Promise<{ slipsCreated: number; slipsUpdated: number; itemsCreated: number; createdOrderNumbers: string[]; updatedOrderNumbers: string[] }> {
   if (!pendingOrders || !pendingReport) throw new Error('No pending changes. Run detection first.');
   if (isSyncing) throw new Error('A sync is already in progress — please wait');
 
@@ -532,14 +550,16 @@ export async function applyPendingProformaChanges(
     let slipsCreated = 0;
     let slipsUpdated = 0;
     let itemsCreated = 0;
+    const createdOrderNumbers: string[] = [];
+    const updatedOrderNumbers: string[] = [];
     const appliedOrderNumbers = new Set<string>();
 
     for (const [orderNo, orderData] of Array.from(pendingOrders.entries())) {
       if (selection && !selection.has(orderNo)) continue;
       try {
         const result = await writeOrderToDb(orderData);
-        if (result.created) slipsCreated++;
-        else slipsUpdated++;
+        if (result.created) { slipsCreated++; createdOrderNumbers.push(orderNo); }
+        else { slipsUpdated++; updatedOrderNumbers.push(orderNo); }
         itemsCreated += result.itemsCreated;
         appliedOrderNumbers.add(orderNo);
       } catch (error) {
@@ -561,7 +581,7 @@ export async function applyPendingProformaChanges(
       pendingReport = null;
     }
 
-    return { slipsCreated, slipsUpdated, itemsCreated };
+    return { slipsCreated, slipsUpdated, itemsCreated, createdOrderNumbers, updatedOrderNumbers };
   } finally {
     isSyncing = false;
   }

@@ -182,6 +182,19 @@ function scanFmtUploadDate(dt: string | null | undefined): string {
   });
 }
 
+// Barcodes that the files list under more than one SAP code: those are different items and are not merged into one Master View row.
+function sharedBarcodeSetOf(files: Array<{ items: Array<{ barcode?: string | null; sapCode?: string | null }> }>): Set<string> {
+  const saps = new Map<string, Set<string>>();
+  files.forEach((f) => f.items.forEach((i) => {
+    const b = i.barcode?.trim().toLowerCase();
+    const sap = i.sapCode?.trim().toLowerCase();
+    if (!b || !sap) return;
+    if (!saps.has(b)) saps.set(b, new Set());
+    saps.get(b)!.add(sap);
+  }));
+  return new Set(Array.from(saps.entries()).filter(([, set]) => set.size > 1).map(([b]) => b));
+}
+
 const normalize = (value?: string | number | null) =>
   String(value ?? "").trim().toLowerCase();
 
@@ -986,7 +999,7 @@ export default function ScanOrderPage() {
   const osItemsKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] as const;
 
   const osScanMutation = useMutation({
-    mutationFn: async (payload: { barcode: string; qty: number; isExtra: boolean; stv: string | null }) => {
+    mutationFn: async (payload: { barcode: string; qty: number; isExtra: boolean; stv: string | null; sapCode?: string | null }) => {
       // Tries live first; falls back to the offline queue only on a genuine network failure —
       // see client/src/lib/offlineQueue.ts. onMutate below already applied this scan
       // optimistically to the UI regardless of network state; a queued result just skips the
@@ -1245,7 +1258,8 @@ export default function ScanOrderPage() {
       // Lock stays held (set by the caller before this ran) until the mutation settles — this
       // is the only path that never opens a dialog, so it needs its own release point.
       osScanMutation.mutate(
-        { barcode, qty, isExtra: false, stv: osSelectedStv || null },
+        // sapCode: which CSV row this scan is for — only matters when the barcode is listed under more than one SAP code.
+        { barcode, qty, isExtra: false, stv: osSelectedStv || null, sapCode: match?.sapCode ?? null },
         { onSettled: () => { osScanLockRef.current = false; } },
       );
       return;
@@ -1312,14 +1326,18 @@ export default function ScanOrderPage() {
 
     const plantPalletSize = _computePlantPalletSize(matches[0] ?? null, invProduct);
 
-    if (matches.length > 1) {
+    // More than one row with this barcode (e.g. the same barcode under two SAP codes): ask which item — unless only one of them
+    // still has quantity left, which is then the one this scan is for.
+    const stillOpen = matches.length > 1 ? matches.filter((i) => (i.totalScannedQty ?? 0) < (i.expectedQty ?? 0)) : [];
+    const candidates = stillOpen.length === 1 ? stillOpen : matches;
+    if (candidates.length > 1) {
       // osMultiMatchRef takes over as the reentrancy guard once the picker is open.
       osScanLockRef.current = false;
-      setOsMultiMatch({ barcode, matches, inventoryProduct: invProduct, plantPalletSize });
+      setOsMultiMatch({ barcode, matches: candidates, inventoryProduct: invProduct, plantPalletSize });
       return;
     }
 
-    const match = matches[0] ?? null;
+    const match = candidates[0] ?? null;
     // Auto Scan ON → full-pallet matches auto-confirm (with the 5s image popup); loose/extra
     // amounts open the dialog. Auto Scan OFF → always opens the dialog. All handled inside
     // _resolveOsScan, which also manages the osScanLockRef release for each path.
@@ -1378,6 +1396,7 @@ export default function ScanOrderPage() {
       qty,
       isExtra: !osPending.matchedItem || itemAlreadyComplete,
       stv: osSelectedStv || null,
+      sapCode: osPending.matchedItem?.sapCode ?? null,
     });
   };
 
@@ -2086,11 +2105,14 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // view rather than just the flattened per-file list (that's what Separate CSVs is for).
   const allMvItems: MvMergedItem[] = (() => {
     if (!mvData) return [];
+    const sharedBarcodes = sharedBarcodeSetOf(mvData.files);
     const groups = new Map<string, MvMergedItem>();
     mvData.files.forEach((f) => {
       f.items.forEach((item) => {
-        const key = item.barcode?.trim().toLowerCase()
-          || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
+        const bc = item.barcode?.trim().toLowerCase();
+        const key = bc
+          ? (sharedBarcodes.has(bc) ? `${bc}::${item.sapCode?.trim().toLowerCase() ?? ''}` : bc)
+          : (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
           // Only the GJ/MP-PLT-defined size (0 if not defined) — the expected-qty fallback
@@ -5355,6 +5377,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       {item.itemName ?? <span className="italic text-gray-400">Unknown</span>}
                     </p>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1">
+                      <span className="text-[11px] text-gray-400">
+                        SAP: <span className="font-mono font-medium text-gray-600">{item.sapCode || "—"}</span>
+                      </span>
+                      <span className="text-[11px] text-gray-400">
+                        Left: <span className="font-medium text-gray-600">{Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0))}</span>
+                      </span>
                       <span className="text-[11px] text-gray-400">
                         Expected: <span className="font-medium text-gray-600">{item.expectedQty}</span>
                       </span>

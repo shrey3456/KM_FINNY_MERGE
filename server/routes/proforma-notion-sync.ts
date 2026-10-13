@@ -6,6 +6,7 @@ import {
   clearPendingProformaChanges,
   getAutoApplyEnabled,
   setAutoApplyEnabled,
+  logProformaSync,
 } from '../services/proformaNotionSync';
 import { requirePageWrite } from '../lib/pageAccess';
 
@@ -16,6 +17,14 @@ const router = Router();
 // page showed "Sync from Notion" to every write user, so for them the button just failed with
 // "Admin access required".
 router.use('/proforma-notion-sync', requirePageWrite('proforma'));
+
+function callerWho(req: Request) {
+  const u = req.user as any;
+  return { userCode: u?.userCode ?? null, userName: u?.name || u?.username || u?.userCode || null };
+}
+
+// "27 orders: 26 new, 1 changed" style list of order numbers, kept short for the Activities line.
+const listOrders = (nums: string[], max = 30) => (nums.length === 0 ? '' : ` [${nums.slice(0, max).join(', ')}${nums.length > max ? `, +${nums.length - max} more` : ''}]`);
 
 function callerName(req: Request): string {
   const u = req.user as any;
@@ -33,6 +42,10 @@ router.post('/proforma-notion-sync/detect', async (req: Request, res: Response) 
       return res.status(400).json({ success: false, message: 'Start date and end date are required' });
     }
     const report = await detectProformaChanges(startDate, endDate, callerName(req));
+    void logProformaSync(
+      `Notion check (Proforma Slips) by ${callerName(req)}: ${startDate} to ${endDate} — ${report.totalOrders} order(s) in Notion, ${report.newCount} new, ${report.changedCount} changed, ${report.unchangedCount} unchanged. Nothing was written; the changes wait for Apply.`,
+      callerWho(req),
+    );
     res.json({ success: true, report });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -54,6 +67,10 @@ router.post('/proforma-notion-sync/apply', async (req: Request, res: Response) =
   try {
     const orderNumbers = Array.isArray(req.body?.orderNumbers) ? req.body.orderNumbers : undefined;
     const result = await applyPendingProformaChanges(orderNumbers);
+    void logProformaSync(
+      `Notion sync applied (Proforma Slips) by ${callerName(req)}: ${result.slipsCreated} slip(s) created${listOrders(result.createdOrderNumbers)}, ${result.slipsUpdated} updated${listOrders(result.updatedOrderNumbers)}, ${result.itemsCreated} item(s) written`,
+      callerWho(req),
+    );
     res.json({ success: true, ...result });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -67,8 +84,13 @@ router.post('/proforma-notion-sync/apply', async (req: Request, res: Response) =
 });
 
 // POST /api/proforma-notion-sync/discard — drops the pending report without applying it.
-router.post('/proforma-notion-sync/discard', (_req: Request, res: Response) => {
+router.post('/proforma-notion-sync/discard', (req: Request, res: Response) => {
+  const pending = getPendingProformaReport();
   clearPendingProformaChanges();
+  void logProformaSync(
+    `Notion sync discarded (Proforma Slips) by ${callerName(req)}${pending ? `: ${pending.newCount} new and ${pending.changedCount} changed order(s) were dropped without being applied` : ''}`,
+    callerWho(req),
+  );
   res.json({ success: true });
 });
 

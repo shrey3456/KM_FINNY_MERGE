@@ -8311,10 +8311,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // on the Proforma Slips page calls manually (server/services/proformaNotionSync.ts), so a
   // scheduled run and a manual one behave identically and share the same pending-review state.
   if (process.env.NOTION_PAGE_URL && process.env.ORDER_DATABASE_ID) {
-    const { syncLatestDateFromOrderDb, getAutoApplyEnabled: getProformaAutoApplyEnabled } = await import('./services/proformaNotionSync');
+    const { syncLatestDateFromOrderDb, getAutoApplyEnabled: getProformaAutoApplyEnabled, logProformaSync } = await import('./services/proformaNotionSync');
     const PROFORMA_SYNC_INTERVAL_MS = 5 * 60 * 60 * 1000;
     // Refreshes only the latest order date's existing slips from the Notion Order DB.
-    const runScheduledProformaSync = async () => {
+    const runScheduledProformaSync = async (trigger: string) => {
       try {
         // Auto-apply toggle off: nothing is written, the run only reports what would change.
         const apply = await getProformaAutoApplyEnabled();
@@ -8322,12 +8322,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.log(r.date
           ? `[Proforma Sync] ${r.date}: checked ${r.checked} existing slip(s), ${apply ? `updated ${r.updated}` : `${r.updated} would change — NOT applied (auto-apply is off)`}.`
           : '[Proforma Sync] No slips yet, nothing to sync.');
+        // One Activities line per run: the scheduled job reads Notion (it never creates slips) — so the log says what it read and what it did.
+        void logProformaSync(
+          r.date
+            ? `Scheduled Notion sync (Proforma Slips, ${trigger}): order date ${r.date} — ${r.checked} existing slip(s) checked, 0 created, ${apply ? `${r.updated} updated` : `${r.updated} would change but nothing was written (auto-apply is off)`}`
+            : `Scheduled Notion sync (Proforma Slips, ${trigger}): no slips yet, nothing to sync`,
+        );
       } catch (err) {
         console.error('[Proforma Sync] Scheduled sync failed:', err);
+        void logProformaSync(`Scheduled Notion sync (Proforma Slips, ${trigger}) failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
-    setInterval(() => runScheduledProformaSync(), PROFORMA_SYNC_INTERVAL_MS);
-    setTimeout(() => runScheduledProformaSync(), 20000);
+    setInterval(() => runScheduledProformaSync('every 5 hours'), PROFORMA_SYNC_INTERVAL_MS);
+    setTimeout(() => runScheduledProformaSync('after server start'), 20000);
     console.log('[Proforma Sync] 5-hour auto sync scheduler registered');
   }
 

@@ -268,13 +268,14 @@ function buildUrl(base: string, params: Record<string, string | number | undefin
 }
 
 // ─── Export (CSV / Excel / PDF) ──────────────────────────────────────────────
-// One column list drives all three formats. CSV and Excel keep every column (a spreadsheet has no width limit,
-// so each quantity has its own Qty and Pallets columns); the PDF is one compact A3 table where each quantity is
-// a single cell — the number with its pallets (and, for Purchase, its extra) underneath — and a few columns
-// (HSN, System, Last Updated) are left out. The merged report (All plants / a State) is one row per product, plants
+// One column list drives all three formats. The export follows the table: a column the user has hidden in the Columns
+// menu is not exported (the always-visible ones — Sr No, Item, Plant — always are). CSV and Excel give each quantity its own
+// Qty and Pallets columns; the PDF is one compact A3 table where each quantity is a single cell — the number with its
+// pallets (and, for Purchase, its extra) underneath — and a few columns (Extra, System) are left out of it. The merged report (All plants / a State) is one row per product, plants
 // added together; the plant-wise breakdown that follows it is one row per product per plant.
 type ExportCell = string | number;
 type ExportColumn = {
+  id: string;                              // the table column it belongs to (Columns menu id)
   csvHead: string[];                       // heading(s) in CSV / Excel
   pdfHead: string | null;                  // heading in the PDF; null = not in the PDF
   pdfWidth: number;                        // mm on A3 landscape
@@ -293,26 +294,34 @@ const purchasePltOf = (r: PlantStockRow) => {
 const totalStockOf = (r: PlantStockRow) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0);
 const plantsOf = (r: PlantStockRow) => (r.combinedPlants && r.combinedPlants.length > 1 ? r.combinedPlants.join(", ") : r.plant);
 const EXPORT_COLUMNS: ExportColumn[] = [
-  { csvHead: ["Sr No"], pdfHead: "Sr", pdfWidth: 11, text: (r) => r.srNo ?? "" },
-  { csvHead: ["Item"], pdfHead: "Item", pdfWidth: 60, text: (r) => r.itemName },
-  { csvHead: ["Barcode"], pdfHead: "Barcode", pdfWidth: 30, text: (r) => r.barcode ?? "" },
-  { csvHead: ["SAP Code"], pdfHead: "SAP", pdfWidth: 18, text: (r) => r.sapCode ?? "" },
-  { csvHead: ["HSN Code"], pdfHead: null, pdfWidth: 0, text: (r) => r.hsnCode ?? "" },
-  { csvHead: ["Category"], pdfHead: "Category", pdfWidth: 24, text: (r) => r.category ?? "" },
-  { csvHead: ["Brand"], pdfHead: "Brand", pdfWidth: 22, text: (r) => r.brand ?? "" },
-  { csvHead: ["Plant"], pdfHead: "Plant", pdfWidth: 26, text: plantsOf },
-  { csvHead: ["Expected Purchase Qty", "Expected Purchase Pallets"], pdfHead: "Expected\nPurchase", pdfWidth: 20, qty: (r) => r.expectedQty, plt: (r) => r.expectedPallets },
-  { csvHead: ["Opening Qty", "Opening Pallets"], pdfHead: "Opening", pdfWidth: 19, qty: (r) => r.openingStock, plt: (r) => r.openingPallets },
-  { csvHead: ["Purchase Qty", "Purchase Pallets"], pdfHead: "Purchase", pdfWidth: 21, qty: purchaseOf, plt: purchasePltOf, extra: (r) => r.extraQty },
-  { csvHead: ["Extra Qty (within Purchase)", "Extra Pallets"], pdfHead: null, pdfWidth: 0, qty: (r) => r.extraQty, plt: (r) => r.extraPallets },
-  { csvHead: ["Adjust Qty"], pdfHead: "Adjust", pdfWidth: 16, qty: (r) => r.adjustQty ?? 0, signed: true },
-  { csvHead: ["Total Stock (Opening + Purchase + Adjust)"], pdfHead: "Total\nStock", pdfWidth: 17, qty: totalStockOf },
-  { csvHead: ["System (Clear Stock)"], pdfHead: null, pdfWidth: 0, qty: (r) => r.systemQty ?? 0 },
-  { csvHead: ["Expected Sale Qty", "Expected Sale Pallets"], pdfHead: "Expected\nSale", pdfWidth: 19, qty: (r) => r.expectedSaleQty, plt: (r) => r.expectedSalePallets },
-  { csvHead: ["Sale Qty (loaded)", "Sale Pallets"], pdfHead: "Sale\n(loaded)", pdfWidth: 19, qty: (r) => r.saleQty, plt: (r) => r.salePallets },
-  { csvHead: ["Closing Qty", "Closing Pallets"], pdfHead: "Closing", pdfWidth: 19, qty: (r) => r.closingStock, plt: (r) => r.closingPallets },
-  { csvHead: ["Last Updated"], pdfHead: null, pdfWidth: 0, text: (r) => (r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "") },
+  { id: "srNo", csvHead: ["Sr No"], pdfHead: "Sr", pdfWidth: 11, text: (r) => r.srNo ?? "" },
+  { id: "itemName", csvHead: ["Item"], pdfHead: "Item", pdfWidth: 60, text: (r) => r.itemName },
+  { id: "barcode", csvHead: ["Barcode"], pdfHead: "Barcode", pdfWidth: 30, text: (r) => r.barcode ?? "" },
+  { id: "sapCode", csvHead: ["SAP Code"], pdfHead: "SAP", pdfWidth: 18, text: (r) => r.sapCode ?? "" },
+  { id: "hsn", csvHead: ["HSN Code"], pdfHead: null, pdfWidth: 0, text: (r) => r.hsnCode ?? "" },
+  { id: "category", csvHead: ["Category"], pdfHead: "Category", pdfWidth: 24, text: (r) => r.category ?? "" },
+  { id: "brand", csvHead: ["Brand"], pdfHead: "Brand", pdfWidth: 22, text: (r) => r.brand ?? "" },
+  { id: "plant", csvHead: ["Plant"], pdfHead: "Plant", pdfWidth: 26, text: plantsOf },
+  { id: "expected", csvHead: ["Expected Purchase Qty", "Expected Purchase Pallets"], pdfHead: "Expected\nPurchase", pdfWidth: 20, qty: (r) => r.expectedQty, plt: (r) => r.expectedPallets },
+  { id: "opening", csvHead: ["Opening Qty", "Opening Pallets"], pdfHead: "Opening", pdfWidth: 19, qty: (r) => r.openingStock, plt: (r) => r.openingPallets },
+  { id: "purchase", csvHead: ["Purchase Qty", "Purchase Pallets"], pdfHead: "Purchase", pdfWidth: 21, qty: purchaseOf, plt: purchasePltOf, extra: (r) => r.extraQty },
+  { id: "extra", csvHead: ["Extra Qty (within Purchase)", "Extra Pallets"], pdfHead: null, pdfWidth: 0, qty: (r) => r.extraQty, plt: (r) => r.extraPallets },
+  { id: "adjust", csvHead: ["Adjust Qty"], pdfHead: "Adjust", pdfWidth: 16, qty: (r) => r.adjustQty ?? 0, signed: true },
+  { id: "totalIn", csvHead: ["Total Stock (Opening + Purchase + Adjust)"], pdfHead: "Total\nStock", pdfWidth: 17, qty: totalStockOf },
+  { id: "system", csvHead: ["System (Clear Stock)"], pdfHead: null, pdfWidth: 0, qty: (r) => r.systemQty ?? 0 },
+  { id: "expectedSale", csvHead: ["Expected Sale Qty", "Expected Sale Pallets"], pdfHead: "Expected\nSale", pdfWidth: 19, qty: (r) => r.expectedSaleQty, plt: (r) => r.expectedSalePallets },
+  { id: "sale", csvHead: ["Sale Qty (loaded)", "Sale Pallets"], pdfHead: "Sale\n(loaded)", pdfWidth: 19, qty: (r) => r.saleQty, plt: (r) => r.salePallets },
+  { id: "closing", csvHead: ["Closing Qty", "Closing Pallets"], pdfHead: "Closing", pdfWidth: 19, qty: (r) => r.closingStock, plt: (r) => r.closingPallets },
+  { id: "liveStock", csvHead: ["Live Stock"], pdfHead: "Live\nStock", pdfWidth: 17, qty: (r) => r.liveStock ?? 0 },
+  { id: "lastUpdated", csvHead: ["Last Updated"], pdfHead: null, pdfWidth: 0, text: (r) => (r.lastArrived ? format(new Date(r.lastArrived), "yyyy-MM-dd") : "") },
 ];
+
+// Columns that can never be hidden in the table, so they are always exported. HSN Code and Last Updated are not table columns at all and
+// so are not exported; every other column is exported only while it is visible in the table.
+const ALWAYS_EXPORTED = new Set(["srNo", "itemName", "plant"]);
+function exportColumnsFor(visibleIds: Set<string>): ExportColumn[] {
+  return EXPORT_COLUMNS.filter((c) => ALWAYS_EXPORTED.has(c.id) || visibleIds.has(c.id));
+}
 
 function sumOf(rows: PlantStockRow[], get: (r: PlantStockRow) => number | null | undefined): number | null {
   let any = false;
@@ -322,15 +331,15 @@ function sumOf(rows: PlantStockRow[], get: (r: PlantStockRow) => number | null |
 }
 
 // The table as rows of cells — heading row, one row per item, then a Total row.
-function csvTable(rows: PlantStockRow[]): ExportCell[][] {
-  const head = EXPORT_COLUMNS.flatMap((c) => c.csvHead);
-  const body = rows.map((r) => EXPORT_COLUMNS.flatMap((c): ExportCell[] => {
+function csvTable(rows: PlantStockRow[], cols: ExportColumn[]): ExportCell[][] {
+  const head = cols.flatMap((c) => c.csvHead);
+  const body = rows.map((r) => cols.flatMap((c): ExportCell[] => {
     if (c.text) return [c.text(r)];
     const q = c.qty!(r);
     return c.plt ? [q ?? "", pltNum(c.plt(r))] : [q ?? ""];
   }));
-  const total = EXPORT_COLUMNS.flatMap((c, i): ExportCell[] => {
-    if (c.text) return [i === 1 ? `Total (${rows.length} items)` : ""];
+  const total = cols.flatMap((c): ExportCell[] => {
+    if (c.text) return [c.id === "itemName" ? `Total (${rows.length} items)` : ""];
     const q = sumOf(rows, c.qty!);
     if (!c.plt) return [q ?? ""];
     const p = sumOf(rows, c.plt);
@@ -339,8 +348,8 @@ function csvTable(rows: PlantStockRow[]): ExportCell[][] {
   return [head, ...body, total];
 }
 
-function pdfTable(rows: PlantStockRow[]): { head: string[]; body: string[][]; widths: number[]; numeric: boolean[] } {
-  const cols = EXPORT_COLUMNS.filter((c) => c.pdfHead);
+function pdfTable(rows: PlantStockRow[], chosen: ExportColumn[]): { head: string[]; body: string[][]; widths: number[]; numeric: boolean[] } {
+  const cols = chosen.filter((c) => c.pdfHead);
   const fmtQty = (v: number | null | undefined, signed?: boolean) => (v == null ? "" : `${signed && v > 0 ? "+" : ""}${v.toLocaleString()}`);
   const cell = (c: ExportColumn, r: PlantStockRow) => {
     if (c.text) return c.text(r);
@@ -351,8 +360,8 @@ function pdfTable(rows: PlantStockRow[]): { head: string[]; body: string[][]; wi
     return fmtQty(q, c.signed) + (plt != null && plt > 0 ? `\n${plt.toFixed(2)} plt` : "") + (extra != null && extra > 0 ? `\n+${extra.toLocaleString()} extra` : "");
   };
   const body = rows.map((r) => cols.map((c) => cell(c, r)));
-  body.push(cols.map((c, i) => {
-    if (c.text) return i === 1 ? `Total (${rows.length} items)` : "";
+  body.push(cols.map((c) => {
+    if (c.text) return c.id === "itemName" ? `Total (${rows.length} items)` : "";
     const q = sumOf(rows, c.qty!);
     const p = c.plt ? sumOf(rows, c.plt) : null;
     return q == null ? "" : fmtQty(q, c.signed) + (p != null && p > 0 ? `\n${p.toFixed(2)} plt` : "");
@@ -362,22 +371,22 @@ function pdfTable(rows: PlantStockRow[]): { head: string[]; body: string[][]; wi
 
 type ExportSection = { title: string; rows: PlantStockRow[] };
 
-function downloadCsv(filename: string, sections: ExportSection[]) {
+function downloadCsv(filename: string, sections: ExportSection[], cols: ExportColumn[]) {
   const lines: string[] = [];
   sections.forEach((s, i) => {
     if (i > 0) lines.push("");
     if (sections.length > 1) lines.push(`"${s.title}"`);
-    for (const r of csvTable(s.rows)) lines.push(r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","));
+    for (const r of csvTable(s.rows, cols)) lines.push(r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","));
   });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" }));
   a.download = filename; a.click();
 }
 
-function downloadExcel(filename: string, sections: ExportSection[]) {
+function downloadExcel(filename: string, sections: ExportSection[], cols: ExportColumn[]) {
   const book = XLSX.utils.book_new();
   sections.forEach((s, i) => {
-    const aoa = csvTable(s.rows);
+    const aoa = csvTable(s.rows, cols);
     const sheet = XLSX.utils.aoa_to_sheet(aoa);
     // Column widths from the longest cell (capped), and a filter on the heading row.
     sheet["!cols"] = aoa[0].map((_, ci) => ({ wch: Math.min(48, Math.max(10, ...aoa.map((row) => String(row[ci] ?? "").length)) + 2) }));
@@ -389,7 +398,7 @@ function downloadExcel(filename: string, sections: ExportSection[]) {
 
 // Business-report layout: a branded header band (title + scope line + generated-on), then each section as a
 // bordered grid table with zebra striping, right-aligned quantities and a Total row; page numbers in the footer.
-function downloadPdf(filename: string, sections: ExportSection[], meta: { title: string; scope: string }) {
+function downloadPdf(filename: string, sections: ExportSection[], cols: ExportColumn[], meta: { title: string; scope: string }) {
   const doc = new jsPDF({ orientation: "landscape", format: "a3" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -421,7 +430,7 @@ function downloadPdf(filename: string, sections: ExportSection[], meta: { title:
       doc.text(s.title, margin, startY - 3);
       doc.setTextColor(0, 0, 0);
     }
-    const t = pdfTable(s.rows);
+    const t = pdfTable(s.rows, cols);
     const columnStyles: Record<number, { halign?: "right" | "left"; cellWidth: number }> = {};
     t.widths.forEach((w, i) => { columnStyles[i] = { cellWidth: w, ...(t.numeric[i] ? { halign: "right" as const } : {}) }; });
     autoTable(doc, {
@@ -552,7 +561,8 @@ export default function OverallStock() {
   const [visibleColumnIds, setVisibleColumnIds] = useState<Set<string>>(() => {
     // "system" (Settings-wide clears) is deliberately NOT in here: the Columns menu offers it,
     // but a bulk clear isn't day-to-day reading and Closing counts it either way.
-    const defaults = new Set(["srNo", "itemName", ...ALL_COLUMNS.map((c) => c.key), "plant"]);
+    // Closing is hidden by default too (turn it on from the Columns menu); everything else shows.
+    const defaults = new Set(["srNo", "itemName", ...ALL_COLUMNS.filter((c) => c.key !== "closing").map((c) => c.key), "plant"]);
     try {
       const raw = localStorage.getItem("overallStock:visibleColumnIds");
       const parsed = raw ? JSON.parse(raw) : null;
@@ -568,6 +578,8 @@ export default function OverallStock() {
       // Live Stock was added later: turn it on once for a layout saved before it existed, then leave the choice alone.
       try {
         if (!localStorage.getItem("overallStock:liveColAdded")) { saved.add("liveStock"); localStorage.setItem("overallStock:liveColAdded", "1"); }
+        // Closing became hidden-by-default: switch it off once for a layout saved before that, then leave the choice alone.
+        if (!localStorage.getItem("overallStock:closingHiddenByDefault")) { saved.delete("closing"); localStorage.setItem("overallStock:closingHiddenByDefault", "1"); }
       } catch { /* storage unavailable */ }
       return saved;
     } catch {
@@ -1433,7 +1445,30 @@ export default function OverallStock() {
 
   // Real stock rows first, then the distinct empty-box rows. groupedByState IS filtered when not
   // in state view (see its own comment) — this always reflects whichever one applies.
-  const displayRows = useMemo(() => [...groupedByState, ...emptyBoxRows], [groupedByState, emptyBoxRows]);
+  // The default order is the serial code (Product Master's New Sr), A to Z: A001 ... C001 ... C198 ... E001 ... I151 ... V144 ... X201 —
+  // the letter first, then the number in numeric order. An item with no serial code goes after them (by name); Empty Box rows stay at the
+  // end. Clicking a column header still sorts the table by that column as before.
+  const displayRows = useMemo(() => {
+    const parts = (sr: string) => {
+      const m = /^([A-Za-z]*)s*(d+)?(.*)$/.exec(sr.trim());
+      return { letters: (m?.[1] ?? "").toUpperCase(), num: m?.[2] != null ? Number(m[2]) : Number.POSITIVE_INFINITY, rest: m?.[3] ?? "" };
+    };
+    const byName = (x: PlantStockRow, y: PlantStockRow) =>
+      (x.itemName ?? "").localeCompare(y.itemName ?? "", undefined, { sensitivity: "base", numeric: true });
+    const bySerial = [...groupedByState].sort((x, y) => {
+      const sx = String(x.srNo ?? "").trim();
+      const sy = String(y.srNo ?? "").trim();
+      if (!sx && !sy) return byName(x, y);
+      if (!sx) return 1;
+      if (!sy) return -1;
+      const px = parts(sx);
+      const py = parts(sy);
+      if (px.letters !== py.letters) return px.letters < py.letters ? -1 : 1;
+      if (px.num !== py.num) return px.num - py.num;
+      return px.rest.localeCompare(py.rest) || byName(x, y);
+    });
+    return [...bySerial, ...emptyBoxRows];
+  }, [groupedByState, emptyBoxRows]);
 
   // Any change to what's being listed restarts at page 1 — staying on page 4 of a plant you just
   // switched to shows an arbitrary slice, and reads as empty whenever the new set is shorter.
@@ -2882,14 +2917,15 @@ export default function OverallStock() {
                         key={fmt}
                         onSelect={() => {
                           const sections = exportSections();
+                          const exportCols = exportColumnsFor(visibleColumnIds); // only the columns that are visible in the table
                           const suffix = `${activePlant ? "-" + activePlant : activeState ? "-" + activeState + "-merged" : "-all-merged"}-${format(new Date(), "yyyy-MM-dd")}`;
-                          if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, sections);
-                          if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, sections);
+                          if (fmt === "CSV")   downloadCsv(`overall-stock${suffix}.csv`, sections, exportCols);
+                          if (fmt === "Excel") downloadExcel(`overall-stock${suffix}.xlsx`, sections, exportCols);
                           if (fmt === "PDF") {
                             const plantScope = activePlant
                               || (activeState ? `${activeState} (${activeStateGroup?.plants.map((p) => p.name).join(", ") ?? activeState})` : "")
                               || (allowedPlants && allowedPlants.length ? plantOptions.join(", ") : "All Plants");
-                            downloadPdf(`overall-stock${suffix}.pdf`, sections, { title: "Stock Overview Report", scope: plantScope });
+                            downloadPdf(`overall-stock${suffix}.pdf`, sections, exportCols, { title: "Stock Overview Report", scope: plantScope });
                           }
                         }}
                       >

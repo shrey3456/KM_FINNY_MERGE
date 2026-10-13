@@ -1749,12 +1749,54 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // partIndex order, so concurrent scans acquire locks in a consistent order and never
     // deadlock against each other.
     const itemRowsBySession = new Map<number, any | null>();
+    const barcodeRowsBySession = new Map<number, any[]>();
     for (const s of sessions) {
       const { rows } = await client.query(
-        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 FOR UPDATE`,
+        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 ORDER BY id FOR UPDATE`,
         [s.id, barcode],
       );
-      itemRowsBySession.set(s.id, rows[0] ?? null);
+      barcodeRowsBySession.set(s.id, rows);
+    }
+    // SAME BARCODE, DIFFERENT SAP = DIFFERENT ITEMS (e.g. the 35 g and 37 g salted peanuts, one per state). When the group lists this
+    // barcode under more than one SAP code, the scan must say which item it is (body.sapCode — the "Which item?" choice). With no
+    // SAP given, it goes to the only item that still has quantity left; if several do, the screen is asked to choose. A barcode with
+    // one SAP code is handled exactly as before.
+    const sapKeyOf = (v: unknown) => String(v ?? '').trim().toLowerCase();
+    let chosenSap: string | null = null;
+    {
+      const allBarcodeRows = Array.from(barcodeRowsBySession.values()).flat();
+      const sapSet = new Set(allBarcodeRows.map((r: any) => sapKeyOf(r.sap_code)));
+      if (sapSet.size > 1) {
+        const bySap = new Map<string, { sapCode: string; itemName: string | null; expected: number; scanned: number }>();
+        for (const r of allBarcodeRows) {
+          const k = sapKeyOf(r.sap_code);
+          const cur = bySap.get(k) ?? { sapCode: r.sap_code ?? '', itemName: r.item_name ?? null, expected: 0, scanned: 0 };
+          cur.expected += Number(r.expected_qty ?? 0);
+          cur.scanned += Number(r.total_scanned_qty ?? 0);
+          bySap.set(k, cur);
+        }
+        const options = Array.from(bySap.values()).map((o) => ({ ...o, remaining: Math.max(0, o.expected - o.scanned) }));
+        const requestedSap = sapKeyOf((req.body as any)?.sapCode);
+        if (requestedSap) {
+          if (!bySap.has(requestedSap)) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ message: `SAP ${(req.body as any).sapCode} is not listed for barcode ${barcode} on this order.` });
+          }
+          chosenSap = requestedSap;
+        } else {
+          const open = options.filter((o) => o.remaining > 0);
+          if (open.length === 1) chosenSap = sapKeyOf(open[0].sapCode);
+          else {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ code: 'CHOOSE_ITEM', message: 'This barcode is listed with more than one SAP code — choose the item.', barcode, options });
+          }
+        }
+      }
+    }
+    for (const s of sessions) {
+      const rows = barcodeRowsBySession.get(s.id) ?? [];
+      const mine = chosenSap === null ? rows[0] : rows.find((r: any) => sapKeyOf(r.sap_code) === chosenSap);
+      itemRowsBySession.set(s.id, mine ?? null);
     }
 
     // "Front" = earliest part (by partIndex) that still has an item not yet fully scanned.

@@ -4,6 +4,7 @@ import { Client } from '@notionhq/client';
 import type { Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
+import { logProformaSync } from '../services/proformaNotionSync';
 
 const router = Router();
 
@@ -478,6 +479,14 @@ router.post('/proforma-slips/import-api', async (req, res) => {
       console.log(`⚠️  Summary: ${unmatchedItems.size} unmatched item types were skipped`);
     }
     
+    {
+      const u = (req as any).user;
+      void logProformaSync(
+        `Notion import API (Proforma Slips) by ${u ? (u.name || u.username || u.userCode) : 'a request with no login'}: ${startDate} to ${endDate} — ${slipsCreated} slip(s) created, ${slipsUpdated} existing slip(s) updated, ${itemsCreated} item(s) processed`,
+        { userCode: u?.userCode ?? null, userName: u ? (u.name || u.username || u.userCode) : 'Unknown (no login)' },
+      );
+    }
+
     return res.status(200).json({
       success: true,
       message: `Successfully imported from Notion API. Created ${slipsCreated} new slips, updated ${slipsUpdated} existing slips, and processed ${itemsCreated} items.`,

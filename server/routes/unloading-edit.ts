@@ -30,6 +30,14 @@ import { resplitUnloadEventsExtraFlag } from '../lib/unloadRemap';
 
 const router = Router();
 
+// A barcode that two lines of one batch list with DIFFERENT SAP codes is two items, so a line's scanned quantity counts only the scans
+// recorded under its own SAP. A barcode with one SAP (or the same SAP on every line) is counted by barcode alone, as before.
+const SAME_BARCODE_SAME_SAP = `NOT EXISTS (
+    SELECT 1 FROM unload_import_items o
+     WHERE o.session_id = ii.session_id AND LOWER(TRIM(o.barcode)) = LOWER(TRIM(ii.barcode))
+       AND LOWER(TRIM(COALESCE(o.sap_code, ''))) <> LOWER(TRIM(COALESCE(ii.sap_code, '')))
+  ) OR LOWER(TRIM(COALESCE(sap_code, ''))) = LOWER(TRIM(COALESCE(ii.sap_code, '')))`;
+
 router.use('/unloading-edit', (_req: Request, res: Response, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');
@@ -62,6 +70,7 @@ router.get('/unloading-edit/sessions/:id/items', requirePageAccess('order-import
          COALESCE((
            SELECT SUM(total_qty) FROM unload_scan_events
            WHERE session_id = ii.session_id AND barcode = ii.barcode AND voided IS NOT TRUE
+             AND (${SAME_BARCODE_SAME_SAP})
          ), 0)::int AS "scannedQty"
        FROM unload_import_items ii
        WHERE ii.session_id = $1
@@ -120,6 +129,7 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
          COALESCE((
            SELECT SUM(total_qty) FROM unload_scan_events
            WHERE session_id = ii.session_id AND barcode = ii.barcode AND voided IS NOT TRUE
+             AND (${SAME_BARCODE_SAME_SAP})
          ), 0)::int AS "scannedQty"
        FROM unload_import_items ii WHERE ii.session_id = $1`,
       [id],

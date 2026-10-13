@@ -38,7 +38,9 @@ const Home = () => {
 
         // Non-admin/billing users are scanning dept users
         const role = (currentUser.role ?? '').toLowerCase().trim();
-        setIsScanUser(!['admin', 'super-admin', 'billing'].includes(role));
+        // ...and only those who can open the Scan page: without access the "Scan Available!" banner (and its poll)
+        // would show a "Scan Now" button to a page they cannot use.
+        setIsScanUser(!['admin', 'super-admin', 'billing'].includes(role) && hasPageViewAccess('scan-order'));
       }
     } catch (error) {
       console.error('Error checking user permissions:', error);

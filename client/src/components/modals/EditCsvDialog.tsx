@@ -16,6 +16,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
+import { productMatchesSearch, sapBlockMessage, sapForState, sharedBarcodes, stateOfPlant } from "@/lib/sapByState";
 
 interface EditableItem {
   key: string;
@@ -33,6 +34,8 @@ interface EditableItem {
 // drive the Quantity <-> Pallets auto-calc in the Add Item dialog.
 type CatalogProduct = {
   id: number; name: string; barcode: string; sapCode?: string | null;
+  // one SAP code per state — the one for the session's plant state is searched and filled (see lib/sapByState.ts)
+  gjSap?: string | null; mpSap?: string | null; upSap?: string | null;
   itemsPerPallet?: number | null; pallets?: number | null;
   gjPlt?: number | null; mpPlt?: number | null;
 };
@@ -114,34 +117,6 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
   const [addQty, setAddQty] = useState("0");
   const [addPallets, setAddPallets] = useState("");
 
-  // Barcodes already present as a row in this CSV — excluded from suggestions below so you
-  // don't accidentally add a duplicate row for an item that's already there (if it needs a
-  // qty change, that's an edit to its existing row, not a second row for the same barcode).
-  const existingBarcodes = useMemo(
-    () => new Set(rows.map((r) => r.barcode.trim().toLowerCase()).filter(Boolean)),
-    [rows],
-  );
-
-  // Computed separately from the exclusion filter below so the empty-results message can tell
-  // apart "nothing matches this search at all" from "it matches, but every match is already a
-  // row in this CSV" — the two need different messages, not just a blank list either way.
-  const addTextMatches = useMemo(() => {
-    const q = addSearch.trim().toLowerCase();
-    if (!q) return [];
-    return products.filter((p) =>
-      p.name?.toLowerCase().includes(q) ||
-      p.barcode?.toLowerCase().includes(q) ||
-      p.sapCode?.toLowerCase().includes(q)
-    );
-  }, [products, addSearch]);
-  const addMatches = useMemo(
-    () => addTextMatches.filter((p) => !existingBarcodes.has((p.barcode ?? "").trim().toLowerCase())).slice(0, 8),
-    [addTextMatches, existingBarcodes],
-  );
-  // True when the search matched something, but every match got filtered out for already being
-  // a row in this CSV — as opposed to genuinely matching nothing at all.
-  const addAllMatchesAlreadyInCsv = addTextMatches.length > 0 && addMatches.length === 0;
-
   function resetAddDialog() {
     setAddItemOpen(false);
     setAddSearch("");
@@ -152,13 +127,14 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
 
   function confirmAddItem() {
     if (!addPicked) return;
+    if (sapBlockMessage(addPicked, addState)) return; // the Add button is disabled for this too
     setRows((prev) => [
       ...prev,
       {
         key: newTempKey(),
         barcode: addPicked.barcode,
         itemName: addPicked.name,
-        sapCode: addPicked.sapCode ?? "",
+        sapCode: sapForState(addPicked, addState),
         quantity: addQty || "0",
         expectedPallets: addPallets,
         scannedQty: 0,
@@ -241,6 +217,50 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
   }
 
   const session = itemsQuery.data?.session;
+
+  // State-based SAP: the plant of this CSV decides which SAP code is searched and filled (GJ for RAJKOT / VALSAD / BARODA, MP for
+  // INDORE, UP for LUCKNOW). A SAP search finds only that state's codes; barcode and name searches are not limited by state, so a
+  // barcode shared by two products shows both.
+  const addState = stateOfPlant(session?.plant, allPlants);
+  const sharedBarcodeSet = useMemo(() => sharedBarcodes(products), [products]);
+
+  // Rows already in this CSV rule a suggestion out so the same item is not added twice. A barcode only one product has is ruled out
+  // by the barcode alone (as before); a barcode two products share is ruled out by the product itself (same name or same SAP), so
+  // the other product with that barcode is still offered.
+  const existingKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const r of rows) {
+      const bc = r.barcode.trim().toLowerCase();
+      if (!bc) continue;
+      keys.add(bc);
+      keys.add(`${bc}::name::${r.itemName.trim().toLowerCase()}`);
+      if (r.sapCode.trim()) keys.add(`${bc}::sap::${r.sapCode.trim().toLowerCase()}`);
+    }
+    return keys;
+  }, [rows]);
+  const isAlreadyRow = (p: CatalogProduct) => {
+    const bc = (p.barcode ?? "").trim().toLowerCase();
+    if (!bc || !existingKeys.has(bc)) return false;
+    if (!sharedBarcodeSet.has(bc)) return true;
+    const sap = sapForState(p, addState).toLowerCase();
+    return existingKeys.has(`${bc}::name::${(p.name ?? "").trim().toLowerCase()}`) || (!!sap && existingKeys.has(`${bc}::sap::${sap}`));
+  };
+
+  // Computed separately from the exclusion filter below so the empty-results message can tell
+  // apart "nothing matches this search at all" from "it matches, but every match is already a
+  // row in this CSV" — the two need different messages, not just a blank list either way.
+  const addTextMatches = useMemo(
+    () => (addSearch.trim() ? products.filter((p) => productMatchesSearch(p, addSearch, addState)) : []),
+    [products, addSearch, addState],
+  );
+  const addMatches = useMemo(
+    () => addTextMatches.filter((p) => !isAlreadyRow(p)).slice(0, 8),
+    [addTextMatches, existingKeys, sharedBarcodeSet, addState], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  // True when the search matched something, but every match got filtered out for already being
+  // a row in this CSV — as opposed to genuinely matching nothing at all.
+  const addAllMatchesAlreadyInCsv = addTextMatches.length > 0 && addMatches.length === 0;
+  const addBlockMessage = sapBlockMessage(addPicked, addState);
 
   // Quantity <-> Pallets auto-calc in the Add Item dialog, once a product (and therefore a
   // pallet size for this session's plant) is picked. Each field only recomputes the OTHER one
@@ -469,7 +489,13 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
                         className="flex w-full min-w-0 items-center gap-2 border-b border-gray-100 px-2.5 py-2 text-left text-sm last:border-0 hover:bg-gray-50"
                       >
                         <span className="min-w-0 flex-1 truncate font-medium text-gray-900">{p.name}</span>
-                        <span className="shrink-0 font-mono text-[11px] text-gray-400">{p.barcode}</span>
+                        <span className="shrink-0 text-right font-mono text-[11px] text-gray-400">
+                          {p.barcode}
+                          <br />
+                          {sapForState(p, addState)
+                            ? <span className="text-gray-500">{addState ? `${addState} ` : ""}SAP {sapForState(p, addState)}</span>
+                            : <span className="text-red-500">{addState ? `${addState} ` : ""}SAP empty</span>}
+                        </span>
                       </button>
                     ))
                   )}
@@ -482,8 +508,9 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
                 <div className="min-w-0">
                   <p className="truncate text-sm font-semibold text-gray-900">{addPicked.name}</p>
                   <p className="font-mono text-xs text-gray-500">
-                    {addPicked.barcode}{addPicked.sapCode ? ` · SAP ${addPicked.sapCode}` : ""}
+                    {addPicked.barcode}{sapForState(addPicked, addState) ? ` · ${addState ? `${addState} ` : ""}SAP ${sapForState(addPicked, addState)}` : ""}
                   </p>
+                  {addBlockMessage && <p className="mt-1 text-xs font-medium text-red-600">{addBlockMessage}</p>}
                 </div>
                 <Button variant="ghost" size="sm" className="h-7 shrink-0 text-xs" onClick={() => setAddPicked(null)}>
                   Change
@@ -511,7 +538,7 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
             </Button>
             <Button
               className="rounded-xl bg-[#001d6e] hover:bg-[#00154b] text-white"
-              disabled={!addPicked}
+              disabled={!addPicked || !!addBlockMessage}
               onClick={confirmAddItem}
             >
               <Plus className="h-4 w-4 mr-1" /> Add
