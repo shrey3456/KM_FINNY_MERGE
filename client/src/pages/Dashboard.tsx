@@ -1,4 +1,4 @@
-import { Package, History, Upload, FileUp, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, Truck, ClipboardList, PackageCheck } from 'lucide-react';
+import { Package, History, Upload, FileUp, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, PackageCheck } from 'lucide-react';
 import useEmblaCarousel from 'embla-carousel-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -182,18 +182,6 @@ const Home = () => {
             </div>
           )}
 
-          {/* Sort Slip Button */}
-          {hasPageViewAccess("sort-slip") && (
-            <div className="flex flex-col items-center">
-              <Link href="/sort-slip" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                  <ClipboardList className="h-7 w-7 text-[#001d6e]" />
-                </div>
-                <span className="text-gray-800 text-sm text-center">Sort Slip</span>
-              </Link>
-            </div>
-          )}
-
           {/* Loading Overview Button */}
           {hasPageViewAccess("loading-overview") && (
             <div className="flex flex-col items-center">
@@ -202,18 +190,6 @@ const Home = () => {
                   <PackageCheck className="h-7 w-7 text-[#001d6e]" />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Loading Overview</span>
-              </Link>
-            </div>
-          )}
-
-          {/* Dispatch Button */}
-          {hasPageViewAccess("dispatch") && (
-            <div className="flex flex-col items-center">
-              <Link href="/dispatch" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                  <Truck className="h-7 w-7 text-[#001d6e]" style={{fill: "#eab308"}} />
-                </div>
-                <span className="text-gray-800 text-sm text-center">Dispatch</span>
               </Link>
             </div>
           )}
