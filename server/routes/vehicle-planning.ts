@@ -3,7 +3,7 @@ import { Client } from '@notionhq/client';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
-import { fetchProformaOrdersFromNotion, writeOrderToDb, type OrderData } from '../services/proformaNotionSync';
+import { fetchProformaOrdersFromNotion, writeOrderToDb, logProformaSync, type OrderData } from '../services/proformaNotionSync';
 import { syncOrderToNotion, settleNotionSync, watchStatusAfterVehicleChange, type NotionSyncOutcome } from '../services/notionOrderStatusSync';
 import type { VehiclePlanningOrderEntry } from '@shared/schema';
 
@@ -234,6 +234,7 @@ async function buildHistoryEntry(
   currentOrder: LiveOrder,
   stateByPlant: Map<string, string | null>,
   getNotionOrders: () => Promise<Map<string, OrderData>>,
+  createdSlips?: string[],
 ): Promise<VehiclePlanningOrderEntry> {
   let slip = await storage.getProformaSlipByOrderNumber(currentOrder.orderNumber);
   if (!slip) {
@@ -241,7 +242,10 @@ async function buildHistoryEntry(
       const ordersMap = await getNotionOrders();
       const orderData = ordersMap.get(currentOrder.orderNumber);
       if (orderData) {
-        await writeOrderToDb(orderData);
+        // A vehicle's current order that has no slip here yet is written from Notion (only that order). Counted so the sync's Activities
+        // line can say how many slips this run created.
+        const written = await writeOrderToDb(orderData);
+        if (written.created) createdSlips?.push(currentOrder.orderNumber);
         slip = await storage.getProformaSlipByOrderNumber(currentOrder.orderNumber);
       }
     } catch (err) {
@@ -329,13 +333,14 @@ let isVehiclePlanningSyncing = false;
 // matching the saved company filter, finds its current order, links it to proforma_slips, and
 // upserts the result into vehicle_planning_state. Called by the manual "Sync from Notion" button
 // and by the 24h automatic timer in server/index.ts — never by the page-load GET.
-export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number }> {
+export async function runVehiclePlanningSync(trigger = 'unknown', who?: { userCode?: string | null; userName?: string | null }): Promise<{ syncedVehicles: number; mismatches: number }> {
   if (isVehiclePlanningSyncing) {
     console.log('[Vehicle Planning] Sync already in progress, skipping this run');
     return { syncedVehicles: 0, mismatches: 0 };
   }
   isVehiclePlanningSyncing = true;
   console.log('[Vehicle Planning] Sync started');
+  const createdSlips: string[] = [];
   try {
     const companyFilters = await getCompanyFilters();
     const all = await storage.getAllVehicleInfo();
@@ -381,21 +386,27 @@ export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number
         await pool.query(`UPDATE vehicle_planning_state SET last_synced_at = now() WHERE vehicle_id = $1`, [v.id]);
         continue;
       }
-      const entry = await buildHistoryEntry(v, currentOrder, stateByPlant, getNotionOrders);
+      const entry = await buildHistoryEntry(v, currentOrder, stateByPlant, getNotionOrders, createdSlips);
       if (entry.vehicleMismatch) mismatches++;
       await upsertHistoryEntry(v.id, entry);
     }
 
-    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${mismatches} mismatch(es)`);
+    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${mismatches} mismatch(es), ${createdSlips.length} proforma slip(s) created`);
+    void logProformaSync(
+      `Vehicle Planning sync from Notion (${trigger}): ${fleet.length} vehicle(s) checked, ${mismatches} mismatch(es), ${createdSlips.length} proforma slip(s) created from Notion${createdSlips.length ? ` [${createdSlips.slice(0, 30).join(', ')}${createdSlips.length > 30 ? `, +${createdSlips.length - 30} more` : ''}]` : ''}`,
+      who,
+    );
     return { syncedVehicles: fleet.length, mismatches };
   } finally {
     isVehiclePlanningSyncing = false;
   }
 }
 
-router.post('/vehicle-planning/sync', requirePageWrite('vehicle-planning'), async (_req: Request, res: Response) => {
+router.post('/vehicle-planning/sync', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
   try {
-    const result = await runVehiclePlanningSync();
+    const u = (req as any).user;
+    const name = u?.name || u?.username || u?.userCode || 'unknown';
+    const result = await runVehiclePlanningSync(`manual, by ${name}`, { userCode: u?.userCode ?? null, userName: name });
     res.json(result);
   } catch (error) {
     console.error('Error running vehicle planning sync:', error);
@@ -575,7 +586,11 @@ router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), as
         const ordersMap = await fetchProformaOrdersFromNotion(startDate, endDate);
         const orderData: OrderData | undefined = ordersMap.get(orderNumber);
         if (orderData) {
-          await writeOrderToDb(orderData);
+          const written = await writeOrderToDb(orderData);
+          if (written.created) {
+            const u = (req as any).user;
+            void logProformaSync(`Vehicle Planning assign pulled order ${orderNumber} from Notion and created its proforma slip, by ${u?.name || u?.username || u?.userCode || 'unknown'}`, { userCode: u?.userCode ?? null, userName: u?.name || u?.username || u?.userCode || null });
+          }
           slip = await storage.getProformaSlipByOrderNumber(orderNumber);
         }
       } catch (err) {

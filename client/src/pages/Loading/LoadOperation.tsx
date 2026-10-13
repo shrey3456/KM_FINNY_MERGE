@@ -107,6 +107,8 @@ function ItemRowThumb({ name, className = "h-10 w-10" }: { name: string | null; 
 
 type ProformaItem = {
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
+  // The exact Product Master product of this line. Two lines can share a barcode (the 35 g and the 37 g peanuts) and are told apart by it.
+  productId?: number | null;
   srNo: string | null; volumeInCuFt: string | null;
   quantity: number | null;
   // Progress fields, added by withProgress() server-side
@@ -1512,7 +1514,7 @@ export default function LoadOperation() {
   });
   // The picked product is on this order and still has quantity left → Extra isn't allowed yet.
   const extraBlockedBy = extraTarget
-    ? items.find((i) => i.expected > 0 && i.remaining > 0 && normalize(i.barcode) === normalize(extraTarget.barcode)) ?? null
+    ? items.find((i) => i.expected > 0 && i.remaining > 0 && normalize(i.barcode) === normalize(extraTarget.barcode) && (i.productId == null || i.productId === extraTarget.id)) ?? null
     : null;
   // Stock available for the picked product — it may not be on the slip, so no items row has it.
   const extraStockQuery = useQuery<{ stock: number }>({
@@ -1557,6 +1559,8 @@ export default function LoadOperation() {
   function tryAutoPickExtraBarcode(value: string): boolean {
     const q = value.trim();
     if (!q) return false;
+    const sameBarcode = (allProductsQuery.data ?? []).filter((p) => (p.barcode ?? "").toLowerCase() === q.toLowerCase());
+    if (sameBarcode.length > 1) return false; // two products share this barcode: show both in the list, never pick one for them
     const exact = resolveExtraProductForBarcode(q);
     if (exact) { pickExtraTarget(exact); return true; }
     return false;
@@ -1581,7 +1585,7 @@ export default function LoadOperation() {
     mutationFn: async () => {
       if (!extraTarget) throw new Error("Pick an item first");
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, {
-        barcode: extraTarget.barcode, qty: extraQty, extra: true,
+        barcode: extraTarget.barcode, qty: extraQty, extra: true, productId: extraTarget.id,
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to add extra");
       return res.json() as Promise<ScanResponse>;
@@ -1617,13 +1621,13 @@ export default function LoadOperation() {
       if (!adjustTarget || !slip) throw new Error("Nothing to adjust");
       const delta = adjustTarget.direction === "add" ? adjustQty : -adjustQty;
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip.orderNumber)}/adjust-load`, {
-        barcode: adjustTarget.item.barcode, delta,
+        barcode: adjustTarget.item.barcode, delta, productId: adjustTarget.item.productId ?? undefined,
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to adjust quantity");
       return res.json() as Promise<ScanResponse>;
     },
     onSuccess: (data) => {
-      markItemScanned(adjustTarget?.item.barcode, data.items);
+      markItemScanned(adjustTarget?.item.barcode, data.items, adjustTarget?.item.productId);
       refreshOwnerHistory(data.slip.orderNumber);
       setSlip(data.slip);
       setItems(data.items);
@@ -1703,8 +1707,9 @@ export default function LoadOperation() {
   // Which item was touched most recently (see filteredItems' sort). Reset when another order is
   // opened, so one order's scan order never carries into the next.
   const itemScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
-  function markItemScanned(barcode: string | null | undefined, list: ProformaItem[]) {
-    const hit = list.find((i) => normalize(i.barcode) === normalize(barcode ?? ""));
+  function markItemScanned(barcode: string | null | undefined, list: ProformaItem[], productId?: number | null) {
+    const hit = (productId != null ? list.find((i) => normalize(i.barcode) === normalize(barcode ?? "") && i.productId === productId) : undefined)
+      ?? list.find((i) => normalize(i.barcode) === normalize(barcode ?? ""));
     if (!hit) return;
     const s = itemScanSeqRef.current;
     s.seq += 1;
@@ -1731,6 +1736,8 @@ export default function LoadOperation() {
   // Pending confirm dialog (opens for anything that isn't a clean full-pallet auto-scan). Never
   // an extra — that goes through its own dedicated Add Extra popup instead (extraDialogOpen).
   const [pending, setPending] = useState<{ barcode: string; item: ProformaItem | null } | null>(null);
+  // "Which item?" — the scanned barcode is on two lines of this slip (two products); the operator picks, then the normal scan flow continues.
+  const [chooseItem, setChooseItem] = useState<{ barcode: string; options: ProformaItem[] } | null>(null);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
 
@@ -1754,7 +1761,7 @@ export default function LoadOperation() {
   }
 
   const scanItemMutation = useMutation({
-    mutationFn: async ({ barcode, qty, extra }: { barcode: string; qty: number; extra?: boolean }): Promise<
+    mutationFn: async ({ barcode, qty, extra, productId }: { barcode: string; qty: number; extra?: boolean; productId?: number | null }): Promise<
       { queued: true } | { queued: false; data: ScanResponse }
     > => {
       // Tries live first; falls back to the offline queue only on a genuine network failure —
@@ -1766,7 +1773,7 @@ export default function LoadOperation() {
       // immediately; the 15s silent poll above (and the real response on a live scan) corrects it.
       const result = await scanOrQueue(
         `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`,
-        { barcode, qty, extra: !!extra },
+        { barcode, qty, extra: !!extra, ...(productId != null ? { productId } : {}) },
         `${barcode} × ${qty}${extra ? " (extra)" : ""} — Loading #${slip!.orderNumber}`,
       );
       if (result.queued) return { queued: true };
@@ -1780,9 +1787,9 @@ export default function LoadOperation() {
     // importantly, PERSISTS for a queued one, where there is no real response for a while. Mirrors
     // the server's own "loaded" math (withProgress in loading.ts): loaded counts every scan
     // (regular or extra) toward remaining, so this needs no regular/extra guess to be accurate.
-    onMutate: ({ barcode, qty }) => {
+    onMutate: ({ barcode, qty, productId }) => {
       const prevItems = itemsRef.current;
-      const idx = prevItems.findIndex((i) => normalize(i.barcode) === normalize(barcode));
+      const idx = prevItems.findIndex((i) => normalize(i.barcode) === normalize(barcode) && (productId == null || i.productId == null || i.productId === productId));
       if (idx === -1) return { prevItems: null };
       const item = prevItems[idx];
       const loaded = item.loaded + qty;
@@ -1814,7 +1821,7 @@ export default function LoadOperation() {
         return;
       }
       const data = result.data;
-      markItemScanned(data.event?.barcode, data.items);
+      markItemScanned(data.event?.barcode, data.items, data.event?.productId);
       refreshOwnerHistory(data.slip.orderNumber);
       setSlip(data.slip);
       setItems(data.items);
@@ -1933,9 +1940,9 @@ export default function LoadOperation() {
     }
   }
 
-  async function handleItemBarcode(rawBarcode: string) {
+  async function handleItemBarcode(rawBarcode: string, chosen?: ProformaItem) {
     const barcode = rawBarcode.trim();
-    if (!barcode || !slip || locked || scanLockRef.current || pending) return;
+    if (!barcode || !slip || locked || scanLockRef.current || pending || (!chosen && chooseItem)) return;
 
     // Shift handoff — the server rejects this too (checkLoadOwnership in /scan), but catching it
     // here avoids opening a confirm dialog for a scan that's just going to bounce anyway.
@@ -1961,7 +1968,7 @@ export default function LoadOperation() {
     // is discarded before anything else (no beep, no dialog): see SAME_BARCODE_COOLDOWN_MS above.
     const nb = normalize(barcode);
     const last = lastScanRef.current;
-    if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) {
+    if (!chosen && last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) {
       toast({
         title: "Same barcode scanned again — ignored",
         description: `Wait ${Math.max(1, Math.ceil((SAME_BARCODE_COOLDOWN_MS - (Date.now() - last.at)) / 1000))} s to scan the same item again.`,
@@ -1969,9 +1976,20 @@ export default function LoadOperation() {
       });
       return;
     }
+    // Two lines of this slip carry the barcode (two different products) → ALWAYS ask which one, every scan — even when only one of them
+    // still has boxes or stock. Nothing is remembered between scans.
+    if (!chosen) {
+      const lines = itemsRef.current.filter((i) => i.id > 0 && normalize(i.barcode) === nb);
+      if (new Set(lines.map((l) => (l.productId != null ? `p${l.productId}` : "x"))).size > 1) {
+        setItemBarcode("");
+        setChooseItem({ barcode, options: lines });
+        return;
+      }
+    }
     lastScanRef.current = { barcode, at: Date.now() };
 
-    const item = itemsRef.current.find((i) => normalize(i.barcode) === normalize(barcode)) ?? null;
+    const item = (chosen ? itemsRef.current.find((i) => i.id === chosen.id) ?? chosen : null)
+      ?? itemsRef.current.find((i) => normalize(i.barcode) === normalize(barcode)) ?? null;
 
     // A stock-zero item on THIS slip is stopped right here, before even opening the dialog,
     // since there's nothing to load.
@@ -2015,7 +2033,7 @@ export default function LoadOperation() {
       && item.expected > 0 && ipp >= 1 && item.remaining >= ipp && (item.stockAvailable ?? 0) >= ipp;
     if (canAutoScan) {
       const qty = ipp;
-      scanItemMutation.mutate({ barcode, qty }, {
+      scanItemMutation.mutate({ barcode, qty, productId: item.productId }, {
         // Queued (offline) has no event data to show — the mutation's own onSuccess already
         // toasts "Scan saved offline" in that case, so this just skips the feedback popup.
         onSuccess: (result) => {
@@ -4710,6 +4728,33 @@ export default function LoadOperation() {
           — this one never had it, unlike every other scan-confirmation screen in the app. No id
           to look it up by here (ProformaItem carries no productId), so it goes by name, same as
           the box-image-by-name/image-by-name fallback ProductPhoto already supports. */}
+      <Dialog open={!!chooseItem} onOpenChange={(open) => { if (!open) setChooseItem(null); }}>
+        <DialogContent className="max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>
+          <DialogHeader>
+            <DialogTitle>Which item?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">Barcode {chooseItem?.barcode} is on more than one line of this slip. Pick the one you are loading.</p>
+          <div className="space-y-2">
+            {(chooseItem?.options ?? []).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                className="w-full rounded-md border p-3 text-left hover:bg-muted"
+                onClick={() => { const bc = chooseItem!.barcode; setChooseItem(null); void handleItemBarcode(bc, opt); }}
+              >
+                <div className="font-medium">{opt.itemName ?? opt.barcode}</div>
+                <div className="text-xs text-muted-foreground">
+                  {opt.sapCode ? `SAP ${opt.sapCode} · ` : ""}{opt.srNo ? `Sr ${opt.srNo} · ` : ""}Loaded {opt.loaded} / {opt.expected} · Remaining {opt.remaining} · Stock {opt.stockAvailable ?? 0}
+                </div>
+              </button>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setChooseItem(null)}>Cancel</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
         <DialogContent className="overflow-x-hidden overflow-y-auto p-0 sm:max-w-3xl">
           <div className="flex flex-col sm:flex-row">
@@ -4822,7 +4867,7 @@ export default function LoadOperation() {
                   }
                   onClick={() => {
                     if (!pending) return;
-                    scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty }, {
+                    scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty, productId: pending.item?.productId }, {
                       onSuccess: () => setPending(null),
                     });
                   }}

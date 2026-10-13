@@ -659,6 +659,9 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   // Written by the Items table's +/- buttons (POST /loading/proforma/:orderNumber/adjust-load), not
   // a barcode scan — shown as "Loading Adjust" everywhere this history is listed.
   isAdjust: boolean("is_adjust").default(false),
+  // The product this entry was loaded for. Two products can share a barcode (35 g / 37 g peanuts), and a slip can list both as two lines: this is
+  // what tells their entries apart. NULL on entries made before it existed (they count on the first line of their barcode, as always).
+  productId: integer("product_id"),
   plant: text("plant"),
   // Sub-transfer voucher code (see plantStvs below) — same per-plant STV concept Order Scan and
   // Unloading already record per event; picked once for the vehicle before scanning (see the
@@ -1434,6 +1437,8 @@ export const unloadScanEvents = pgTable("unload_scan_events", {
   barcode: text("barcode").notNull(),
   itemName: text("item_name"),
   sapCode: text("sap_code"),
+  // The exact Product Master product this entry was scanned for (a barcode two products share is told apart by it). Empty on older entries.
+  productId: integer("product_id"),
   pallets: real("pallets").default(0),
   looseQty: integer("loose_qty").default(0),
   totalQty: integer("total_qty").default(0),

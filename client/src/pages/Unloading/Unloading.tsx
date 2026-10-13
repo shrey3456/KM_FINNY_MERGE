@@ -679,7 +679,7 @@ export default function Unloading() {
   };
 
   const scanMutation = useMutation({
-    mutationFn: async ({ barcode, qty, stv, sapCode }: { barcode: string; qty: number; stv?: string | null; sapCode?: string | null }) => {
+    mutationFn: async ({ barcode, qty, stv, sapCode, productId }: { barcode: string; qty: number; stv?: string | null; sapCode?: string | null; productId?: number | null }) => {
       // Tries live first; falls back to the offline queue only on a genuine network failure —
       // see client/src/lib/offlineQueue.ts. A queued scan has no server response yet (the
       // regular/extra split is decided server-side, under a lock, so it can't be guessed
@@ -689,7 +689,7 @@ export default function Unloading() {
       // activeSessionQuery's refetchInterval above) corrects it once the real data is back.
       const result = await scanOrQueue(
         `/api/unloading/sessions/${activeSessionId}/scan`,
-        { barcode, qty, stv: stv ?? null, sapCode: sapCode ?? null },
+        { barcode, qty, stv: stv ?? null, sapCode: sapCode ?? null, ...(productId != null ? { productId } : {}) },
         `${barcode} × ${qty} — Unloading session #${activeSessionId}`,
       );
       if (result.queued) return { queued: true as const };
@@ -772,7 +772,9 @@ export default function Unloading() {
   const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
   const [barcodeNotInSystemMessage, setBarcodeNotInSystemMessage] = useState<string | null>(null);
   // A scanned barcode that two rows of this batch share under different SAP codes — the operator picks the item ("Which item?").
-  const [chooseItem, setChooseItem] = useState<{ barcode: string; options: SessionItem[] } | null>(null);
+  const [chooseItem, setChooseItem] = useState<{ barcode: string; options: Array<{ key: string; item: SessionItem | null; product: Product | null; name: string; sap: string }> } | null>(null);
+  // Product Master products per barcode, asked once per barcode (GET /api/unloading/barcode-products).
+  const barcodeProductsRef = useRef<Map<string, Array<Product & { sapForState: string }>>>(new Map());
 
   // ─── Manual/Camera barcode input, same-barcode cooldown, auto-scan popup — mirrors
   // client/src/pages/Loading/LoadOperation.tsx's item-scanning UX exactly. ─────────────────────
@@ -817,7 +819,7 @@ export default function Unloading() {
   // all (pending.item null) — carries name/SAP/itemsPerPallet so the dialog can still show a
   // real identity and default the qty to a full pallet, same as Order Scan's own
   // inventoryProduct for an unmatched scan, instead of a bare barcode defaulting to 1.
-  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null } | null>(null);
+  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null; sapCode?: string | null } | null>(null);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
   // Tracks WHICH resolved name last failed to load, not a plain boolean — a boolean reset by a
@@ -859,13 +861,13 @@ export default function Unloading() {
     if (!((item.realPackSize ?? 0) > 0)) return 0;
     return item.remaining > 0 && item.remaining < ipp ? item.remaining : ipp;
   }
-  function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null) {
+  function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null, sapCode: string | null = null) {
     const qty = defaultDialogQty(item, product);
     const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 0);
     const packSizeMissing = !!item && !((item.realPackSize ?? 0) > 0);
     setDialogQty(qty);
     setDialogPalletsInput(ipp > 0 && !packSizeMissing ? (qty / ipp).toFixed(2) : "");
-    setPending({ barcode, item, product });
+    setPending({ barcode, item, product, sapCode });
   }
 
   // A 404 here means this barcode genuinely isn't a real product at all — anything else
@@ -901,26 +903,46 @@ export default function Unloading() {
     if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) return;
     lastScanRef.current = { barcode, at: Date.now() };
 
-    // SAME BARCODE, DIFFERENT SAP = DIFFERENT ITEMS (e.g. the 35 g and 37 g salted peanuts). The barcode alone cannot say which one this
-    // scan is for: if only one of them still has quantity left it is that one, otherwise the operator is asked ("Which item?").
+    // SAME BARCODE, DIFFERENT PRODUCT = DIFFERENT ITEMS (e.g. the 35 g and 37 g salted peanuts). The barcode alone cannot say which one this
+    // scan is for, so the operator is ALWAYS asked ("Which item?") — whether the batch lists both, lists only one of them, or neither — and
+    // nothing is remembered between scans.
     const sameBarcode = detail.items.filter((i) => normalize(i.barcode) === nb);
-    let item: SessionItem | null = sameBarcode[0] ?? null;
+    const item: SessionItem | null = sameBarcode[0] ?? null;
     if (sameBarcode.length > 1 && new Set(sameBarcode.map((i) => normalize(i.sapCode))).size > 1) {
-      const open = sameBarcode.filter((i) => i.remaining > 0);
-      if (open.length === 1) item = open[0];
-      else {
-        lastScanRef.current = null; // the scan is not done yet — the same barcode must be scannable again straight after the choice
-        setItemBarcode("");
-        setChooseItem({ barcode, options: sameBarcode });
-        return;
-      }
+      lastScanRef.current = null; // the scan is not done yet — the same barcode must be scannable again straight after the choice
+      setItemBarcode("");
+      setChooseItem({ barcode, options: sameBarcode.map((i) => ({ key: `row${i.id}`, item: i, product: null, name: i.itemName ?? barcode, sap: i.sapCode ?? "" })) });
+      return;
+    }
+    // The batch lists the barcode once (or not at all): is it a barcode two Product Master products share?
+    let products = barcodeProductsRef.current.get(nb);
+    if (!products) {
+      try {
+        const plantQ = detail.session.plant ? `&plant=${encodeURIComponent(detail.session.plant)}` : "";
+        const res = await apiRequest("GET", `/api/unloading/barcode-products?barcode=${encodeURIComponent(barcode)}${plantQ}`);
+        products = ((await res.json()) as { products: Array<Product & { sapForState: string }> }).products ?? [];
+        barcodeProductsRef.current.set(nb, products);
+      } catch { products = []; } // a lookup hiccup must never block a scan — fall through to the normal flow
+    }
+    if (products.length > 1) {
+      lastScanRef.current = null;
+      setItemBarcode("");
+      setChooseItem({
+        barcode,
+        options: products.map((p) => {
+          // the batch row that is this product, when there is one (its SAP is the product's SAP for the plant's state)
+          const row = sameBarcode.find((i) => normalize(i.sapCode) === normalize(p.sapForState)) ?? (sameBarcode.length === 1 && !p.sapForState ? sameBarcode[0] : null);
+          return { key: `p${p.id}`, item: row, product: p, name: row?.itemName ?? p.name, sap: row?.sapCode ?? p.sapForState ?? "" };
+        }),
+      });
+      return;
     }
     await proceedWithItem(barcode, item);
   }
 
   // Everything after the row is known (picked, or the only one): lock, look the product up when the barcode is not on the batch, then
   // auto-scan a full pallet or open the quantity dialog.
-  async function proceedWithItem(barcode: string, item: SessionItem | null) {
+  async function proceedWithItem(barcode: string, item: SessionItem | null, namedProduct?: Product | null) {
     if (scanLockRef.current || pending) return;
     scanLockRef.current = true;
     scanItemRef.current = item;
@@ -931,7 +953,9 @@ export default function Unloading() {
     // identity and default the qty to a full pallet — same as Order Scan's own inventoryProduct
     // fallback for an unmatched scan — instead of a bare barcode defaulting to 1.
     let resolvedProduct: Product | null = null;
-    if (!item) {
+    if (!item && namedProduct) {
+      resolvedProduct = namedProduct;
+    } else if (!item) {
       // If this lookup throws (a network blip), the lock set above must still be released —
       // otherwise every later scan is silently ignored until the page is reloaded.
       let resolved: Awaited<ReturnType<typeof resolveProduct>>;
@@ -973,7 +997,7 @@ export default function Unloading() {
     }
 
     scanLockRef.current = false;
-    openConfirmDialog(barcode, item, resolvedProduct);
+    openConfirmDialog(barcode, item, resolvedProduct, namedProduct ? ((namedProduct as any).sapForState ?? null) : null);
     setItemBarcode("");
   }
 
@@ -2540,7 +2564,7 @@ export default function Unloading() {
                       if (e.key === "Enter") {
                         e.preventDefault();
                         if (pending && dialogQty > 0 && !scanMutation.isPending) {
-                          scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? null }, { onSuccess: () => setPending(null) });
+                          scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? pending.sapCode ?? null, productId: pending.item ? null : (pending.product?.id ?? null) }, { onSuccess: () => setPending(null) });
                         }
                       }
                     }}
@@ -2596,7 +2620,7 @@ export default function Unloading() {
                         if (e.key === "Enter") {
                           e.preventDefault();
                           if (pending && dialogQty > 0 && !scanMutation.isPending) {
-                            scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? null }, { onSuccess: () => setPending(null) });
+                            scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? pending.sapCode ?? null, productId: pending.item ? null : (pending.product?.id ?? null) }, { onSuccess: () => setPending(null) });
                           }
                         }
                       }}
@@ -2629,7 +2653,7 @@ export default function Unloading() {
               disabled={dialogQty <= 0 || scanMutation.isPending}
               onClick={() => {
                 if (!pending) return;
-                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? null }, { onSuccess: () => setPending(null) });
+                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? pending.sapCode ?? null, productId: pending.item ? null : (pending.product?.id ?? null) }, { onSuccess: () => setPending(null) });
               }}
             >
               {scanMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
@@ -2684,37 +2708,43 @@ export default function Unloading() {
 
       {/* Which item? — one barcode, more than one SAP code on this vehicle's list. */}
       <Dialog open={!!chooseItem} onOpenChange={(o) => { if (!o) setChooseItem(null); }}>
-        <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+        <DialogContent className="w-[calc(100%-2rem)] max-w-sm" onOpenAutoFocus={(e) => e.preventDefault()}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
               <AlertTriangle className="h-5 w-5 text-amber-500" />
               Which item?
             </DialogTitle>
             <DialogDescription className="text-left pt-1">
-              Barcode <span className="font-mono font-semibold text-gray-700">{chooseItem?.barcode}</span> is listed with more than one SAP code. Tap the item you are scanning.
+              Barcode <span className="font-mono font-semibold text-gray-700">{chooseItem?.barcode}</span> belongs to more than one item. Tap the item you are scanning.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2 py-1 max-h-72 overflow-y-auto pr-1">
             {chooseItem?.options.map((opt) => (
               <button
-                key={opt.id}
+                key={opt.key}
                 type="button"
                 onClick={() => {
                   const picked = opt;
                   const bc = chooseItem!.barcode;
                   setChooseItem(null);
                   lastScanRef.current = { barcode: bc, at: Date.now() };
-                  void proceedWithItem(bc, picked);
+                  void proceedWithItem(bc, picked.item, picked.product);
                 }}
-                className={`w-full border-2 px-4 py-3 text-left transition-colors hover:border-[#001d6e] hover:bg-[#001d6e]/5 ${opt.remaining > 0 ? "border-gray-200 bg-white" : "border-amber-300 bg-amber-50"}`}
+                className={`w-full border-2 px-4 py-3 text-left transition-colors hover:border-[#001d6e] hover:bg-[#001d6e]/5 ${!opt.item ? "border-sky-200 bg-sky-50" : opt.item.remaining > 0 ? "border-gray-200 bg-white" : "border-amber-300 bg-amber-50"}`}
               >
-                <p className="font-semibold text-gray-900 text-sm leading-tight">{opt.itemName ?? <span className="italic text-gray-400">Unknown</span>}</p>
+                <p className="font-semibold text-gray-900 text-sm leading-tight">{opt.name || <span className="italic text-gray-400">Unknown</span>}</p>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1 text-[11px] text-gray-400">
-                  <span>SAP: <span className="font-mono font-medium text-gray-600">{opt.sapCode || "—"}</span></span>
-                  <span>Expected: <span className="font-medium text-gray-600">{opt.expected}</span></span>
-                  <span>Scanned: <span className="font-medium text-emerald-600">{opt.scanned}</span></span>
-                  <span>Left: <span className="font-medium text-gray-600">{opt.remaining}</span></span>
-                  {opt.remaining <= 0 && <span className="font-semibold text-amber-600">Complete</span>}
+                  <span>SAP: <span className="font-mono font-medium text-gray-600">{opt.sap || "—"}</span></span>
+                  {opt.item ? (
+                    <>
+                      <span>Expected: <span className="font-medium text-gray-600">{opt.item.expected}</span></span>
+                      <span>Scanned: <span className="font-medium text-emerald-600">{opt.item.scanned}</span></span>
+                      <span>Left: <span className="font-medium text-gray-600">{opt.item.remaining}</span></span>
+                      {opt.item.remaining <= 0 && <span className="font-semibold text-amber-600">Complete</span>}
+                    </>
+                  ) : (
+                    <span className="font-semibold text-sky-700">Not on this vehicle's list — logs as Extra</span>
+                  )}
                 </div>
               </button>
             ))}

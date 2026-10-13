@@ -45,6 +45,10 @@ type PlantStockRow = {
   // row-position counter, so it's null whenever the row has no Product Master match at all.
   srNo: string | null;
   barcode: string | null;
+  // Set only on a barcode two products share (e.g. the 35 g and 37 g salted peanuts): each product is its own row.
+  splitProductId?: number | null;
+  // Live Stock is one number for the barcode + plant, shared by both products; it is shown on one of the two rows only.
+  liveShared?: boolean;
   plant: string;
   itemName: string;
   itemNo: string | null;
@@ -236,7 +240,7 @@ const ALL_COLUMNS = [
   { key: "purchase",     label: "Purchase (includes Extra)" },
   { key: "extra",        label: "Extra" },
   { key: "adjust",       label: "Adjust" },
-  { key: "totalIn",      label: "Total Stock (Opening + Purchase + Adjust)" },
+  { key: "totalIn",      label: "Total P & O (Opening + Purchase + Adjust)" },
   { key: "expectedSale", label: "Expected Sale (proforma)" },
   { key: "sale",         label: "Sale (loaded)" },
   { key: "closing",      label: "Closing" },
@@ -307,7 +311,7 @@ const EXPORT_COLUMNS: ExportColumn[] = [
   { id: "purchase", csvHead: ["Purchase Qty", "Purchase Pallets"], pdfHead: "Purchase", pdfWidth: 21, qty: purchaseOf, plt: purchasePltOf, extra: (r) => r.extraQty },
   { id: "extra", csvHead: ["Extra Qty (within Purchase)", "Extra Pallets"], pdfHead: null, pdfWidth: 0, qty: (r) => r.extraQty, plt: (r) => r.extraPallets },
   { id: "adjust", csvHead: ["Adjust Qty"], pdfHead: "Adjust", pdfWidth: 16, qty: (r) => r.adjustQty ?? 0, signed: true },
-  { id: "totalIn", csvHead: ["Total Stock (Opening + Purchase + Adjust)"], pdfHead: "Total\nStock", pdfWidth: 17, qty: totalStockOf },
+  { id: "totalIn", csvHead: ["Total P & O (Opening + Purchase + Adjust)"], pdfHead: "Total\nP & O", pdfWidth: 17, qty: totalStockOf },
   { id: "system", csvHead: ["System (Clear Stock)"], pdfHead: null, pdfWidth: 0, qty: (r) => r.systemQty ?? 0 },
   { id: "expectedSale", csvHead: ["Expected Sale Qty", "Expected Sale Pallets"], pdfHead: "Expected\nSale", pdfWidth: 19, qty: (r) => r.expectedSaleQty, plt: (r) => r.expectedSalePallets },
   { id: "sale", csvHead: ["Sale Qty (loaded)", "Sale Pallets"], pdfHead: "Sale\n(loaded)", pdfWidth: 19, qty: (r) => r.saleQty, plt: (r) => r.salePallets },
@@ -571,7 +575,7 @@ export default function OverallStock() {
       // Columns introduced by the stock ledger: a layout saved before them would otherwise keep
       // them hidden. Expected Sale shows wherever Sale did; Closing replaces Remain.
       if (saved.has("sale")) saved.add("expectedSale");
-      if (saved.has("remain")) { saved.add("closing"); saved.add("opening"); }
+      if (saved.has("remain")) saved.add("opening"); // (Closing is hidden by default now, so the old Remain layout no longer switches it on)
       // Adjust and Total In belong beside Purchase for everyone, including people whose saved
       // layout predates them — without this they are built but never shown.
       if (saved.has("purchase")) { saved.add("adjust"); saved.add("totalIn"); }
@@ -579,7 +583,7 @@ export default function OverallStock() {
       try {
         if (!localStorage.getItem("overallStock:liveColAdded")) { saved.add("liveStock"); localStorage.setItem("overallStock:liveColAdded", "1"); }
         // Closing became hidden-by-default: switch it off once for a layout saved before that, then leave the choice alone.
-        if (!localStorage.getItem("overallStock:closingHiddenByDefault")) { saved.delete("closing"); localStorage.setItem("overallStock:closingHiddenByDefault", "1"); }
+        if (!localStorage.getItem("overallStock:closingHiddenByDefault2")) { saved.delete("closing"); localStorage.setItem("overallStock:closingHiddenByDefault2", "1"); }
       } catch { /* storage unavailable */ }
       return saved;
     } catch {
@@ -1079,7 +1083,7 @@ export default function OverallStock() {
       { id: "extra", label: "Extra", filterType: "number", options: numberOptions((r) => r.extraQty), accessor: (r) => r.extraQty },
       { id: "adjust", label: "Adjust", filterType: "number", options: numberOptions((r) => r.adjustQty), accessor: (r) => r.adjustQty ?? null },
       { id: "system", label: "System (Clear Stock)", filterType: "number", options: numberOptions((r) => r.systemQty), accessor: (r) => r.systemQty ?? null },
-      { id: "totalIn", label: "Total Stock", filterType: "number", options: numberOptions((r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0)), accessor: (r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0) },
+      { id: "totalIn", label: "Total P & O", filterType: "number", options: numberOptions((r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0)), accessor: (r) => (r.openingStock ?? 0) + r.inStock + (r.adjustQty ?? 0) },
       { id: "expectedSale", label: "Expected Sale", filterType: "number", options: numberOptions((r) => r.expectedSaleQty), accessor: (r) => r.expectedSaleQty ?? null },
       { id: "sale", label: "Sale", filterType: "number", options: numberOptions((r) => r.saleQty), accessor: (r) => r.saleQty ?? null },
       { id: "closing", label: "Closing", filterType: "number", options: numberOptions((r) => r.closingStock), accessor: (r) => r.closingStock ?? null },
@@ -1374,6 +1378,9 @@ export default function OverallStock() {
   const totalAdjust = filtered.reduce((s, r) => s + (r.adjustQty ?? 0), 0);
   const totalSalePallets = filtered.reduce((s, r) => s + (r.salePallets ?? 0), 0);
   const totalClosing = filtered.reduce((s, r) => s + (r.closingStock ?? 0), 0);
+  // Total P & O = Opening + Purchase + Adjust (the same figure as the table column); Live Stock = what the database holds right now.
+  const totalPO = totalOpening + totalPurchase + totalAdjust;
+  const totalLive = filtered.reduce((s, r) => s + (r.liveStock ?? 0), 0);
   const totalClosingPallets = filtered.reduce((s, r) => s + (r.closingPallets ?? 0), 0);
   // Expected / Expected Sale pallets are summed over ALL rows — the same scope as the server's
   // expectedTotal / expectedSaleTotal shown beside them.
@@ -1393,7 +1400,7 @@ export default function OverallStock() {
     const byBarcode = new Map<string, PlantStockRow>();
     for (const r of filtered) {
       if (r.isEmptyBox) continue; // empty boxes stay their own per-plant rows below, never merged
-      const key = normalizedText(r.barcode) || normalizedText(r.itemName) || `missing-${r.srNo}`;
+      const key = (normalizedText(r.barcode) || normalizedText(r.itemName) || `missing-${r.srNo}`) + (r.splitProductId ? `::p${r.splitProductId}` : "");
       const existing = byBarcode.get(key);
       if (!existing) {
         byBarcode.set(key, { ...r, plant: activeState || "ALL", combinedPlants: [r.plant] });
@@ -1623,13 +1630,13 @@ export default function OverallStock() {
             </span>
           );
         }
-        const isOpen = !!detailRow && detailRow.barcode === row.barcode && detailRow.plant === row.plant;
+        const isOpen = !!detailRow && detailRow.barcode === row.barcode && detailRow.plant === row.plant && (detailRow.splitProductId ?? null) === (row.splitProductId ?? null);
         return (
           <button
             type="button"
             disabled={!row.barcode}
             onClick={() => {
-              setDetailRow((cur) => (cur && cur.barcode === row.barcode && cur.plant === row.plant ? null : row));
+              setDetailRow((cur) => (cur && cur.barcode === row.barcode && cur.plant === row.plant && (cur.splitProductId ?? null) === (row.splitProductId ?? null) ? null : row));
               setDetailTab("details");
               setHistorySource("scanning");
               setExpandedParties(new Set());
@@ -1857,7 +1864,7 @@ export default function OverallStock() {
       // when the item started the period already holding stock (Opening); this column is the
       // figure that accounts for all three.
       id: "totalIn",
-      header: columnHeader("totalIn", "Total Stock"),
+      header: columnHeader("totalIn", "Total P & O"),
       width: 110,
       align: "right",
       sortable: true,
@@ -1963,11 +1970,24 @@ export default function OverallStock() {
       },
       headerClassName: headerBorder,
       cellClassName: cellBorder,
-      render: (row) => (
-        <span className="font-semibold tabular-nums" title="Stock in the database right now — the figure the Loading page uses. Ignores the date filter.">
-          {row.liveStock ?? 0}
-        </span>
-      ),
+      render: (row) => {
+        // A barcode two products share has ONE stock number; it sits on one row and the other row says where it is.
+        const sibling = row.liveShared && row.splitProductId
+          ? rows.find((r) => r !== row && r.barcode === row.barcode && r.plant === row.plant && r.splitProductId && r.splitProductId !== row.splitProductId)
+          : undefined;
+        return (
+          <span className="inline-flex flex-col items-end leading-tight">
+            <span className="font-semibold tabular-nums" title="Stock in the database right now — the figure the Loading page uses. Ignores the date filter.">
+              {row.liveStock ?? 0}
+            </span>
+            {sibling && (
+              <span className="text-[10px] font-normal text-gray-400" title="One stock number is kept for this barcode, shared by both products.">
+                {(row.liveStock ?? 0) > 0 ? `shared with ${sibling.srNo ?? "other"}` : `in ${sibling.srNo ?? "other"}`}
+              </span>
+            )}
+          </span>
+        );
+      },
     },
     ...(isAdminOrSuper ? [{
       id: "actions",
@@ -2500,10 +2520,10 @@ export default function OverallStock() {
             },
             {
               icon: TrendingUp,
-              tone: totalClosing < 0 ? "amber" as const : "navy" as const,
-              value: totalClosing.toLocaleString(),
-              label: "Closing",
-              hint: `End of period · ${pltLabel(totalClosingPallets)}`,
+              tone: totalLive < 0 ? "amber" as const : "navy" as const,
+              value: totalLive.toLocaleString(),
+              label: "Live Stock",
+              hint: "In the database now · same as Loading",
             },
           ]}
         />
@@ -2943,11 +2963,11 @@ export default function OverallStock() {
             containerClassName="rounded-none border-0"
             columns={stockColumns}
             data={displayRows}
-            getRowId={(row) => `${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}`}
+            getRowId={(row) => `${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}${row.splitProductId ? `-p${row.splitProductId}` : ""}`}
             rowClassName={(row) => (row.isEmptyBox ? "bg-orange-50/40" : undefined)}
             renderExpandedRow={() => movementsPanel}
             isRowExpandable={(row) => !row.isEmptyBox && !!row.barcode}
-            expandedRowId={detailRow ? `${detailRow.isEmptyBox ? "EB" : detailRow.barcode}-${detailRow.plant}` : null}
+            expandedRowId={detailRow ? `${detailRow.isEmptyBox ? "EB" : detailRow.barcode}-${detailRow.plant}${detailRow.splitProductId ? `-p${detailRow.splitProductId}` : ""}` : null}
             emptyState={`No stock yet${activePlant ? ` for ${activePlant}` : activeState ? ` for ${activeState}` : ""}. Stock appears here once an order is completed.`}
             noResultsState="No stock rows match your search."
             hasActiveFilters={!!search || activeFilters.length > 0 || Object.keys(columnConditions).length > 0}
@@ -3007,7 +3027,7 @@ export default function OverallStock() {
                 ];
                 return (
                   <div
-                    key={`${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}`}
+                    key={`${row.isEmptyBox ? "EB" : row.barcode}-${row.plant}${row.splitProductId ? `-p${row.splitProductId}` : ""}`}
                     className={`border-b border-gray-100 px-4 py-3 ${row.isEmptyBox ? "bg-orange-50/40" : ""}`}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -3189,7 +3209,7 @@ export default function OverallStock() {
                   </span>
                   {" "}· {deleteMovementTarget.reason ?? "no reason recorded"} · {deleteMovementTarget.plant}
                   <br />
-                  This removes it from the ledger only — it will no longer count toward Opening/Adjust/Total Stock.
+                  This removes it from the ledger only — it will no longer count toward Opening/Adjust/Total P & O.
                   It does not change this item's current live stock.
                 </>
               )}

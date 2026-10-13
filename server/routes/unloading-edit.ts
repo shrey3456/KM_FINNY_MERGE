@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { storage } from '../storage';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
+import { findProductForLine } from '../lib/productForLine';
 import { getUserPlants, getPlantStateCode, resolvePalletSizeOrQty } from './order-scan';
 import { resplitUnloadEventsExtraFlag } from '../lib/unloadRemap';
 
@@ -263,7 +264,7 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
             const newOrderQty = Math.min(physicalQty, quantity);
             const newExtraQty = physicalQty - newOrderQty;
 
-            const product = await storage.getProductByBarcode(barcode, session.plant);
+            const product = await findProductForLine(barcode, sapCode, session.plant);
             const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, quantity);
 
             await resplitUnloadEventsExtraFlag(client, eventRows, newOrderQty, itemsPerPallet);

@@ -2993,13 +2993,14 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
         [event.barcode, plant],
       );
       const currentStock = Number(stockRows[0]?.inStock ?? 0);
-      if (currentStock < oldQty) {
+      // Only the NET amount that comes off has to be in stock (raising 30 to 35 needs nothing). The new quantity is put on first and the old one
+      // taken off after it, below, so stock never dips below zero in between.
+      if (currentStock + (newQty as number) < oldQty) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           message: `Can't correct this — only ${currentStock} of these boxes are still in stock (${oldQty} were received here); the rest are already used elsewhere.`,
         });
       }
-      await reverseLiveScanStock(client, plant, event.barcode, event.is_extra ? 0 : oldQty, event.is_extra ? oldQty : 0, event.session_id);
     }
 
     // Un-book the old qty from order_scan_items (a plain Extra event was never added there to
@@ -3058,6 +3059,8 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
 
     if (plant) {
       await applyLiveScanStock(client, plant, event.barcode, r.orderQty, r.extraQty, event.session_id);
+      // ...and now the old quantity comes off.
+      if (event.barcode) await reverseLiveScanStock(client, plant, event.barcode, event.is_extra ? 0 : oldQty, event.is_extra ? oldQty : 0, event.session_id);
     }
 
     await client.query('COMMIT');

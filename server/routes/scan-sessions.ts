@@ -18,6 +18,7 @@ import { eq, desc, inArray, count, asc } from 'drizzle-orm';
 import { z } from 'zod';
 import { requirePageWrite } from '../lib/pageAccess';
 import { getUserPlants } from './order-scan';
+import { chooseProductForLine, productsWithBarcode } from '../lib/productForLine';
 import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 import { pushScanHistoryToNotion, saveScanHistoryNotionConfig } from '../services/scanHistoryNotionSync';
 
@@ -998,7 +999,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       sm.created_by_code AS "scannedByCode",
       un.name AS "scannedByName",
       sm.created_at AS "scannedAt",
-      NULL::timestamp AS "adjustedAt",
+      sm.edited_at AS "adjustedAt",   -- set when the quantity was edited from Scan History
       false AS voided,
       NULL::timestamp AS "voidedAt",
       NULL::text AS "voidReason",
@@ -1749,9 +1750,16 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     // Hide rows with nothing at all to show for this period (no opening, purchase, sale or extra).
     const conds: string[] = ['(pps.opening_stock <> 0 OR pps.in_stock <> 0 OR pps.sale_qty <> 0 OR pps.extra_qty <> 0 OR pps.adjust_qty <> 0)'];
     const inPeriod = (dateExpr: string) => `(${dateExpr} >= $1::date AND ($2::date IS NULL OR ${dateExpr} <= $2::date))`;
+    // A barcode two products share (the 35 g and the 37 g salted peanuts) is TWO ledger rows, one per product. Stock is still held per barcode +
+    // plant, but every movement and every loaded entry names its product, so Opening / Purchase / Adjust / Sale / Closing are worked out per product.
+    // A movement with no product goes to the product the stock record is held under. Any other barcode stays one row, as always.
+    const SHARED_BC = `(SELECT LOWER(TRIM(sb.barcode)) FROM products sb WHERE sb.barcode IS NOT NULL AND TRIM(sb.barcode) <> '' GROUP BY 1 HAVING COUNT(*) > 1)`;
+    const HELD_PRODUCT = (barcode: string, plant: string) => `(SELECT hx.product_id FROM product_plant_stock hx WHERE LOWER(TRIM(hx.barcode)) = LOWER(TRIM(${barcode})) AND LOWER(TRIM(hx.plant)) = LOWER(TRIM(${plant})) LIMIT 1)`;
     const sourceSql = `(
       WITH purchase_rows AS (
-        SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty, sm.product_id, sm.created_at, sm.type,
+        SELECT sm.barcode, sm.plant, sm.qty, sm.extra_qty,
+               CASE WHEN LOWER(TRIM(sm.barcode)) IN ${SHARED_BC} THEN COALESCE(sm.product_id, ${HELD_PRODUCT('sm.barcode', 'sm.plant')}, 0) ELSE 0 END AS prodkey,
+               sm.product_id, sm.created_at, sm.type,
                COALESCE(sm.origin, CASE WHEN sm.source = 'manual' THEN 'page' ELSE 'operation' END) AS origin,
                -- An unloading line counts on the day it was SCANNED (the batch's own date is only for the entry); a void or a
                -- quantity correction counts on the day of the scan it cancels (effective_date). Everything else keeps the
@@ -1776,7 +1784,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       -- separately as Adjust and still count towards Closing, so the row adds up:
       --   Closing = Opening + Purchase + Adjust - Sale.
       purchases AS (
-        SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
+        SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, prodkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
                -- Opening leaves the Settings-wide actions out for the same reason Closing does
                -- (below): a bulk clear run last month is not what this plant "had" at the start
                -- of the period as far as the day-to-day ledger is concerned. origin = 'opening'
@@ -1803,7 +1811,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
                MAX(product_id) AS product_id
         FROM purchase_rows
         WHERE (d >= '${TRACK_FLOOR}'::date OR (origin = 'opening' AND d >= '${TRACK_FLOOR}'::date - 1))
-        GROUP BY 1, 2
+        GROUP BY 1, 2, 3
       ),
       -- A load is attributed to the plant the boxes were actually TAKEN FROM, not to the plant on
       -- the slip. Loading draws on the whole state pool (server/lib/statePool.ts): a Valsad order
@@ -1814,6 +1822,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       -- rows) still falls back to its own plant and full quantity, exactly as before.
       sale_rows AS (
         SELECT lse.barcode,
+               CASE WHEN LOWER(TRIM(lse.barcode)) IN ${SHARED_BC} THEN COALESCE(lse.product_id, ${HELD_PRODUCT('lse.barcode', 'lse.plant')}, 0) ELSE 0 END AS prodkey,
                COALESCE(sp.source_plant, lse.plant) AS plant,
                COALESCE(sp.qty, lse.total_qty)      AS total_qty,
                COALESCE(ps.order_date::date, lse.scanned_at::date) AS d
@@ -1825,18 +1834,19 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         -- Manual Sales (Settings > Data Management): sales added by CSV for a day, taken from the plant(s) in
         -- manual_sale_pulls and dated the batch's sale date. A reversed batch drops out of Sale again.
         UNION ALL
-        SELECT mr.barcode, mp.source_plant AS plant, mp.qty AS total_qty, mb.sale_date AS d
+        SELECT mr.barcode, CASE WHEN LOWER(TRIM(mr.barcode)) IN ${SHARED_BC} THEN COALESCE(${HELD_PRODUCT('mr.barcode', 'mp.source_plant')}, 0) ELSE 0 END AS prodkey, mp.source_plant AS plant, mp.qty AS total_qty, mb.sale_date AS d
         FROM manual_sale_pulls mp
         JOIN manual_sale_rows mr ON mr.id = mp.row_id
         JOIN manual_sale_batches mb ON mb.id = mr.batch_id
         WHERE mb.status = 'active' AND mb.sale_date >= '${TRACK_FLOOR}'::date
       ),
       sales AS (
-        SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, MIN(barcode) AS barcode, MIN(plant) AS plant,
+        SELECT LOWER(TRIM(barcode)) AS bkey, LOWER(TRIM(plant)) AS pkey, prodkey,
+               MIN(barcode) AS barcode, MIN(plant) AS plant,
                COALESCE(SUM(total_qty) FILTER (WHERE d < $1::date), 0)::int AS opening_sale,
                COALESCE(SUM(total_qty) FILTER (WHERE ${inPeriod('d')}), 0)::int AS sale
         FROM sale_rows
-        GROUP BY 1, 2
+        GROUP BY 1, 2, 3
       )
       SELECT COALESCE(pu.barcode, sa.barcode) AS barcode,
              COALESCE(pu.plant, sa.plant) AS plant,
@@ -1855,9 +1865,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
                + COALESCE(pu.purchase, 0) + COALESCE(pu.adjust, 0)
                - COALESCE(sa.sale, 0) AS closing_stock,
              pu.last_arrived AS updated_at,
-             pu.product_id
+             CASE WHEN COALESCE(pu.prodkey, sa.prodkey, 0) <> 0 THEN COALESCE(pu.prodkey, sa.prodkey) ELSE pu.product_id END AS product_id
       FROM purchases pu
-      FULL OUTER JOIN sales sa ON sa.bkey = pu.bkey AND sa.pkey = pu.pkey
+      FULL OUTER JOIN sales sa ON sa.bkey = pu.bkey AND sa.pkey = pu.pkey AND sa.prodkey = pu.prodkey
     )`;
 
     if (allowed !== null) {
@@ -1897,7 +1907,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         pps.opening_stock                                  AS "openingStock",
         pps.sale_qty                                       AS "saleQty",
         pps.closing_stock                                  AS "closingStock",
-        COALESCE(live.in_stock, 0)                         AS "liveStock",
+        -- One number per barcode + plant, so for a barcode two products share it is shown once: on the product the stock record is held under
+        -- (product_plant_stock.product_id), with a "shared with" note on both rows (see liveShared).
+        CASE WHEN LOWER(TRIM(pps.barcode)) IN ${SHARED_BC}
+                  AND COALESCE(pps.product_id, 0) <> COALESCE(${HELD_PRODUCT('pps.barcode', 'pps.plant')}, 0)
+             THEN 0 ELSE COALESCE(live.in_stock, 0) END       AS "liveStock",
         COALESCE(p.name, p_bc.name, pps.barcode)            AS "itemName",
         COALESCE(p.item_no, p_bc.item_no)                   AS "itemNo",
         -- Product Master's own "New Sr." (products.new_sr) — the same canonical cross-plant Sr
@@ -1908,6 +1922,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
           WHEN UPPER(pl.state) = 'MP' THEN COALESCE(p.mp_sap, p_bc.mp_sap, p.sap_code, p_bc.sap_code)
           ELSE COALESCE(p.sap_code, p_bc.sap_code)
         END                                                AS "sapCode",
+        COALESCE(p.id, p_bc.id)                             AS "productId",
         COALESCE(p.hsn_code, p_bc.hsn_code)                 AS "hsnCode",
         COALESCE(p.category, p_bc.category)                 AS category,
         COALESCE(p.brand, p_bc.brand)                       AS brand,
@@ -1950,6 +1965,24 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       }
     `, params);
 
+    // SAME BARCODE, DIFFERENT PRODUCT = DIFFERENT ROWS (for Expected Purchase / Expected Sale). Stock itself is kept per barcode + plant (the
+    // database holds one number for both products), so the ledger figures stay on the one row that already carried them; what is told apart
+    // by product is what was ORDERED: each CSV line names its SAP code, each slip line its product. The twin gets its own row for that.
+    const { rows: sharedRows } = await pool.query(`SELECT LOWER(TRIM(barcode)) AS b, MIN(TRIM(barcode)) AS raw FROM products WHERE barcode IS NOT NULL AND TRIM(barcode) <> '' GROUP BY 1 HAVING COUNT(*) > 1`);
+    const sharedBarcodeSet = new Set<string>(sharedRows.map((r: any) => r.b));
+    const sharedProducts = new Map<string, any[]>();
+    for (const r of sharedRows as any[]) sharedProducts.set(r.b, await productsWithBarcode(r.raw));
+    const lc = (v: unknown) => String(v ?? '').trim().toLowerCase();
+    const rowKey = (barcode: unknown, plant: unknown, pid: number | null | undefined) =>
+      sharedBarcodeSet.has(lc(barcode)) && pid != null ? `${lc(barcode)}::${lc(plant)}::${pid}` : `${lc(barcode)}::${lc(plant)}`;
+    // The product an ordered line is for: the exact product when the slip line names it, else the one whose SAP code (for the plant's state) it carries.
+    const productForOrderedLine = (barcode: unknown, sap: unknown, plant: unknown, productId?: number | null): any => {
+      const list = sharedProducts.get(lc(barcode));
+      if (!list) return undefined;
+      if (productId != null) { const exact = list.find((p) => p.id === productId); if (exact) return exact; }
+      return chooseProductForLine(list, sap == null ? null : String(sap), plantStateByName.get(lc(plant)) ?? null);
+    };
+
     const items = rows.map((r: any) => {
       const definedIpp = r.itemsPerPallet != null ? Number(r.itemsPerPallet) : 0;
       const inStock = Number(r.inStock) || 0;
@@ -1960,6 +1993,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         srNo: r.srNo ?? null,
         barcode: r.barcode,
         plant: r.plant,
+        // Set only on a barcode two products share: tells the two rows apart.
+        splitProductId: sharedBarcodeSet.has(lc(r.barcode)) ? (r.productId ?? null) : null,
+        liveShared: sharedBarcodeSet.has(lc(r.barcode)),
         itemName: r.itemName,
         itemNo: r.itemNo ?? null,
         sapCode: r.sapCode ?? null,
@@ -2002,7 +2038,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     async function applyExpectedRows(expRows: any[]) {
       const unmatchedBarcodes = new Set<string>();
       for (const r of expRows) {
-        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
+        const key = rowKey(r.barcode, r.plant, productForOrderedLine(r.barcode, r.sapCode, r.plant)?.id);
         const qty = Number(r.expectedQty) || 0;
         expectedByKey.set(key, (expectedByKey.get(key) ?? 0) + qty);
         expectedTotal += qty;
@@ -2020,11 +2056,14 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         for (const p of prodRows as any[]) productByBarcode.set(String(p.barcode).toLowerCase(), p);
       }
       for (const r of expRows) {
-        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
-        if (items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key)) continue;
+        const twin = productForOrderedLine(r.barcode, r.sapCode, r.plant);
+        const key = rowKey(r.barcode, r.plant, twin?.id);
+        if (items.some((it: any) => rowKey(it.barcode, it.plant, it.splitProductId) === key)) continue;
         if (expectedRowKeysListed.has(key)) continue;   // already listed by the other source
         expectedRowKeysListed.add(key);
-        const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
+        const p = twin
+          ? { name: twin.name, new_sr: twin.newSr, item_no: twin.itemNo, sap_code: twin.sapCode, gj_sap: twin.gjSap, mp_sap: twin.mpSap, hsn_code: twin.hsnCode, category: twin.category, brand: twin.brand, gj_plt: twin.gjPlt, mp_plt: twin.mpPlt }
+          : productByBarcode.get((r.barcode ?? '').toLowerCase());
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
         const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
@@ -2033,7 +2072,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         // an item that's only ever been on a planned order (never scanned/stocked) always took
         // this path, so it always showed with no Sr No even though Product Master had one.
         expectedOnlyRows.push({
-          srNo: p?.new_sr ?? null, barcode: r.barcode, plant: r.plant,
+          srNo: p?.new_sr ?? null, barcode: r.barcode, plant: r.plant, splitProductId: twin?.id ?? null,
           itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
           hsnCode: p?.hsn_code ?? null, category: p?.category ?? null, brand: p?.brand ?? null,
           itemsPerPallet: ipp || null, inStock: 0, extraQty: 0,
@@ -2050,11 +2089,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       if (allowed !== null) { expParams.push(allowed); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
       if (plantFilterList) { expParams.push(plantFilterList); expConds.push(`LOWER(oii.plant) = ANY($${expParams.length}::text[])`); }
       const { rows: expRows } = await pool.query(`
-        SELECT oii.barcode, oii.plant, SUM(oii.quantity)::int AS "expectedQty"
+        SELECT oii.barcode, oii.plant, oii.sap_code AS "sapCode", SUM(oii.quantity)::int AS "expectedQty"
         FROM order_import_items oii
         JOIN order_import_sessions ois ON ois.id = oii.session_id
         WHERE ${expConds.join(' AND ')}
-        GROUP BY oii.barcode, oii.plant
+        GROUP BY oii.barcode, oii.plant, oii.sap_code
         HAVING SUM(oii.quantity) <> 0
       `, expParams);
       await applyExpectedRows(expRows);
@@ -2080,11 +2119,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       if (allowed !== null) { uexpParams.push(allowed); uexpConds.push(`LOWER(uii.plant) = ANY($${uexpParams.length}::text[])`); }
       if (plantFilterList) { uexpParams.push(plantFilterList); uexpConds.push(`LOWER(uii.plant) = ANY($${uexpParams.length}::text[])`); }
       const { rows: uexpRows } = await pool.query(`
-        SELECT uii.barcode, uii.plant, SUM(uii.quantity)::int AS "expectedQty"
+        SELECT uii.barcode, uii.plant, uii.sap_code AS "sapCode", SUM(uii.quantity)::int AS "expectedQty"
         FROM unload_import_items uii
         JOIN unload_import_sessions uis ON uis.id = uii.session_id
         WHERE ${uexpConds.join(' AND ')}
-        GROUP BY uii.barcode, uii.plant
+        GROUP BY uii.barcode, uii.plant, uii.sap_code
         HAVING SUM(uii.quantity) <> 0
       `, uexpParams);
       await applyExpectedRows(uexpRows);
@@ -2104,9 +2143,9 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
     async function applySaleRows(saleRows: any[]) {
       const unmatchedBarcodes = new Set<string>();
       for (const r of saleRows) {
-        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
+        const key = rowKey(r.barcode, r.plant, productForOrderedLine(r.barcode, r.sapCode, r.plant, r.productId)?.id);
         const qty = Number(r.expectedSaleQty) || 0;
-        expectedSaleByKey.set(key, qty);
+        expectedSaleByKey.set(key, (expectedSaleByKey.get(key) ?? 0) + qty);
         expectedSaleTotal += qty;
         if (r.barcode) unmatchedBarcodes.add(r.barcode);
       }
@@ -2122,15 +2161,18 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         for (const p of prodRows as any[]) productByBarcode.set(String(p.barcode).toLowerCase(), p);
       }
       for (const r of saleRows) {
-        const key = `${(r.barcode ?? '').toLowerCase()}::${(r.plant ?? '').toLowerCase()}`;
+        const twin = productForOrderedLine(r.barcode, r.sapCode, r.plant, r.productId);
+        const key = rowKey(r.barcode, r.plant, twin?.id);
         // Skip if a row for this barcode+plant already exists — either real stock, or one
         // Expected Qty already synthesized above — so the same key never gets two rows.
         const alreadyHasRow =
-          items.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key) ||
-          expectedOnlyRows.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key) ||
-          saleOnlyRows.some((it: any) => `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}` === key);
+          items.some((it: any) => rowKey(it.barcode, it.plant, it.splitProductId) === key) ||
+          expectedOnlyRows.some((it: any) => rowKey(it.barcode, it.plant, it.splitProductId) === key) ||
+          saleOnlyRows.some((it: any) => rowKey(it.barcode, it.plant, it.splitProductId) === key);
         if (alreadyHasRow) continue;
-        const p = productByBarcode.get((r.barcode ?? '').toLowerCase());
+        const p = twin
+          ? { name: twin.name, new_sr: twin.newSr, item_no: twin.itemNo, sap_code: twin.sapCode, gj_sap: twin.gjSap, mp_sap: twin.mpSap, hsn_code: twin.hsnCode, category: twin.category, brand: twin.brand, gj_plt: twin.gjPlt, mp_plt: twin.mpPlt }
+          : productByBarcode.get((r.barcode ?? '').toLowerCase());
         const state = plantStateByName.get((r.plant ?? '').toLowerCase());
         const sapCode = p ? (state === 'GJ' ? (p.gj_sap ?? p.sap_code) : state === 'MP' ? (p.mp_sap ?? p.sap_code) : p.sap_code) : null;
         const definedIpp = p ? Number((state === 'GJ' ? p.gj_plt : state === 'MP' ? p.mp_plt : 0) || 0) : 0;
@@ -2138,7 +2180,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
         // Same fix as applyExpectedRows above — Sr No was hardcoded 0 (renders blank) instead of
         // read from the product.
         saleOnlyRows.push({
-          srNo: p?.new_sr ?? null, barcode: r.barcode, plant: r.plant,
+          srNo: p?.new_sr ?? null, barcode: r.barcode, plant: r.plant, splitProductId: twin?.id ?? null,
           itemName: p?.name ?? r.barcode, itemNo: p?.item_no ?? null, sapCode: sapCode ?? null,
           hsnCode: p?.hsn_code ?? null, category: p?.category ?? null, brand: p?.brand ?? null,
           itemsPerPallet: ipp || null, inStock: 0, extraQty: 0,
@@ -2154,11 +2196,11 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
       if (allowed !== null) { saleParams.push(allowed); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
       if (plantFilterList) { saleParams.push(plantFilterList); saleConds.push(`LOWER(ps.plant) = ANY($${saleParams.length}::text[])`); }
       const { rows: saleRows } = await pool.query(`
-        SELECT psi.barcode, ps.plant, SUM(psi.quantity)::int AS "expectedSaleQty"
+        SELECT psi.barcode, ps.plant, psi.product_id AS "productId", psi.sap_code AS "sapCode", SUM(psi.quantity)::int AS "expectedSaleQty"
         FROM proforma_slip_items psi
         JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
         WHERE ${saleConds.join(' AND ')}
-        GROUP BY psi.barcode, ps.plant
+        GROUP BY psi.barcode, ps.plant, psi.product_id, psi.sap_code
         HAVING SUM(psi.quantity) <> 0
       `, saleParams);
       await applySaleRows(saleRows);
@@ -2174,7 +2216,7 @@ router.get('/reports/plant-stock', async (req: Request, res: Response) => {
 
     const hasExpected = true;
     const ledgerRows = [...items, ...expectedOnlyRows, ...saleOnlyRows].map((it: any) => {
-      const key = `${(it.barcode ?? '').toLowerCase()}::${(it.plant ?? '').toLowerCase()}`;
+      const key = rowKey(it.barcode, it.plant, it.splitProductId);
       // Same qty ÷ itemsPerPallet rule as the Pallets/Extra Pallets columns — each row's own pallet
       // size, never one blended figure.
       const ipp = it.itemsPerPallet ? Number(it.itemsPerPallet) : 0;

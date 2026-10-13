@@ -8,6 +8,8 @@ import { ensureLoadingSalesSchema } from './lib/loadingSalesSchema';
 import { ensureStockResetSchema } from './lib/stockResetSchema';
 import { ensureLoadingIndexes } from './lib/loadingIndexes';
 import { ensureAutoDispatchSchema } from './lib/autoDispatchSchema';
+import { ensureStockEditSchema } from './lib/stockEditSchema';
+import { ensureLoadingLineSchema } from './lib/loadingLines';
 
 
 const app = express();
@@ -92,6 +94,8 @@ app.use((req, res, next) => {
   try {
     await ensureLoadingIndexes(pool);
     await ensureAutoDispatchSchema(pool);
+    await ensureStockEditSchema(pool);
+    await ensureLoadingLineSchema(pool);
   } catch (error) {
     console.error('Could not create the Loading indexes:', error);
   }
@@ -817,9 +821,9 @@ app.use((req, res, next) => {
     // and took the whole process down with it — see mapWithConcurrency's own comment for the fix
     // to that specific cause). This catch is the backstop for any OTHER failure mode, now or later.
     const logVehiclePlanningSyncFailure = (err: unknown) => console.error('[Vehicle Planning] Scheduled sync failed:', err);
-    setInterval(() => { runVehiclePlanningSync().catch(logVehiclePlanningSyncFailure); }, VEHICLE_PLANNING_SYNC_INTERVAL_MS);
+    setInterval(() => { runVehiclePlanningSync('every 24 hours').catch(logVehiclePlanningSyncFailure); }, VEHICLE_PLANNING_SYNC_INTERVAL_MS);
     // Kick one off shortly after boot so the page isn't empty until the first daily tick.
-    setTimeout(() => { runVehiclePlanningSync().catch(logVehiclePlanningSyncFailure); }, 20 * 1000);
+    setTimeout(() => { runVehiclePlanningSync('after server start').catch(logVehiclePlanningSyncFailure); }, 20 * 1000);
 
     // Auto Dispatch: a load created after this went live becomes Dispatched by itself an hour after it was completed
     // (app and Notion) — see server/services/autoDispatch.ts. Reads the database, so a restart never loses a dispatch.

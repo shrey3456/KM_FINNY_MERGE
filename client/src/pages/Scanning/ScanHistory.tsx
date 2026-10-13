@@ -378,6 +378,11 @@ const ALL_NOTION_COLUMNS = ["#", "Scanned By", "Code", "Item", "Barcode", "Order
 // Each source's own void endpoint takes the real underlying id, not the combined-table one.
 const LOADING_EVENT_ID_OFFSET = 3000000000;
 const UNLOAD_EVENT_ID_OFFSET = 4000000000;
+// A manual Stock adjustment (made from Stock Overview's Adjust dialog) is (5000000000 + stock_movements.id) — see the 'stock' branch of
+// SCAN_HISTORY_COMBINED_SOURCE in server/routes/scan-sessions.ts. Those rows can be edited here (see the edit dialog below).
+const STOCK_MOVEMENT_ID_OFFSET = 5000000000;
+const isManualStockRow = (row: { id: number; isAdjust?: boolean }) =>
+  row.id >= STOCK_MOVEMENT_ID_OFFSET && row.id < STOCK_MOVEMENT_ID_OFFSET + 1000000000 && !!row.isAdjust;
 
 const ScanHistory = () => {
   const { user } = useAuth();
@@ -397,6 +402,8 @@ const ScanHistory = () => {
   // server/routes/unloading.ts is deliberately unloading-write-only — it does NOT also require
   // scan-history write.
   const canVoidUnloadEvent = isAdmin || hasPageWriteAccess("unloading");
+  // Editing a manual Stock entry: anyone with write access to Scan History (admins always) — server: requirePageWrite('scan-history').
+  const canEditStockEntry = isAdmin || hasPageWriteAccess("scan-history");
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
   // "Remove entry" — takes a finished row out of this list for good. Offered on exactly two
@@ -455,8 +462,24 @@ const ScanHistory = () => {
   const [editQty, setEditQty] = useState("");
   const [editStv, setEditStv] = useState("");
   const editStvSupported = !editTarget?.isDispatch;
+  // Editing a manual Stock entry: the dialog shows the live stock the change would move and refuses a result below zero.
+  const editingStock = !!editTarget && isManualStockRow(editTarget);
+  const stockPreviewQuery = useQuery<{ currentStock: number; oldQty: number; plant: string; lowestAllowed: number }>({
+    queryKey: ["/api/plant-stock/movements", editTarget?.id, "edit-preview"],
+    queryFn: () => apiRequest("GET", `/api/plant-stock/movements/${editTarget!.id - STOCK_MOVEMENT_ID_OFFSET}/edit-preview`).then((r) => r.json()),
+    enabled: editingStock,
+    staleTime: 0,
+  });
+  const stockEditQty = Number(editQty);
+  const stockAfterEdit = editingStock && stockPreviewQuery.data && Number.isFinite(stockEditQty)
+    ? stockPreviewQuery.data.currentStock + (stockEditQty - stockPreviewQuery.data.oldQty) : null;
+  const stockEditBlocked = editingStock && stockAfterEdit !== null && stockAfterEdit < 0;
   const editMutation = useMutation({
-    mutationFn: (payload: { id: number; totalQty?: number; stv?: string | null; isDispatch?: boolean; isUnload?: boolean }) => {
+    mutationFn: (payload: { id: number; totalQty?: number; stv?: string | null; isDispatch?: boolean; isUnload?: boolean; isStock?: boolean }) => {
+      if (payload.isStock) {
+        // A manual Stock entry: the new signed quantity; the server refuses an edit that would take stock below zero.
+        return apiRequest("PUT", `/api/plant-stock/movements/${payload.id}`, { qty: payload.totalQty }).then((r) => r.json());
+      }
       const body: Record<string, unknown> = {};
       if (payload.totalQty !== undefined) body.totalQty = payload.totalQty;
       if (payload.stv !== undefined) body.stv = payload.stv;
@@ -475,8 +498,9 @@ const ScanHistory = () => {
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/load-events"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/plant-stock/movements"] });
       setEditTarget(null);
-      toast({ title: "Scan updated" });
+      toast({ title: editingStock ? "Stock entry updated" : "Scan updated" });
     },
     onError: (err: any) => toast({ title: "Failed to edit scan", description: err?.message, variant: "destructive" }),
   });
@@ -1194,7 +1218,7 @@ const ScanHistory = () => {
         </>
       ),
     },
-    ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent || canRemoveEntry
+    ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent || canRemoveEntry || canEditStockEntry
       ? [
           {
             id: "edit",
@@ -1205,12 +1229,15 @@ const ScanHistory = () => {
             render: (row: ScanHistoryItem) =>
               // Same permission-pair-per-source and stock-row exclusion as Void below. A Load
               // Adjust is a +/- correction with no qty to re-edit — void it and press +/- again.
-              !row.voided && scanTypeLabel(row).source !== "Stock" && !(row.isAdjust && row.isDispatch)
+              !row.voided && !(row.isAdjust && row.isDispatch)
               && scanTypeLabel(row).source !== "Sort"
-              && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
+              && (isManualStockRow(row)
+                // a manual Stock entry: editable by anyone who can edit on this page; other Stock rows (exchange, backfill ...) are not
+                ? canEditStockEntry
+                : scanTypeLabel(row).source !== "Stock" && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan)) && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
                   onClick={() => { setEditTarget(row); setEditQty(String(row.totalQty ?? 0)); setEditStv(row.stv ?? ""); }}
-                  title="Edit this scan">
+                  title={isManualStockRow(row) ? "Edit this stock adjustment" : "Edit this scan"}>
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
               ),
@@ -2071,22 +2098,35 @@ const ScanHistory = () => {
     <Dialog open={!!editTarget} onOpenChange={(o) => { if (!o) { setEditTarget(null); setEditQty(""); setEditStv(""); } }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Edit this scan</DialogTitle>
+          <DialogTitle>{editingStock ? "Edit this stock adjustment" : "Edit this scan"}</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-gray-600">
-          <span className="font-semibold text-gray-900">{editTarget?.itemName ?? editTarget?.barcode}</span> — scanned by {editTarget?.scannedByName ?? "—"}.
+          <span className="font-semibold text-gray-900">{editTarget?.itemName ?? editTarget?.barcode}</span>
+          {editingStock ? ` — adjusted by ${editTarget?.scannedByName ?? "—"} at ${editTarget?.plant ?? "—"}.` : ` — scanned by ${editTarget?.scannedByName ?? "—"}.`}
         </p>
         <div className="space-y-1.5">
-          <Label className="text-sm">Qty</Label>
-          <Input type="number" min="1" value={editQty} onChange={(e) => setEditQty(e.target.value)} />
+          <Label className="text-sm">{editingStock ? "Quantity change (+ added / − removed)" : "Qty"}</Label>
+          <Input type="number" min={editingStock ? undefined : "1"} value={editQty} onChange={(e) => setEditQty(e.target.value)} />
         </div>
-        {editStvSupported && (
+        {editingStock && (
+          stockPreviewQuery.isLoading ? <p className="text-xs text-gray-400">Checking stock…</p>
+          : stockPreviewQuery.data ? (
+            <div className={`rounded-md border px-3 py-2 text-xs ${stockEditBlocked ? "border-red-300 bg-red-50 text-red-800" : "border-gray-200 bg-gray-50 text-gray-700"}`}>
+              Stock now <span className="font-semibold">{stockPreviewQuery.data.currentStock}</span>
+              {stockAfterEdit !== null && Number.isFinite(stockEditQty) && stockEditQty !== stockPreviewQuery.data.oldQty && (
+                <> → after this edit <span className="font-semibold">{stockAfterEdit}</span></>
+              )}
+              {stockEditBlocked && <> — <span className="font-semibold">not allowed</span>: stock cannot go below zero. The lowest you can set this to is {stockPreviewQuery.data.lowestAllowed > 0 ? "+" : ""}{stockPreviewQuery.data.lowestAllowed}.</>}
+            </div>
+          ) : <p className="text-xs text-red-600">Could not read the stock for this entry.</p>
+        )}
+        {editStvSupported && !editingStock && (
           <div className="space-y-1.5">
             <Label className="text-sm">Dispatch Directory</Label>
             <Input value={editStv} onChange={(e) => setEditStv(e.target.value)} placeholder="e.g. PLT-08" />
           </div>
         )}
-        {Number(editQty) !== (editTarget?.totalQty ?? 0) && (
+        {!editingStock && Number(editQty) !== (editTarget?.totalQty ?? 0) && (
           <p className="text-xs text-amber-600">
             Changing Qty voids this scan and records a new one for {editQty || 0} — stock and totals are adjusted by the difference.
           </p>
@@ -2102,7 +2142,11 @@ const ScanHistory = () => {
                 : editTarget.isUnload ? editTarget.id - UNLOAD_EVENT_ID_OFFSET
                 : editTarget.id;
               const qtyChanged = Number(editQty) !== (editTarget.totalQty ?? 0);
-              const stvChanged = editStvSupported && editStv.trim() !== (editTarget.stv ?? "");
+              const stvChanged = editStvSupported && !editingStock && editStv.trim() !== (editTarget.stv ?? "");
+              if (editingStock) {
+                editMutation.mutate({ id: editTarget.id - STOCK_MOVEMENT_ID_OFFSET, isStock: true, totalQty: Number(editQty) });
+                return;
+              }
               editMutation.mutate({
                 id,
                 isDispatch: editTarget.isDispatch,
@@ -2111,7 +2155,7 @@ const ScanHistory = () => {
                 ...(stvChanged ? { stv: editStv.trim() || null } : {}),
               });
             }}
-            disabled={editMutation.isPending || !editQty || Number(editQty) <= 0 || (Number(editQty) === (editTarget?.totalQty ?? 0) && (!editStvSupported || editStv.trim() === (editTarget?.stv ?? "")))}
+            disabled={editMutation.isPending || !editQty || (editingStock ? (Number(editQty) === 0 || Number(editQty) === (editTarget?.totalQty ?? 0) || stockEditBlocked || !stockPreviewQuery.data) : Number(editQty) <= 0) || (Number(editQty) === (editTarget?.totalQty ?? 0) && (!editStvSupported || editStv.trim() === (editTarget?.stv ?? "")))}
             className="bg-[#001d6e] hover:bg-[#00154b] text-white"
           >
             {editMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

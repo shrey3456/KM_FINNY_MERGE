@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { storage } from '../storage';
 import { pool } from '../db';
-import { requireAdminRole } from '../lib/pageAccess';
+import { requireAdminRole, requirePageWrite } from '../lib/pageAccess';
 
 // Overall Stock > per-row Edit/Delete — admin-only actions scoped to ONE (barcode, plant), the
 // surgical counterpart to Settings > Clear Stock (which acts on a whole plant at once). Two
@@ -385,6 +385,115 @@ router.delete('/plant-stock/movements/:id', requireAdminRole, async (req: Reques
   } catch (error) {
     console.error('Error deleting a stock movement:', error);
     res.status(500).json({ message: 'Failed to delete this entry' });
+  }
+});
+
+// ─── Edit a manual Stock adjustment (Scan History's Stock rows) ─────────────────────────────────────────
+// Changes the quantity of ONE manual Stock entry (one made from Stock Overview's Adjust dialog) and moves live stock by the difference.
+// The only rule: live stock can never end up below zero — an edit that would do that is refused with how low it may go. Opening-stock,
+// Settings and every scan-made entry are not touched here. Not admin-only: anyone with write access to Scan History (admins always),
+// the same people who can edit scans on that page.
+const EDITABLE_MOVEMENT_SQL = `
+  SELECT sm.id, sm.barcode, sm.plant, sm.qty, sm.product_id, sm.reason
+    FROM stock_movements sm
+   WHERE sm.id = $1 AND sm.type = 'adjust'
+     AND (sm.source = 'manual' OR sm.source IS NULL)
+     AND COALESCE(sm.origin, 'page') = 'page'
+     AND NOT COALESCE(sm.hidden_in_history, false)`;
+
+// GET /api/plant-stock/movements/:id/edit-preview — what the edit dialog shows: the entry, and the live stock it would move.
+router.get('/plant-stock/movements/:id/edit-preview', requirePageWrite('scan-history'), async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid entry id' });
+  try {
+    const { rows } = await pool.query(EDITABLE_MOVEMENT_SQL, [id]);
+    const mv = rows[0];
+    if (!mv) return res.status(404).json({ message: 'This entry cannot be edited (only manual Stock adjustments can).' });
+    const { rows: stock } = await pool.query(
+      `SELECT COALESCE(SUM(in_stock), 0)::int AS stock FROM product_plant_stock WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(plant)) = LOWER(TRIM($2))`,
+      [mv.barcode, mv.plant],
+    );
+    const currentStock = Number(stock[0]?.stock ?? 0);
+    res.json({ id: mv.id, barcode: mv.barcode, plant: mv.plant, oldQty: Number(mv.qty), currentStock, lowestAllowed: Number(mv.qty) - currentStock });
+  } catch (error) {
+    console.error('Error reading a stock entry for edit:', error);
+    res.status(500).json({ message: 'Failed to load this entry' });
+  }
+});
+
+// PUT /api/plant-stock/movements/:id — body { qty }: the new signed quantity of the entry (+added / −removed), not zero.
+router.put('/plant-stock/movements/:id', requirePageWrite('scan-history'), async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const newQty = Math.round(Number(req.body?.qty));
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid entry id' });
+  if (!Number.isFinite(newQty) || newQty === 0) return res.status(400).json({ message: 'Enter a quantity that is not zero (use − for a removal).' });
+  if (Math.abs(newQty) > 1_000_000) return res.status(400).json({ message: 'That quantity is too large.' });
+  const { userCode, userName } = actor(req);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(`${EDITABLE_MOVEMENT_SQL} FOR UPDATE`, [id]);
+    const mv = rows[0];
+    if (!mv) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'This entry cannot be edited (only manual Stock adjustments can).' }); }
+    const oldQty = Number(mv.qty);
+    if (newQty === oldQty) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'That is already the current quantity.' }); }
+    const delta = newQty - oldQty;
+
+    const { rows: stockRows } = await client.query(
+      `SELECT id, product_id, in_stock FROM product_plant_stock WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(plant)) = LOWER(TRIM($2)) FOR UPDATE`,
+      [mv.barcode, mv.plant],
+    );
+    const stockRow = stockRows[0];
+    const inStock = Number(stockRow?.in_stock ?? 0);
+    const afterEdit = inStock + delta;
+    if (afterEdit < 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        message: `Not allowed: stock of this item at ${mv.plant} is ${inStock} now, so changing this entry from ${oldQty > 0 ? '+' : ''}${oldQty} to ${newQty > 0 ? '+' : ''}${newQty} would take it to ${afterEdit}. The lowest you can set it to is ${oldQty - inStock}.`,
+        currentStock: inStock, lowestAllowed: oldQty - inStock,
+      });
+    }
+
+    if (stockRow) {
+      // The extra portion can never be larger than the total.
+      await client.query(
+        `UPDATE product_plant_stock SET in_stock = in_stock + $1, extra_qty = LEAST(extra_qty, in_stock + $1), updated_at = NOW() WHERE id = $2`,
+        [delta, stockRow.id],
+      );
+    } else {
+      // No stock row means stock is 0, so only an increase can get here (a decrease was refused above).
+      await client.query(
+        `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty) VALUES ($1,$2,$3,$4,0)`,
+        [mv.barcode, mv.product_id ?? null, mv.plant, delta],
+      );
+    }
+    await client.query(
+      `UPDATE stock_movements SET qty = $1, original_qty = COALESCE(original_qty, $2), edited_at = NOW(), edited_by_code = $3 WHERE id = $4`,
+      [newQty, oldQty, userCode ?? null, id],
+    );
+    await client.query(
+      `UPDATE products p
+       SET in_stock = COALESCE((SELECT SUM(pps.in_stock) FROM product_plant_stock pps WHERE LOWER(pps.barcode) = LOWER(p.barcode)), 0)
+       WHERE LOWER(p.barcode) = LOWER($1)`,
+      [mv.barcode],
+    );
+    await client.query('COMMIT');
+
+    try {
+      await storage.logActivity({
+        pageName: 'Scan History', action: 'update', entityType: 'stock_movement', entityId: String(id),
+        details: `Edited a manual Stock entry for ${mv.barcode} at ${mv.plant} by ${userName ?? userCode ?? 'unknown'}: ${oldQty > 0 ? '+' : ''}${oldQty} -> ${newQty > 0 ? '+' : ''}${newQty}. Live stock ${inStock} -> ${afterEdit}.`,
+        userCode, userName,
+      });
+    } catch { /* the edit itself is done */ }
+    res.json({ success: true, previousQty: oldQty, newQty, stockBefore: inStock, stockAfter: afterEdit });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Error editing a stock entry:', error);
+    res.status(500).json({ message: 'Failed to edit this entry' });
+  } finally {
+    client.release();
   }
 });
 
