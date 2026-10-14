@@ -132,6 +132,8 @@ type ProformaSlip = {
   vehicleNumber: string | null; driverName: string | null; rtoNumber: string | null;
   vehicleVolume: number | null;
   loadingCompletedAt: string | null; loadingCompletedByCode: string | null;
+  // An admin reopened this load from Dispatched: normal Complete is off, only an admin's "Complete & Dispatch" finishes it.
+  reopenedFromDispatch?: boolean;
   vehicleAssignedByCode: string | null;
   // The order's real lifecycle stage from Notion's "Finny Status :" (this page also writes
   // LOADING/READY≈DESP into it) — DISPATCHED/DELIVERED/SHORTAGE/UNLOADING mean it has moved past
@@ -582,8 +584,12 @@ export default function LoadOperation() {
   // same rule).
   // A load created under Auto Dispatch cannot be reopened once it has gone out (Dispatched, Delivered ...) — the server refuses it too.
   const isLockedByDispatch = (r: LoadingRecord) => !!r.autoDispatch && (!!r.dispatchedAt || !!laterStageOf(r));
+  // A Dispatched load can be reopened by an admin only; every other stage after it stays locked for loads created under Auto Dispatch.
+  const isDispatchedRecord = (r: LoadingRecord) => String(r.notionStatus ?? "").trim().toUpperCase() === "DISPATCHED";
   const canReopenRecord = (r: LoadingRecord) =>
-    !r.systemGenerated && !isLockedByDispatch(r) && !!r.loadingCompletedAt && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
+    !r.systemGenerated && !!r.loadingCompletedAt && (isDispatchedRecord(r)
+      ? admin
+      : !isLockedByDispatch(r) && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode)));
   const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
     { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
     { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
@@ -661,6 +667,8 @@ export default function LoadOperation() {
     },
     onSuccess: (_data, orderNumber) => {
       toast(withNotionNotice({ title: "Load reopened" }, _data));
+      // A dispatched load that was reopened is back in Loading — show that tab.
+      if (activeViewTab === "dispatched") setActiveViewTab("loading");
       recordsQuery.refetch();
       refreshOwnerHistory(orderNumber);
     },
@@ -757,6 +765,7 @@ export default function LoadOperation() {
   // Completing a load is confirmed first and announced afterwards, the same way Unloading does it.
   // A toast was too easy to miss on a busy scanning screen, and the +/- path showed nothing at all.
   const [confirmCompleteOpen, setConfirmCompleteOpen] = useState(false);
+  const [confirmDispatchOpen, setConfirmDispatchOpen] = useState(false);
   const [completedInfo, setCompletedInfo] = useState<
     { orderNumber: string; partyName: string; vehicleNumber: string | null; loadedQty: number; expectedQty: number; auto: boolean } | null
   >(null);
@@ -1872,6 +1881,26 @@ export default function LoadOperation() {
       if (notionNotice.description) toast(notionNotice);
     },
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
+  // Admin only: finishes a load reopened from Dispatched and dispatches it at once.
+  const completeDispatchMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/complete-and-dispatch`, {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Complete & Dispatch failed");
+      return res.json() as Promise<{ slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number }>;
+    },
+    onSuccess: (data) => {
+      setSlip(data.slip);
+      setItems(data.items);
+      setAllComplete(data.allComplete);
+      setLoadedVolume(data.loadedVolume);
+      setConfirmDispatchOpen(false);
+      refreshOwnerHistory(data.slip.orderNumber);
+      queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+      toast(withNotionNotice({ title: "Load completed and dispatched" }, data));
+    },
+    onError: (err: any) => toast({ title: "Complete & Dispatch failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // Shift handoff — Pause (current owner/admin steps away) and Claim (anyone with write access
@@ -3739,7 +3768,18 @@ export default function LoadOperation() {
                         <Truck className="mr-1 h-3 w-3" /> Vehicle
                       </Button>
                     )}
-                    {canComplete && !locked && (
+                    {admin && canWrite && !locked && slip?.reopenedFromDispatch && (
+                      <Button
+                        size="sm"
+                        className="h-6 rounded-full bg-indigo-600 px-2 text-[11px] text-white hover:bg-indigo-700 sm:h-7 sm:px-3 sm:text-xs"
+                        disabled={completeDispatchMutation.isPending}
+                        onClick={() => setConfirmDispatchOpen(true)}
+                      >
+                        {completeDispatchMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                        Complete & Dispatch
+                      </Button>
+                    )}
+                    {canComplete && !locked && !slip?.reopenedFromDispatch && (
                       <Button
                         size="sm"
                         className="h-6 rounded-full bg-emerald-600 px-2 text-[11px] text-white hover:bg-emerald-700 sm:h-7 sm:px-3 sm:text-xs"
@@ -5216,14 +5256,38 @@ export default function LoadOperation() {
         </DialogContent>
       </Dialog>
 
+      {/* Complete & Dispatch — admin only, for a load reopened from Dispatched. */}
+      <Dialog open={confirmDispatchOpen} onOpenChange={(o) => { if (!o) setConfirmDispatchOpen(false); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Complete and dispatch this load?</DialogTitle>
+            <DialogDescription>
+              The load is completed and set to Dispatched right away (also in Notion). It was reopened from Dispatched, so this is how it is finished.
+            </DialogDescription>
+          </DialogHeader>
+          <p className="text-sm text-gray-600">
+            <span className="font-semibold text-gray-900">#{slip?.orderNumber}</span>
+            {slip?.partyName ? ` — ${slip.partyName}` : ""}
+            {slip?.vehicleNumber ? ` · ${slip.vehicleNumber}` : ""}
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDispatchOpen(false)} disabled={completeDispatchMutation.isPending}>Cancel</Button>
+            <Button className="bg-indigo-600 text-white hover:bg-indigo-700" disabled={completeDispatchMutation.isPending} onClick={() => completeDispatchMutation.mutate()}>
+              {completeDispatchMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Complete & Dispatch
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Reopen confirmation — admin-only action that undoes a completed, audited load. */}
       <Dialog open={!!reopenTarget} onOpenChange={(o) => { if (!o) setReopenTarget(null); }}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle className="text-amber-700">Reopen this load?</DialogTitle>
             <DialogDescription>
-              Order <span className="font-semibold text-gray-900">#{reopenTarget}</span> is marked complete.
-              Reopening puts it back to Loading so scanning can continue.
+              Order <span className="font-semibold text-gray-900">#{reopenTarget}</span> is marked complete (or dispatched).
+              Reopening puts it back to Loading so scanning can continue. A dispatched load can only be finished again by an admin with "Complete & Dispatch".
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
