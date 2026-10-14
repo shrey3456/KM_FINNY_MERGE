@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { v2Purchase } from '../lib/stockV2';
+import { v2Purchase, orderStockLeft } from '../lib/stockV2';
 import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
@@ -869,37 +869,12 @@ router.delete('/order-import/sessions/:id', requireOrderImportWrite, async (req:
       );
 
       for (const r of received) {
-        // Lock the plant-stock row and clamp against its CURRENT value before writing — stock
-        // may have moved (dispatch, another session) since this session's apply, so blindly
-        // subtracting r.qty with a GREATEST(0, ...) floor would silently remove less than the
-        // ledger row claims. Computing the actual delta up front keeps the negative
-        // stock_movements row truthful (what was actually reversed, not what was requested).
-        const { rows: plantRows } = await client.query(
-          `SELECT in_stock, extra_qty, product_id FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-          [r.barcode, session.plant],
-        );
-        const actualQty = Math.min(r.qty, Number(plantRows[0]?.in_stock ?? 0));
-        const actualExtraQty = Math.min(r.extra_qty, Number(plantRows[0]?.extra_qty ?? 0));
+        // Lock the stock line and clamp against its CURRENT value before writing - stock may have moved (loaded out, another CSV) since these
+        // scans were received, so only what is really still there is taken back.
+        const left = await orderStockLeft(client, id, session.plant, r.barcode);
+        const actualQty = Math.min(r.qty, left);
+        const actualExtraQty = Math.min(r.extra_qty, actualQty);
         if (actualQty <= 0 && actualExtraQty <= 0) continue;
-        const productId = plantRows[0]?.product_id ?? null;
-
-        await client.query(
-          `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
-          [actualQty, r.barcode],
-        );
-        if (plantRows[0]) {
-          await client.query(
-            `UPDATE product_plant_stock
-             SET in_stock = in_stock - $1, extra_qty = extra_qty - $2, updated_at = NOW()
-             WHERE barcode = $3 AND plant = $4`,
-            [actualQty, actualExtraQty, r.barcode, session.plant],
-          );
-        }
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-           VALUES ($1, $2, $3, $4, $5, 'adjust', 'Order CSV deleted — rollback', $6, NOW())`,
-          [r.barcode, productId, session.plant, -actualQty, -actualExtraQty, id],
-        );
         await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode: r.barcode, qty: -actualQty, extraQty: -actualExtraQty });
         stockReversed.push({ barcode: r.barcode, qty: actualQty, extraQty: actualExtraQty });
       }

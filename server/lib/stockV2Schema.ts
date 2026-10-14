@@ -1,8 +1,7 @@
 import type { Pool } from 'pg';
 
-// Stock (New) — the plant-wise stock lines and the day-by-day book behind the Stock (New) page. Entirely
-// separate from product_plant_stock / stock_movements (the old Stock Overview keeps working off those);
-// the operations write to both while the new one is being proven. See server/lib/stockV2.ts.
+// Stock Overview — the plant-wise stock lines and the day-by-day book behind the Stock Overview page. The only stock
+// system: Order Scan, Unloading, Loading and the Stock Overview page all read and write these tables. See server/lib/stockV2.ts.
 //
 //   stock_v2_lines   one row = one item at one plant: name + barcode + SAP code (the state's) + the Product
 //                    Master details copied when the line was created, and Stock = how much we have in total

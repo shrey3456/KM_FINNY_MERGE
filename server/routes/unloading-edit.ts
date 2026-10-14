@@ -27,7 +27,7 @@ import { postUnloadMovement } from '../lib/unloadStock';
 //     is_extra flag is decided once, permanently, at scan time — it does NOT recompute just
 //     because expected quantity changed. Re-split it against the new quantity (reusing
 //     resplitUnloadEventsExtraFlag, already shared with the "replace" delete-and-carry-forward
-//     flow) and correct product_plant_stock.extra_qty by the delta.
+//     flow) and correct the extra part of the purchase on Stock Overview by the delta.
 // ============================================================================
 
 const router = Router();
@@ -198,41 +198,29 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
           if (totalQty > 0) {
             const reason = `Barcode correction (unloading edit): ${oldBarcode} -> ${barcode}`;
 
-            // Reverse stock credited to the old barcode.
-            await client.query(
-              `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
-              [totalQty, oldBarcode],
+            // Reverse stock credited to the old barcode (on Stock Overview, line by line below).
+            // Taken off the old barcode on each scan's own booked day (a scan with none keeps the old rule).
+            const { rows: dayRows } = await client.query(
+              `SELECT to_char(booked_day, 'YYYY-MM-DD') AS day, COALESCE(SUM(total_qty), 0)::int AS qty,
+                      COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra
+                 FROM unload_scan_events WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE
+                GROUP BY to_char(booked_day, 'YYYY-MM-DD') ORDER BY 1 NULLS FIRST`,
+              [id, oldBarcode],
             );
-            await client.query(
-              `UPDATE product_plant_stock
-               SET in_stock = GREATEST(0, in_stock - $1), extra_qty = GREATEST(0, extra_qty - $2), updated_at = NOW()
-               WHERE LOWER(barcode) = LOWER($3) AND LOWER(plant) = LOWER($4)`,
-              [totalQty, extraQty, oldBarcode, session.plant],
-            );
-            await postUnloadMovement(client, {
-              sessionId: id, barcode: oldBarcode, qty: -totalQty, extraQty: -extraQty, type: 'adjust', reason,
-            });
+            const byDay: Array<{ day: string | null; qty: number; extra: number }> = dayRows.length ? dayRows : [{ day: null, qty: totalQty, extra: extraQty }];
+            for (const d of byDay) {
+              await postUnloadMovement(client, {
+                sessionId: id, barcode: oldBarcode, qty: -d.qty, extraQty: -d.extra, type: 'adjust', reason, day: d.day ?? null,
+              });
+            }
 
-            // Apply the same quantity to the corrected barcode. RETURNING id so the corrected
-            // barcode's own product row links up correctly rather than inheriting the old one's.
-            const { rows: newProductRows } = await client.query(
-              `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
-              [totalQty, barcode],
-            );
-            const newProductId = newProductRows[0]?.id ?? null;
-            await client.query(
-              `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
-               VALUES ($1, $2, $3, $4, $5, NOW())
-               ON CONFLICT (barcode, plant) DO UPDATE
-                 SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
-                     extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
-                     product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
-                     updated_at = NOW()`,
-              [barcode, newProductId, session.plant, totalQty, extraQty],
-            );
-            await postUnloadMovement(client, {
-              sessionId: id, barcode, productId: newProductId, qty: totalQty, extraQty, type: 'adjust', reason,
-            });
+            // Apply the same quantity to the corrected barcode, on the same days.
+            const newProductId = null;
+            for (const d of byDay) {
+              await postUnloadMovement(client, {
+                sessionId: id, barcode, productId: newProductId, qty: d.qty, extraQty: d.extra, type: 'adjust', reason, day: d.day ?? null,
+              });
+            }
           }
 
           // Relink the scan rows so scan history/status follow the corrected barcode.
@@ -264,15 +252,9 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
 
             await resplitUnloadEventsExtraFlag(client, eventRows, newOrderQty, itemsPerPallet);
 
-            // in_stock already counts every physical box regardless of order/extra split — only
-            // extra_qty, the "how much of it was over-order" subset, needs correcting here.
+            // The stock already counts every physical box regardless of the order/extra split - only the extra part of the purchase needs correcting here.
             const extraDelta = newExtraQty - oldExtraQty;
             if (extraDelta !== 0) {
-              await client.query(
-                `UPDATE product_plant_stock SET extra_qty = GREATEST(0, extra_qty + $1), updated_at = NOW()
-                 WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)`,
-                [extraDelta, barcode, session.plant],
-              );
               await postUnloadMovement(client, {
                 sessionId: id, barcode, qty: 0, extraQty: extraDelta, type: 'adjust',
                 reason: `Quantity correction (unloading edit): ${existing.quantity} -> ${quantity}`,

@@ -31,12 +31,11 @@ type ExchangeProductDialogProps = {
 };
 
 // Manual stock swap between two products at one plant — "this physical stock was actually
-// product B, not product A". Source is whichever Overall Stock row the Exchange button was
-// clicked on (locked, read-only here); the target is picked either by camera scan or manual
+// product B, not product A". Source is whichever Stock Overview row the Exchange action was
+// opened on (locked, read-only here); the target is picked either by camera scan or manual
 // search, mirroring the Camera/Manual toggle already used on the Scan page. Posts to
-// /reports/exchange-stock, which writes two rows into the existing stock_movements ledger
-// (type='exchange') — no dedicated table, and existing scan history is never touched, only
-// added to (see that endpoint's own comment for the full rationale).
+// /reports/exchange-stock, which writes two 'exchange' corrections on Stock Overview (- on the source product, + on the target) and
+// never touches the scan entries (see that endpoint's own comment).
 export default function ExchangeProductDialog({ source, onClose }: ExchangeProductDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -199,7 +198,7 @@ export default function ExchangeProductDialog({ source, onClose }: ExchangeProdu
         description: `${data.from.removedQty} × ${data.from.name} exchanged for ${data.to.addedQty} × ${data.to.name}.`,
         className: "bg-emerald-50 border-emerald-200 text-emerald-900",
       });
-      await queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      await queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       await queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
       onClose();
     },

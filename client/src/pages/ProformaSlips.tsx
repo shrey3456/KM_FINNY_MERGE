@@ -251,7 +251,7 @@ export default function ProformaSlips() {
     }));
   };
   
-  // ── Filters — same model as Overall Stock ────────────────────────────────────
+  // ── Filters — same model as Stock Overview ────────────────────────────────────
   // Plant is a tab strip (single active plant, "" = All). Date is its own standalone control
   // (single day "d:YYYY-MM-DD" or range "r:from:to", both editable, plus quick-range presets).
   // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
@@ -1034,7 +1034,7 @@ export default function ProformaSlips() {
   };
   
   // Excel-style per-column filters — every column except Plant (tab strip) and Order Date (its
-  // own Date control). Options are the column's own distinct values, same as Overall Stock.
+  // own Date control). Options are the column's own distinct values, same as Stock Overview.
   const filterableColumns: FilterableColumn<LockedProformaSlip>[] = useMemo(() => {
     const slips = (proformaSlips ?? []) as LockedProformaSlip[];
     const textOptions = (pick: (s: LockedProformaSlip) => string | null | undefined) =>
@@ -2145,7 +2145,7 @@ export default function ProformaSlips() {
       </div>
 
       {/* Plant tabs — single-select (All + each plant), coloured per Plant Management. Sits
-          between the page header and the table (same placement as Overall Stock). */}
+          between the page header and the table (same placement as Stock Overview). */}
       {plantOptions.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 mb-3">
           <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>

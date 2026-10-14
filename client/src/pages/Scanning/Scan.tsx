@@ -1921,7 +1921,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setMvVoidTarget(null);
       setMvVoidReason("");
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });

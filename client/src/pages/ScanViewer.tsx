@@ -795,7 +795,7 @@ export default function ScanViewer() {
       qc.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
       qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
       qc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
-      qc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setVoidTarget(null);
       setVoidReason("");
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
@@ -817,7 +817,7 @@ export default function ScanViewer() {
       qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
       qc.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
       qc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
-      qc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setAdjustRemainTarget(null);
       toast({
         title: "Remaining quantity adjusted",
@@ -876,7 +876,7 @@ export default function ScanViewer() {
     };
   };
   // qty ÷ its own items-per-pallet — never one blended pallet size for every item, same rule
-  // used everywhere else in this app (osTotals in Scan.tsx, Overall Stock's Pallets column).
+  // used everywhere else in this app (osTotals in Scan.tsx, Stock Overview's Pallets column).
   const pltQty = (qty: number, ipp: number) => (qty > 0 && ipp > 0 ? qty / ipp : 0);
 
   // Same 4-tile Total/Received/Remaining/Extra strip as the Scan tab, including the pallet
@@ -909,7 +909,7 @@ export default function ScanViewer() {
 
   // Excel-style per-column filters for the items table (Item, Exp, Received, Left, Extra,
   // Status) — matched client-side since this order's item list is already fully loaded (not
-  // paginated the way Scan History is), same approach as Overall Stock.
+  // paginated the way Scan History is), same approach as Stock Overview.
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(
     () => readSavedViewerFilters().conditions ?? {},
   );
@@ -1024,7 +1024,7 @@ export default function ScanViewer() {
   }, [search, columnConditions, plant, date, sessionId, viewerTab, viewerSource]);
 
   // The single "+ Filter" entry point — every generic column in one searchable list, same
-  // pattern as Overall Stock/Scan History (no special-cased dims here: Plant/Order Date are
+  // pattern as Stock Overview/Scan History (no special-cased dims here: Plant/Order Date are
   // already their own controls above, scoping which order this table even shows).
   const [filterPickerOpen, setFilterPickerOpen] = useState(false);
   const [filterPickerKey, setFilterPickerKey] = useState("");
@@ -1049,7 +1049,7 @@ export default function ScanViewer() {
   const editFilterColumn = filterableColumns.find((c) => c.id === editFilterKey) ?? null;
 
   // Wraps a plain header label with the Excel-style filter icon — same columnHeader() pattern
-  // as Overall Stock/Scan History.
+  // as Stock Overview/Scan History.
   const columnHeader = (id: string, label: string) => {
     const col = filterableColumns.find((c) => c.id === id);
     if (!col) return label;
@@ -2030,7 +2030,7 @@ export default function ScanViewer() {
             </div>
           </div>
 
-          {/* Same TableCard + DataTable used by Overall Stock/Reports — navy header, built-in
+          {/* Same TableCard + DataTable used by Stock Overview/Reports — navy header, built-in
               search, zebra stripes — plus the same Excel-style filtering: a filter icon on each
               column header, a unified "+ Filter" picker, and a "Filters (N)" summary. */}
           <TableCard
@@ -2932,7 +2932,7 @@ function UnloadingViewerSection({
     onSuccess: () => {
       uQc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/unloading-history"] });
       uQc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
-      uQc.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      uQc.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setUVoidTarget(null);
       setUVoidReason("");
       uToast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });

@@ -369,7 +369,7 @@ export default function DailyReports() {
     { expectedQty: 0, actualQty: 0, extraQty: 0, expectedPallets: 0, pallets: 0 },
   );
 
-  // Same shared DataTable/TableCard the rest of the app's tables use (Overall Stock, Scan
+  // Same shared DataTable/TableCard the rest of the app's tables use (Stock Overview, Scan
   // History) — sortable/resizable/hideable columns, zebra stripes, a totals row — instead of
   // this page's own hand-built <table>s.
   const summaryColumns: DataTableColumn<ItemTotal>[] = [

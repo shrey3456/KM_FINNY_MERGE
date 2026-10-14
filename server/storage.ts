@@ -2512,23 +2512,14 @@ export class DBStorage implements IStorage {
 
     const result = await db.update(products).set(updateData).where(eq(products.id, id)).returning();
 
-    // Eagerly fold any plant-stock rows still parked under the OLD barcode onto the new one, for
-    // every plant this product has stock in — instead of waiting for the next scan to trigger
-    // the same lazy reconciliation (see stockBarcodeReconcile.ts's comment for the full
-    // rationale). Best-effort: a failure here must never fail the product update itself — the
-    // lazy path on the next scan is the fallback.
+    // The product's stock lines follow its new barcode (Stock Overview), so stock never gets left behind under the old one. Best-effort: a failure
+    // here must never fail the product update itself.
     if (barcodeChanged && result.length && updateData.barcode) {
       try {
-        const { reconcileProductPlantStockBarcode } = await import('./lib/stockBarcodeReconcile');
-        const { rows: plantRows } = await pool.query(
-          `SELECT DISTINCT plant FROM product_plant_stock WHERE product_id = $1`,
-          [id],
-        );
-        for (const p of plantRows) {
-          await reconcileProductPlantStockBarcode(pool, id, p.plant, updateData.barcode);
-        }
+        const { renameLinesBarcode } = await import('./lib/stockV2');
+        await renameLinesBarcode(pool, id, updateData.barcode);
       } catch (err) {
-        console.error(`Failed to reconcile product_plant_stock after barcode change for product ${id}:`, (err as Error)?.message);
+        console.error(`Failed to move stock lines to the new barcode for product ${id}:`, (err as Error)?.message);
       }
     }
 

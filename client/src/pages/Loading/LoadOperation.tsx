@@ -533,7 +533,7 @@ export default function LoadOperation() {
   const recordAccentBorderClass = (r: LoadingRecord) =>
     r.loadingCompletedAt ? "border-l-4 border-l-emerald-400" : r.loadingPausedAt ? "border-l-4 border-l-amber-400" : "border-l-4 border-l-blue-400";
 
-  // Same filter engine and UI as Overall Stock / Scan History / Scan Viewer: a "+ Filter" button,
+  // Same filter engine and UI as Stock Overview / Scan History / Scan Viewer: a "+ Filter" button,
   // a filter icon on each column header, and removable chips. Options come from the records on
   // this page, so a checklist never offers a value that would filter everything away.
   const recordDistinct = (values: (string | null | undefined)[]): FilterOption[] =>

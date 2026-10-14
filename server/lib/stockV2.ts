@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { pool } from '../db';
 
-// Stock (New) core — see server/lib/stockV2Schema.ts for the tables.
+// Stock Overview core — see server/lib/stockV2Schema.ts for the tables.
 //
 // One stock line = one item at one plant (name + barcode + the state's SAP code). Every detail on the
 // line (name, SAP, Sr No, brand, category ...) is read from the Product Master by barcode when the line is
@@ -109,12 +109,14 @@ export const csvSapFor = (db: Db, source: 'order' | 'unload', sessionId: number,
 
 // Finds the plant's stock line for a barcode, making it from the Product Master when there is none yet.
 // Returns null when the barcode is not in the Product Master (the caller decides whether that blocks).
-export async function findOrCreateLine(db: Db, plant: string, barcode: string, sapCode?: string | null): Promise<StockV2Line | null> {
+export async function findOrCreateLine(db: Db, plant: string, barcode: string, sapCode?: string | null, productId?: number | null): Promise<StockV2Line | null> {
   const bc = String(barcode ?? '').trim();
   const pl = String(plant ?? '').trim();
   if (!bc || !pl) return null;
   const state = await stateOfPlant(db, pl);
-  const p = await pickProduct(db, bc, sapCode, state);
+  // A named product (a loading slip line knows which one it is) beats the SAP guess.
+  const named = productId != null ? (await db.query(`SELECT * FROM products WHERE id = $1`, [productId])).rows[0] : null;
+  const p = named ?? await pickProduct(db, bc, sapCode, state);
   if (!p) return null;
   const d = detailsFromProduct(p, state);
   const existing = await db.query(
@@ -226,28 +228,9 @@ export async function resolveLine(db: Db, kind: LinkKind, refKey: string, plant:
   return line;
 }
 
-// Never lets a Stock (New) problem break the real operation: runs the posting inside a SAVEPOINT on the
-// operation's own client, logs and swallows any failure. Use only for the dual-write period.
-export async function safeV2<T>(dbIn: Db | null, label: string, fn: (db: Db) => Promise<T>): Promise<T | undefined> {
-  // A PoolClient is inside the operation's transaction (so it gets a savepoint); a bare Pool is not.
-  const client = dbIn && 'release' in dbIn ? (dbIn as PoolClient) : null;
-  const db: Db = dbIn ?? pool;
-  const sp = client ? `sv2_${Math.random().toString(36).slice(2, 10)}` : null;
-  try {
-    if (client && sp) await client.query(`SAVEPOINT ${sp}`);
-    const out = await fn(db);
-    if (client && sp) await client.query(`RELEASE SAVEPOINT ${sp}`);
-    return out;
-  } catch (e) {
-    if (client && sp) { try { await client.query(`ROLLBACK TO SAVEPOINT ${sp}`); } catch { /* ignore */ } }
-    console.error(`[StockV2] ${label} failed:`, e instanceof Error ? e.message : e);
-    return undefined;
-  }
-}
+// ── The hooks the operations call ─────────────────────────────────────────────────────────────────────
 
-// ── The hooks the operations call (dual-write while Stock (New) is being proven) ──────────────────────
-
-const todayIst = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+export const todayIst = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
 // The day a receiving CSV / unloading batch belongs to: its Order Date (what the old Stock Overview dates a
 // purchase by), or today when it has none.
@@ -262,56 +245,88 @@ export async function sessionDay(db: Db, source: 'order' | 'unload', sessionId: 
 // from the CSV's link — made the first time the barcode is seen on that CSV — so later scans don't search.
 export async function v2Purchase(
   client: Db,
-  p: { source: 'order' | 'unload'; sessionId: number; plant: string; barcode: string; qty: number; extraQty?: number },
+  p: { source: 'order' | 'unload'; sessionId: number; plant: string; barcode: string; qty: number; extraQty?: number; day?: string | null },
 ): Promise<void> {
-  await safeV2(client, 'purchase', async (db) => {
+  {
+    const db = client;
     if (!p.qty && !p.extraQty) return;
     const sap = await csvSapFor(db, p.source, p.sessionId, p.barcode);
     const line = await resolveLine(db, p.source === 'unload' ? 'unload_session' : 'order_session', linkKey(sap ? [p.sessionId, p.barcode, p.plant, sap] : [p.sessionId, p.barcode, p.plant]), p.plant, p.barcode, sap);
     if (!line) return;
-    await postPurchase(db, line.id, await sessionDay(db, p.source, p.sessionId), p.qty, p.extraQty ?? 0);
-  });
+    // An unloading scan carries its own booked day (the day it was scanned); anything without one is dated by the CSV's order date.
+    await postPurchase(db, line.id, p.day || await sessionDay(db, p.source, p.sessionId), p.qty, p.extraQty ?? 0);
+  }
+}
+
+// The plant's stock line for a barcode on a receiving CSV (the line v2Purchase posts to), made when it has none yet.
+export async function orderLine(db: Db, sessionId: number, plant: string, barcode: string): Promise<StockV2Line | null> {
+  const sap = await csvSapFor(db, 'order', sessionId, barcode);
+  return resolveLine(db, 'order_session', linkKey(sap ? [sessionId, barcode, plant, sap] : [sessionId, barcode, plant]), plant, barcode, sap);
+}
+
+// The boxes now on that line (locked) - so a void / correction can refuse to take back boxes that were already loaded out.
+export async function orderStockLeft(db: Db, sessionId: number, plant: string, barcode: string): Promise<number> {
+  const line = await orderLine(db, sessionId, plant, barcode);
+  return line ? lockLineStock(db, line.id) : 0;
 }
 
 // A transfer between a purchase plant and a stock plant (two-plant Unloading); signed like the purchase.
 export async function v2Transfer(
   client: Db,
-  p: { sessionId: number; purchasePlant: string; stockPlant: string; barcode: string; qty: number },
+  p: { sessionId: number; purchasePlant: string; stockPlant: string; barcode: string; qty: number; day?: string | null },
 ): Promise<void> {
-  await safeV2(client, 'transfer', async (db) => {
+  {
+    const db = client;
     if (!p.qty) return;
-    const day = await sessionDay(db, 'unload', p.sessionId);
+    const day = p.day || await sessionDay(db, 'unload', p.sessionId);
     const sap = await csvSapFor(db, 'unload', p.sessionId, p.barcode);
     const from = await findOrCreateLine(db, p.purchasePlant, p.barcode, sap);
     const to = await findOrCreateLine(db, p.stockPlant, p.barcode, sap);
     if (!from || !to) return;
     await bumpDay(db, from.id, day, { transferOut: p.qty });
     await bumpDay(db, to.id, day, { transferIn: p.qty });
-  });
+  }
 }
 
-// Loading: the boxes a scan took, per plant that gave them (sign +1 = taken, -1 = given back by a void /
-// reset). Dated by the slip's order date; the extra part (an Add Extra scan) is recorded as extra sale.
-export async function v2Sale(
-  client: Db,
-  p: { eventId: number; barcode: string; contributions: Array<{ plant: string; qty: number }>; sign: 1 | -1 },
-): Promise<void> {
-  await safeV2(client, 'sale', async (db) => {
-    const ev = await db.query(
-      `SELECT e.is_extra, e.sap_code, (s.order_date AT TIME ZONE 'Asia/Kolkata')::date::text AS day
-         FROM loading_scan_events e LEFT JOIN proforma_slips s ON s.id = e.proforma_slip_id WHERE e.id = $1`,
-      [p.eventId],
-    );
-    const day = ev.rows[0]?.day || todayIst();
-    const isExtra = !!ev.rows[0]?.is_extra;
-    const sap = await ambiguousSap(db, p.barcode, async () => ev.rows[0]?.sap_code ?? null);
-    for (const c of p.contributions) {
-      if (!c.qty) continue;
-      const line = await findOrCreateLine(db, c.plant, p.barcode, sap);
-      if (!line) continue;
-      await postSale(db, line.id, day, p.sign * c.qty, isExtra ? p.sign * c.qty : 0);
-    }
-  });
+// ── Loading on Stock Overview: one PRODUCT's line at ONE plant ───────────────────────────────────────────────
+
+// The plant's stock line for a product. Two products that share a barcode (35 g / 37 g) are two lines, told apart by the product's SAP code for
+// the plant's state, so a load of one never touches the other. With no product given the barcode's only line is used (or the first product's).
+// create = false only looks; create = true makes the line (stock 0) when the product has none there yet.
+export async function findLineForProduct(db: Db, plant: string, barcode: string, productId?: number | null, create = false): Promise<StockV2Line | null> {
+  const bc = String(barcode ?? '').trim();
+  const pl = String(plant ?? '').trim();
+  if (!bc || !pl) return null;
+  if (create) return findOrCreateLine(db, pl, bc, null, productId);
+  const state = await stateOfPlant(db, pl);
+  const named = productId != null ? (await db.query(`SELECT * FROM products WHERE id = $1`, [productId])).rows[0] : null;
+  const p = named ?? await pickProduct(db, bc, null, state);
+  if (!p) return null;
+  const d = detailsFromProduct(p, state);
+  const r = await db.query(
+    `SELECT ${LINE_COLS} FROM stock_v2_lines
+      WHERE LOWER(plant) = LOWER($1) AND LOWER(barcode) = LOWER($2) AND LOWER(item_name) = LOWER($3) AND LOWER(COALESCE(sap_code, '')) = LOWER($4)`,
+    [pl, bc, p.name, d.sapCode ?? ''],
+  );
+  return r.rows[0] ?? null;
+}
+
+// Locks the line's row and returns its Stock, so two loads cannot both take the last boxes.
+export async function lockLineStock(db: Db, lineId: number): Promise<number> {
+  const r = await db.query(`SELECT stock_qty FROM stock_v2_lines WHERE id = $1 FOR UPDATE`, [lineId]);
+  return Number(r.rows[0]?.stock_qty ?? 0);
+}
+
+// The day a slip's loading counts on: its order date (India time), else today.
+export async function slipDay(db: Db, orderNumber: string): Promise<string> {
+  const r = await db.query(`SELECT (order_date AT TIME ZONE 'Asia/Kolkata')::date::text AS day FROM proforma_slips WHERE order_number = $1 ORDER BY id LIMIT 1`, [orderNumber]);
+  return r.rows[0]?.day || todayIst();
+}
+
+// A sale (positive) or a give-back (negative) on one line, on the slip's day. Extra is inside it (extraQty carries the same sign).
+export async function saleOnLine(db: Db, p: { lineId: number; orderNumber: string; qty: number; extraQty?: number }): Promise<void> {
+  if (!p.qty) return;
+  await postSale(db, p.lineId, await slipDay(db, p.orderNumber), p.qty, p.extraQty ?? 0);
 }
 
 // ── Opening stock: only at a fresh start ──────────────────────────────────────────────────────────────
@@ -321,7 +336,7 @@ export async function getOpeningState(db: Db): Promise<{ open: boolean; date: st
   return { open: !!r.rows[0]?.opening_open, date: r.rows[0]?.d ?? null };
 }
 
-// Clears Stock (New) (days, corrections, totals) and opens the opening window dated `date`.
+// Clears Stock Overview (days, corrections, totals) and opens the opening window dated `date`.
 export async function startFresh(date: string): Promise<void> {
   const client = await pool.connect();
   try {
@@ -345,32 +360,17 @@ export async function setOpening(db: Db, plant: string, barcode: string, qty: nu
   return line;
 }
 
-// A loading stock change that has no scan-event pull rows behind it (an older event, or the manual
-// "decrease loaded quantity" correction): a sale (+) or give-back (−) at one plant, on the slip's order date.
-export async function v2SaleOnSlip(client: Db, p: { orderNumber: string; plant: string; barcode: string; qty: number }): Promise<void> {
-  await safeV2(client, 'sale (slip)', async (db) => {
-    if (!p.qty) return;
-    const r = await db.query(
-      `SELECT (order_date AT TIME ZONE 'Asia/Kolkata')::date::text AS day FROM proforma_slips WHERE order_number = $1 ORDER BY id LIMIT 1`,
-      [p.orderNumber],
-    );
-    const line = await findOrCreateLine(db, p.plant, p.barcode);
-    if (line) await postSale(db, line.id, r.rows[0]?.day || todayIst(), p.qty, 0);
-  });
-}
-
 // A correction (manual Adjust, Clear Stock, Exchange, the Settings opening import): changes the line's total
 // and is kept as a ledger row; Purchase and Sale are not touched. `date` defaults to today.
 export async function v2Adjust(
   client: Db,
-  p: { plant: string; barcode: string; qty: number; kind: 'adjust' | 'clear' | 'exchange' | 'opening'; reason?: string | null; userCode?: string | null; date?: string | null },
+  p: { plant: string; barcode: string; qty: number; kind: 'adjust' | 'clear' | 'exchange' | 'opening'; reason?: string | null; userCode?: string | null; date?: string | null; productId?: number | null },
 ): Promise<void> {
-  await safeV2(client, 'adjust', async (db) => {
-    if (!p.qty) return;
-    const line = await findOrCreateLine(db, p.plant, p.barcode);
-    if (!line) return;
-    await postAdjust(db, line.id, (p.date ? String(p.date).slice(0, 10) : '') || todayIst(), p.qty, { kind: p.kind, source: p.kind, origin: p.kind, reason: p.reason ?? null, userCode: p.userCode ?? null });
-  });
+  if (!p.qty) return;
+  // The named product's line (twins sharing a barcode are separate lines); without one, the barcode's usual line.
+  const line = await findOrCreateLine(client, p.plant, p.barcode, null, p.productId ?? null);
+  if (!line) throw new Error(`"${p.barcode}" is not in the Product Master.`);
+  await postAdjust(client, line.id, (p.date ? String(p.date).slice(0, 10) : '') || todayIst(), p.qty, { kind: p.kind, source: p.kind, origin: p.kind, reason: p.reason ?? null, userCode: p.userCode ?? null });
 }
 
 // Before an edit moves already-received boxes from one barcode to another: null when it can go ahead, else the
@@ -391,46 +391,38 @@ export async function v2MoveRefusal(db: Db, plant: string, oldBarcode: string, n
   }
 }
 
-// Delete Stock / Clear Stock (remove): forget a line's days and corrections and zero it.
-export async function v2ForgetLine(db: Db, plant: string, barcode: string): Promise<void> {
-  await safeV2(db, 'forget line', async (d) => {
-    const r = await d.query(`SELECT id FROM stock_v2_lines WHERE LOWER(plant) = LOWER($1) AND LOWER(barcode) = LOWER($2)`, [plant, barcode]);
-    for (const row of r.rows) {
-      await d.query(`DELETE FROM stock_v2_daily WHERE line_id = $1`, [row.id]);
-      await d.query(`DELETE FROM stock_v2_ledger WHERE line_id = $1`, [row.id]);
-      await d.query(`UPDATE stock_v2_lines SET stock_qty = 0, updated_at = now() WHERE id = $1`, [row.id]);
+// A product's barcode was edited (a Product Master edit, the Notion sync): its stock lines follow it, so the stock stays with the product. When the
+// product already has a line under the new barcode at that plant (same name and SAP), the two are merged: days, corrections and links move over and
+// Stock adds up.
+export async function renameLinesBarcode(db: Db, productId: number, newBarcode: string): Promise<number> {
+  const bc = String(newBarcode ?? '').trim();
+  if (!bc) return 0;
+  const { rows } = await db.query(`SELECT id, plant, item_name, sap_code, stock_qty FROM stock_v2_lines WHERE product_id = $1 AND LOWER(barcode) <> LOWER($2)`, [productId, bc]);
+  for (const l of rows) {
+    const t = await db.query(
+      `SELECT id FROM stock_v2_lines WHERE LOWER(plant) = LOWER($1) AND LOWER(barcode) = LOWER($2) AND LOWER(item_name) = LOWER($3) AND LOWER(COALESCE(sap_code, '')) = LOWER($4)`,
+      [l.plant, bc, l.item_name, l.sap_code ?? ''],
+    );
+    if (!t.rows[0]) {
+      await db.query(`UPDATE stock_v2_lines SET barcode = $2, updated_at = now() WHERE id = $1`, [l.id, bc]);
+      continue;
     }
-  });
-}
-
-// ── Loading draws from Stock (New) once an admin switches it on (stock_v2_config.loading_uses_v2) ─────
-
-let loadingFlag: { at: number; on: boolean } | null = null;
-export async function loadingUsesV2(db: Db): Promise<boolean> {
-  const now = Date.now();
-  if (loadingFlag && now - loadingFlag.at < 5000) return loadingFlag.on;
-  try {
-    const r = await db.query(`SELECT loading_uses_v2 FROM stock_v2_config WHERE id = 1`);
-    loadingFlag = { at: now, on: !!r.rows[0]?.loading_uses_v2 };
-  } catch { loadingFlag = { at: now, on: false }; }
-  return loadingFlag.on;
-}
-export async function setLoadingUsesV2(on: boolean): Promise<void> {
-  await pool.query(`UPDATE stock_v2_config SET loading_uses_v2 = $1 WHERE id = 1`, [on]);
-  loadingFlag = { at: Date.now(), on };
-}
-
-// Stock per plant for one barcode from the stock lines (the Loading figure when Stock (New) is the source).
-// forUpdate locks the lines so two scans can't both take the last boxes.
-export async function v2StockByPlant(db: Db, barcode: string, plants: string[], forUpdate = false): Promise<Map<string, number>> {
-  const r = await db.query(
-    `SELECT plant, stock_qty FROM stock_v2_lines WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = ANY($2::text[]) ${forUpdate ? 'FOR UPDATE' : ''}`,
-    [String(barcode).trim(), plants.map((p) => p.toLowerCase())],
-  );
-  const out = new Map<string, number>(plants.map((p) => [p, 0]));
-  for (const row of r.rows) {
-    const key = plants.find((p) => p.toLowerCase() === String(row.plant).toLowerCase());
-    if (key) out.set(key, (out.get(key) ?? 0) + Number(row.stock_qty ?? 0));
+    const to = t.rows[0].id;
+    await db.query(
+      `INSERT INTO stock_v2_daily (stock_date, line_id, purchase_qty, extra_purchase_qty, sale_qty, extra_sale_qty, transfer_in_qty, transfer_out_qty)
+       SELECT stock_date, $2, purchase_qty, extra_purchase_qty, sale_qty, extra_sale_qty, transfer_in_qty, transfer_out_qty FROM stock_v2_daily WHERE line_id = $1
+       ON CONFLICT (stock_date, line_id) DO UPDATE SET
+         purchase_qty = stock_v2_daily.purchase_qty + EXCLUDED.purchase_qty, extra_purchase_qty = stock_v2_daily.extra_purchase_qty + EXCLUDED.extra_purchase_qty,
+         sale_qty = stock_v2_daily.sale_qty + EXCLUDED.sale_qty, extra_sale_qty = stock_v2_daily.extra_sale_qty + EXCLUDED.extra_sale_qty,
+         transfer_in_qty = stock_v2_daily.transfer_in_qty + EXCLUDED.transfer_in_qty, transfer_out_qty = stock_v2_daily.transfer_out_qty + EXCLUDED.transfer_out_qty`,
+      [l.id, to],
+    );
+    await db.query(`UPDATE stock_v2_ledger SET line_id = $2 WHERE line_id = $1`, [l.id, to]);
+    await db.query(`UPDATE stock_v2_links SET line_id = $2 WHERE line_id = $1 AND NOT EXISTS (SELECT 1 FROM stock_v2_links k WHERE k.kind = stock_v2_links.kind AND k.ref_key = stock_v2_links.ref_key AND k.line_id = $2)`, [l.id, to]);
+    await db.query(`UPDATE stock_v2_links SET purchase_line_id = $2 WHERE purchase_line_id = $1`, [l.id, to]);
+    await db.query(`UPDATE stock_v2_lines SET stock_qty = stock_qty + $2, updated_at = now() WHERE id = $1`, [to, l.stock_qty]);
+    await db.query(`UPDATE loading_scan_events SET stock_line_id = $2 WHERE stock_line_id = $1`, [l.id, to]);
+    await db.query(`DELETE FROM stock_v2_lines WHERE id = $1`, [l.id]);
   }
-  return out;
+  return rows.length;
 }

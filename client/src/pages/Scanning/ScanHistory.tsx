@@ -63,20 +63,8 @@ export function scanTypeLabel(row: {
     // Godown picking on the Sort Slip page — typed in, never scanned, and it moves no stock.
     : source === "sorting" ? "Sort"
     : "Scan";
-  // A real Scan/Unload/Load event whose ledger row was reconstructed afterward (Settings > Data
-  // Management > Fill Stock Ledger), most often after restoring into a different database — see
-  // its own reason text in stockRecalc.ts. Same text this page's "Remove entry" option already
-  // sniffs for the Remove-Operations-Data rows, just a different prefix.
-  const isBackfill = !!row.orderName?.startsWith("Backfilled from");
-  // A ledger-only row Adjust Exchange Extra wrote when moving Purchase from the Extra's own day
-  // to whichever order it was credited to (see the 'credit' branch of the Scan History combined
-  // query, and the two new stock_movements inserts in order-scan.ts's own /exchange/credit) —
-  // same text-sniffing idea isBackfill uses just above, different prefix.
-  const isCreditMove = !!row.orderName?.startsWith("Purchase moved");
   const kind = row.isExchange ? "Exchange"
     : row.isAdjust ? "Adjust"
-    : isBackfill ? "Backfill"
-    : isCreditMove ? "Purchase Moved"
     : row.isEmptyBox ? "Empty Box"
     : row.isExtra ? "Extra"
     : source === "sorting" ? "Pick"
@@ -167,7 +155,7 @@ type ScanHistoryResponse = {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// Solid navy fill, matching Overall Stock / Product Master's filter buttons. Squared off
+// Solid navy fill, matching Stock Overview / Product Master's filter buttons. Squared off
 // (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
@@ -402,15 +390,10 @@ const ScanHistory = () => {
   const canVoidUnloadEvent = isAdmin || hasPageWriteAccess("unloading");
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
-  // "Remove entry" — takes a finished row out of this list for good. Offered on exactly two
-  // kinds of row, and the server re-checks both: a scan that is already VOIDED (it counts
-  // towards nothing any more), and a stock line written by Settings > Remove All Operations
-  // Data (the minus entries that removal leaves behind). A live scan or somebody's manual
-  // Stock Adjust is never offered — those still mean something.
+  // "Remove entry" - takes a finished row out of this list for good. Offered only on a scan that is already VOIDED (it counts towards nothing any
+  // more), and the server re-checks it. A live scan or a Stock Adjust / Exchange (a correction on the Stock book) is never offered.
   const canRemoveEntry = isAdmin || hasPageWriteAccess("scan-history");
-  const isRemovableEntry = (row: ScanHistoryItem) =>
-    !!row.voided
-    || (row.sourceKind === "stock" && (row.orderName ?? "").startsWith("Remove operations data (Settings)"));
+  const isRemovableEntry = (row: ScanHistoryItem) => !!row.voided && row.sourceKind !== "stock";
   const [removeTarget, setRemoveTarget] = useState<ScanHistoryItem | null>(null);
   const removeMutation = useMutation({
     mutationFn: (row: ScanHistoryItem) =>
@@ -443,7 +426,7 @@ const ScanHistory = () => {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
       // Voiding reverses real stock (product_plant_stock/products.in_stock) — keep Overall
       // Stock's cache from showing a now-stale number if that tab is already open.
-      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setVoidTarget(null);
       setVoidReason("");
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
@@ -477,7 +460,7 @@ const ScanHistory = () => {
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/load-events"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setEditTarget(null);
       toast({ title: "Scan updated" });
     },
@@ -496,7 +479,7 @@ const ScanHistory = () => {
   // back next time instead of re-picking on every visit.
   const [historyPageSize, setHistoryPageSize] = usePersistentFilter<number>("scanHistory:pageSize", HISTORY_PAGE_SIZE);
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
-  // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Overall Stock's
+  // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Stock Overview's
   // Date (kept separate from the generic column engine below since each is a simple exact-match
   // server param, not a column/operator/value condition). Plant used to live here too, but is
   // now a regular generic column (see filterableColumns) so it gets the same Values checklist
@@ -565,7 +548,7 @@ const ScanHistory = () => {
         { value: "adjust", label: "Adjust (Scan + Stock)" },
       ];
 
-  // Date filter — same control/encoding as Overall Stock: the stored value is either a single
+  // Date filter — same control/encoding as Stock Overview: the stored value is either a single
   // day ("d:YYYY-MM-DD") or a from–to range ("r:YYYY-MM-DD:YYYY-MM-DD"), both resolving to a
   // from/to window sent to the server. Presets just compute one of those. Filters scan date
   // (scannedAt) — "Scan Date" below, to read distinctly from "Order Date" (its own generic
@@ -625,7 +608,7 @@ const ScanHistory = () => {
   };
 
   // Every distinct value for every generic filter column, fetched once from the server (Scan
-  // History is paginated, so — unlike Overall Stock, which builds its Values checklist straight
+  // History is paginated, so — unlike Stock Overview, which builds its Values checklist straight
   // from the fully-loaded rows already in the browser — there's no complete dataset on the
   // client to read distinct values from otherwise).
   const { data: filterValues = {} } = useQuery<Record<string, { value: string; label: string }[]>>({
@@ -635,7 +618,7 @@ const ScanHistory = () => {
   });
 
   // Excel-style per-column filters — Item, Barcode, Order, Qty, Pallets, STV, Time, Plant. Scan
-  // History is server-paginated, so (unlike Overall Stock) these are sent to the server as a
+  // History is server-paginated, so (unlike Stock Overview) these are sent to the server as a
   // `filters` param rather than matched client-side — see applyScanHistoryColumnFilters on the
   // backend. `accessor` is unused here for that same reason (no client-side matching happens);
   // it's only present to satisfy FilterableColumn's shape.
@@ -689,7 +672,7 @@ const ScanHistory = () => {
   }, [columnConditions]);
 
   // The single "+ Filter" entry point — Date/Scanner/Type plus every generic column (including
-  // Plant), same unified list-then-builder pattern as Overall Stock.
+  // Plant), same unified list-then-builder pattern as Stock Overview.
   const [filterPickerOpen, setFilterPickerOpen] = useState(false);
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
@@ -1000,7 +983,7 @@ const ScanHistory = () => {
 
   const dash = <span className="text-gray-300">—</span>;
 
-  // Same table structure/styling as Overall Stock (DataTable + TableCard): sortable/resizable/
+  // Same table structure/styling as Stock Overview (DataTable + TableCard): sortable/resizable/
   // hideable columns, zebra stripes, business-report borders, plus a totals row.
   //
   // The table only ever holds one 20-row page, so DataTable's own row-summing would report the
@@ -1296,7 +1279,7 @@ const ScanHistory = () => {
         </Select>
 
 
-        {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
+        {/* Table card — same shared DataTable component as Stock Overview: sortable/resizable/
             hideable columns, zebra stripes, mobile swipe hint. No pagination — the whole filtered
             list loads and the table body scrolls under a sticky header, matching the Scan page's
             Master View. */}

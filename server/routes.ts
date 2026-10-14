@@ -119,7 +119,6 @@ import orderScanRoutes, { initOrderScanWs } from "./routes/order-scan";
 import settingsAdminRoutes from "./routes/settings-admin";
 import unloadingRoutes from "./routes/unloading";
 import openingStockRoutes from "./routes/opening-stock";
-import plantStockAdminRoutes from "./routes/plant-stock-admin";
 import stockV2Routes from "./routes/stock-v2";
 import { detectChangesFromNotion, fullSyncFromNotion, applyPendingChanges, getAutoApplyEnabled } from "./services/notionInventorySync";
 import userRoutes from "./routes/users";
@@ -312,7 +311,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Product endpoints
   apiRouter.get("/products", async (req: Request, res: Response) => {
     try {
-      // Shared across many pages/roles (Scan's Edit CSV search, Overall Stock's Exchange
+      // Shared across many pages/roles (Scan's Edit CSV search, Stock Overview's Exchange
       // Product tool, Product Master's admin-only table) — a plain login check, not an
       // admin/page-specific one, since it's genuinely needed by non-admin users too.
       if (!req.isAuthenticated || !req.isAuthenticated()) {
@@ -7825,7 +7824,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     },
   );
 
-  // Shared across many pages/roles (Proforma Slips' plant picker, Overall Stock, Scan, Order
+  // Shared across many pages/roles (Proforma Slips' plant picker, Stock Overview, Scan, Order
   // Import, the PlantBadge display component) — not exclusive to the Plant Management page,
   // so this is a plain login check, not a "plant-management" page-access check. Locking it to
   // that specific page (as an earlier pass did) broke every other page's plant dropdown for
@@ -8205,10 +8204,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Mount Settings > Clear Stock admin routes
   apiRouter.use(settingsAdminRoutes);
 
-  // Mount Overall Stock > per-row Edit/Delete admin routes
-  apiRouter.use(plantStockAdminRoutes);
-
-  // Stock (New) — report / compare / rebuild (new stock system, runs beside the old one)
+  // Stock Overview — the report, the per-line drill-down and the admin actions (Adjust / Clear / Delete history), Opening stock
   apiRouter.use(stockV2Routes);
 
   // Mount Unloading routes (vehicle-wise receiving)

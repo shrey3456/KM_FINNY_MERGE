@@ -1,38 +1,19 @@
 import { Router, Request, Response } from 'express';
-import { v2Adjust } from '../lib/stockV2';
+import { v2Adjust, postAdjust, todayIst } from '../lib/stockV2';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
-import { checkStock, recalculateStock, checkStockFromEvents, recalculateStockFromEvents, checkStockLedgerBackfill, applyStockLedgerBackfill, StockBusyError } from '../lib/stockRecalc';
+import { reverseOrderSessions, reverseUnloadSessions, reverseLoadingOrders } from '../lib/stockReverse';
 import { runCsvBackup } from '../lib/csvBackup';
 
 // Settings > Data Management > "Clear Stock" — an admin-only action that resets stock numbers
 // for a chosen plant (or every plant), optionally scoped further to only orders/slips dated on
-// or before a chosen Order Date. Touches ONLY product_plant_stock (+ its stock_movements audit
-// trail and the products legacy mirror) — it does NOT touch Order Import/Loading/Unloading scan
-// history, sessions, or records in any way. (It used to also void-or-delete that scan history;
-// that behavior was deliberately removed — Clear Stock is stock-only now.)
-//   - No date scope (the original, still-default behavior): product_plant_stock.in_stock/
-//     extra_qty -> 0 outright for the plant scope. Exact and simple, since everything in that
-//     scope is being cleared — nothing is left behind that stock could still legitimately
-//     belong to.
-//   - Date scope: setting to 0 would be WRONG here — it would also wipe out stock earned by
-//     transactions dated AFTER the cutoff, which aren't being cleared. Instead this computes
-//     the precise delta the in-scope (date-filtered) transactions contributed — sum of
-//     receiving (Order Import + Unloading, both add stock) minus sum of dispatch (Loading,
-//     removes stock) for each barcode+plant — and subtracts only that, the same "reverse
-//     exactly what this scope contributed" idea the per-CSV delete/edit flows already use, just
-//     at the scale of a whole date range. This is a best-effort reversal: it assumes stock
-//     equals the sum of tracked events for the in-scope period (true in normal operation, but
-//     an Opening Stock bulk-set or an untracked manual adjustment inside that period would
-//     throw it off) — full historical ledger replay isn't feasible here. Reading that delta
-//     still requires looking at order_scan_events/unload_scan_events/loading_scan_events (joined
-//     to their sessions/proforma slip for the date filter) — those reads are how the delta gets
-//     computed, not a write; none of those rows are modified.
-//   Either way: a stock_movements 'adjust' audit row per affected barcode+plant, and
-//   products.in_stock (the legacy cross-plant mirror) recomputed as the live sum of
-//   product_plant_stock so clearing one plant never wipes out a product's stock that still
-//   legitimately exists elsewhere.
+// or before a chosen Order Date. Works on Stock Overview only - it does NOT touch Order Import/Loading/Unloading scan
+// history, sessions, or records in any way.
+//   - No date scope: every stock line in the plant scope goes to 0, each with a 'clear' correction (Adjust) on the book.
+//   - Date scope: setting to 0 would be WRONG here - it would also wipe out stock earned by transactions dated AFTER the cutoff. Instead it
+//     computes what the in-scope (date-filtered) transactions contributed - receiving (Order Import + Unloading) minus dispatch (Loading) for each
+//     barcode+plant - and takes only that off, as a 'clear' correction. Best-effort: it assumes stock equals the tracked events for the period.
 const router = Router();
 
 function actor(req: Request): { userCode?: string; userName?: string } {
@@ -109,8 +90,8 @@ router.get('/settings/clear-stock/preview', requireAdminRole, async (req: Reques
     // running total); the date filter narrows WHICH transactions get reversed, not which rows
     // show up here at all.
     const stockRes = await pool.query(
-      `SELECT COUNT(*)::int AS n FROM product_plant_stock
-       WHERE (in_stock <> 0 OR extra_qty <> 0) AND ($1::text IS NULL OR plant = $1)`,
+      `SELECT COUNT(*)::int AS n FROM stock_v2_lines
+       WHERE stock_qty <> 0 AND ($1::text IS NULL OR LOWER(plant) = LOWER($1))`,
       [plant],
     );
 
@@ -160,33 +141,14 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
     if (!dateParam) {
       // No date scope — original behavior, exact and simple: everything in the plant scope is
       // being cleared, so nothing is left behind that stock could still legitimately belong to.
-      const { rows: stockRows } = await client.query(
-        `SELECT barcode, product_id, plant, in_stock, extra_qty FROM product_plant_stock
-         WHERE (in_stock <> 0 OR extra_qty <> 0) AND ($1::text IS NULL OR plant = $1)
-         FOR UPDATE`,
+      const { rows: lines } = await client.query(
+        `SELECT id, stock_qty FROM stock_v2_lines WHERE stock_qty <> 0 AND ($1::text IS NULL OR LOWER(plant) = LOWER($1)) FOR UPDATE`,
         [plant],
       );
-      stockRowsAffectedCount = stockRows.length;
-      for (const row of stockRows) {
-        const qty = Number(row.in_stock ?? 0) + Number(row.extra_qty ?? 0);
-        if (qty <= 0) continue;
-        // hidden_in_history: this line is the LEDGER's record of the clear — Overall Stock's
-        // Opening/Purchase/Sale are summed from stock_movements, so without it the report would
-        // carry on showing the cleared stock as still on hand. It is not scanning, though, so it
-        // is kept out of the Scan History list, where one row per item was pure noise. Who ran
-        // the clear is in Activities.
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, hidden_in_history, origin)
-           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,true,'settings')`,
-          [row.barcode, row.product_id, row.plant, -qty, -Number(row.extra_qty ?? 0), 'Clear Stock (Settings)', userCode ?? null],
-        );
-        await v2Adjust(client, { plant: row.plant, barcode: row.barcode, qty: -qty, kind: 'clear', reason: 'Clear Stock (Settings)', userCode });
+      stockRowsAffectedCount = lines.length;
+      for (const l of lines) {
+        await postAdjust(client, l.id, todayIst(), -Number(l.stock_qty), { kind: 'clear', source: 'clear', origin: 'settings', reason: 'Clear Stock (Settings)', userCode: userCode ?? null });
       }
-      await client.query(
-        `UPDATE product_plant_stock SET in_stock = 0, extra_qty = 0, updated_at = NOW()
-         WHERE (in_stock <> 0 OR extra_qty <> 0) AND ($1::text IS NULL OR plant = $1)`,
-        [plant],
-      );
     } else {
       // Date scope — set-to-0 would be wrong (see header comment). Compute the precise delta the
       // in-scope transactions contributed and reverse only that: receiving (Order Import +
@@ -231,33 +193,11 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
       for (const r of loadingRows as any[]) bump(r.barcode, r.plant, Number(r.total ?? 0), 0);
 
       for (const d of deltaByKey.values()) {
-        if (d.inStockDelta === 0 && d.extraQtyDelta === 0) continue;
-        const { rows: updated } = await client.query(
-          `UPDATE product_plant_stock
-           SET in_stock = GREATEST(0, in_stock + $1), extra_qty = GREATEST(0, extra_qty + $2), updated_at = NOW()
-           WHERE barcode = $3 AND plant = $4
-           RETURNING product_id`,
-          [d.inStockDelta, d.extraQtyDelta, d.barcode, d.plant],
-        );
-        if (updated.length === 0) continue;
-        stockRowsAffectedCount += updated.length;
-        // Same as above: kept in the ledger so the report stays right, kept out of Scan History.
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, hidden_in_history, origin)
-           VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,true,'settings')`,
-          [d.barcode, updated[0]?.product_id ?? null, d.plant, d.inStockDelta, d.extraQtyDelta, `Clear Stock (Settings) — orders up to ${dateParam}`, userCode ?? null],
-        );
+        if (d.inStockDelta === 0) continue;
         await v2Adjust(client, { plant: d.plant, barcode: d.barcode, qty: d.inStockDelta, kind: 'clear', reason: 'Clear Stock (Settings) — up to ' + dateParam, userCode });
+        stockRowsAffectedCount += 1;
       }
     }
-
-    // Recompute the legacy cross-plant mirror from the live per-plant table so clearing one
-    // plant doesn't erase a product's stock that still exists in another plant.
-    await client.query(
-      `UPDATE products p
-       SET in_stock = COALESCE((SELECT SUM(pps.in_stock) FROM product_plant_stock pps WHERE pps.barcode = p.barcode), 0)
-       WHERE EXISTS (SELECT 1 FROM product_plant_stock pps WHERE pps.barcode = p.barcode)`,
-    );
 
     await client.query('COMMIT');
 
@@ -290,7 +230,7 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
   }
 });
 
-// GET /api/settings/sales-tracking-start — the date Overall Stock's ledger starts summing Sale
+// GET /api/settings/sales-tracking-start — the date Stock Overview's ledger starts summing Sale
 // Qty from in its "all dates" view (proforma data before this date isn't reliable). Was a
 // hardcoded constant in scan-sessions.ts; now a single admin-editable row (see sales_settings in
 // server/index.ts's migration block / salesSettings in shared/schema.ts).
@@ -334,199 +274,10 @@ router.put('/settings/sales-tracking-start', requireAdminRole, async (req: Reque
   }
 });
 
-// Settings > Data Management > Recalculate Stock — see server/lib/stockRecalc.ts.
-// GET  .../preview : read-only; lists every stored total that doesn't match the history (capped
-//                    for display, with the full counts alongside).
-// POST             : corrects those stored totals. History, scans, CSVs and proforma slips are
-//                    never changed.
-const RECALC_PREVIEW_LIMIT = 500;
-
-router.get('/settings/recalculate-stock/preview', requireAdminRole, async (_req: Request, res: Response) => {
-  try {
-    const { plantRows, productRows } = await checkStock(pool);
-    res.json({
-      plantCount: plantRows.length,
-      productCount: productRows.length,
-      plantRows: plantRows.slice(0, RECALC_PREVIEW_LIMIT),
-      productRows: productRows.slice(0, RECALC_PREVIEW_LIMIT),
-    });
-  } catch (error) {
-    console.error('Error checking stock:', error);
-    res.status(500).json({ message: 'Failed to check stock' });
-  }
-});
-
-router.post('/settings/recalculate-stock', requireAdminRole, async (req: Request, res: Response) => {
-  const { userCode, userName } = actor(req);
-  try {
-    const result = await recalculateStock(pool);
-    if (userCode) {
-      await storage.logActivity({
-        pageName: 'Settings',
-        action: 'update',
-        entityType: 'plant_stock',
-        entityId: 'recalculate-stock',
-        details: `Recalculated stock from history by ${userName ?? userCode}: ${result.plantRowsFixed} plant row(s) corrected`
-          + `${result.duplicateRowsCleared ? `, ${result.duplicateRowsCleared} duplicate row(s) set to 0` : ''}`
-          + `, ${result.productTotalsFixed} product total(s) corrected.`,
-        userCode,
-        userName,
-      });
-    }
-    res.json({ success: true, ...result });
-  } catch (error) {
-    if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
-    console.error('Error recalculating stock:', error);
-    res.status(500).json({ message: 'Failed to recalculate stock' });
-  }
-});
-
-// "Recalculate from events only" — purely from Order Scan/Unloading/Loading's own raw event
-// tables, never touching stock_movements (no Adjust, Exchange, Clear Stock or Opening Stock
-// entries count here at all). See stockRecalc.ts's own comment on why that's narrower on
-// purpose, not a bug.
-router.get('/settings/recalculate-stock-events/preview', requireAdminRole, async (_req: Request, res: Response) => {
-  try {
-    const { plantRows, productRows } = await checkStockFromEvents(pool);
-    res.json({
-      plantCount: plantRows.length,
-      productCount: productRows.length,
-      plantRows: plantRows.slice(0, RECALC_PREVIEW_LIMIT),
-      productRows: productRows.slice(0, RECALC_PREVIEW_LIMIT),
-    });
-  } catch (error) {
-    console.error('Error checking stock from events:', error);
-    res.status(500).json({ message: 'Failed to check stock' });
-  }
-});
-
-router.post('/settings/recalculate-stock-events', requireAdminRole, async (req: Request, res: Response) => {
-  const { userCode, userName } = actor(req);
-  try {
-    const result = await recalculateStockFromEvents(pool);
-    if (userCode) {
-      await storage.logActivity({
-        pageName: 'Settings',
-        action: 'update',
-        entityType: 'plant_stock',
-        entityId: 'recalculate-stock-events',
-        details: `Recalculated stock from Scan/Unload/Load events only by ${userName ?? userCode}: ${result.plantRowsFixed} plant row(s) corrected`
-          + `${result.duplicateRowsCleared ? `, ${result.duplicateRowsCleared} duplicate row(s) set to 0` : ''}`
-          + `, ${result.productTotalsFixed} product total(s) corrected.`,
-        userCode,
-        userName,
-      });
-    }
-    res.json({ success: true, ...result });
-  } catch (error) {
-    if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
-    console.error('Error recalculating stock from events:', error);
-    res.status(500).json({ message: 'Failed to recalculate stock' });
-  }
-});
-
-// "Fill Stock Ledger (from Scan + Unload + Load events)" — a narrower, standalone sibling of
-// Recalculate from events: only reconciles stock_movements against Order Scan, Unloading and
-// Loading's raw event tables, with no live-stock correction at all. For when the live number on
-// the Stock page is already right but Overall Stock's Purchase column is still 0 for a
-// barcode+plant whose receiving has no matching ledger row — see stockRecalc.ts's own comment.
-router.get('/settings/backfill-stock-ledger/preview', requireAdminRole, async (_req: Request, res: Response) => {
-  try {
-    const { scanGaps, unloadGaps, loadGaps, totalGapQty } = await checkStockLedgerBackfill(pool);
-    res.json({
-      scanGapCount: scanGaps.length,
-      unloadGapCount: unloadGaps.length,
-      loadGapCount: loadGaps.length,
-      totalGaps: scanGaps.length + unloadGaps.length + loadGaps.length,
-      totalGapQty,
-      scanGaps: scanGaps.slice(0, RECALC_PREVIEW_LIMIT),
-      unloadGaps: unloadGaps.slice(0, RECALC_PREVIEW_LIMIT),
-      loadGaps: loadGaps.slice(0, RECALC_PREVIEW_LIMIT),
-    });
-  } catch (error) {
-    console.error('Error checking stock ledger backfill:', error);
-    res.status(500).json({ message: 'Failed to check stock ledger' });
-  }
-});
-
-router.post('/settings/backfill-stock-ledger', requireAdminRole, async (req: Request, res: Response) => {
-  const { userCode, userName } = actor(req);
-  try {
-    const result = await applyStockLedgerBackfill(pool);
-    if (userCode) {
-      await storage.logActivity({
-        pageName: 'Settings',
-        action: 'update',
-        entityType: 'plant_stock',
-        entityId: 'backfill-stock-ledger',
-        details: `Filled stock ledger from Scan/Unload/Load events by ${userName ?? userCode}: ${result.written} row(s) added.`,
-        userCode,
-        userName,
-      });
-    }
-    res.json({ success: true, ...result });
-  } catch (error) {
-    if (error instanceof StockBusyError) return res.status(409).json({ message: error.message });
-    console.error('Error filling stock ledger:', error);
-    res.status(500).json({ message: 'Failed to fill stock ledger' });
-  }
-});
-
-// GET /api/settings/clear-stock-entries — every Clear Stock (Settings) ledger row still sitting
-// in stock_movements, so an admin can see exactly what a past bulk reset touched before deciding
-// to remove it (DELETE below). Clear Stock's own effect on live stock already happened at the
-// time it ran — this list is purely the audit trail of it, which is what skews Overall Stock's
-// Opening/System/Total Stock figures and Recalculate Stock's math for any item that had real
-// stock history predating full ledger tracking (see that endpoint's own comment).
-router.get('/settings/clear-stock-entries', requireAdminRole, async (_req: Request, res: Response) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT sm.id, sm.barcode, sm.plant, sm.qty, sm.reason, sm.created_at AS "at",
-             (SELECT pr.name FROM products pr WHERE LOWER(TRIM(pr.barcode)) = LOWER(TRIM(sm.barcode)) LIMIT 1) AS "itemName"
-      FROM stock_movements sm
-      WHERE sm.reason LIKE 'Clear Stock (Settings)%'
-      ORDER BY sm.created_at DESC, sm.id DESC
-    `);
-    res.json({ items: rows, total: rows.length });
-  } catch (error) {
-    console.error('Error listing Clear Stock entries:', error);
-    res.status(500).json({ message: 'Failed to load Clear Stock entries' });
-  }
-});
-
-// DELETE /api/settings/clear-stock-entries — body: { ids?: number[] }. Removes the given Clear
-// Stock ledger rows (every one, if ids is omitted) — a LEDGER-ONLY correction, same as deleting
-// one Adjust entry from Overall Stock's own Adjustments dialog, just all of them at once. This
-// does NOT touch product_plant_stock — live stock stays exactly as Clear Stock already left it.
-// Run Recalculate Stock afterward to actually rebuild live stock from the now-cleaner history.
-router.delete('/settings/clear-stock-entries', requireAdminRole, async (req: Request, res: Response) => {
-  const ids: number[] | undefined = Array.isArray(req.body?.ids)
-    ? req.body.ids.map((id: unknown) => Number(id)).filter((id: number) => Number.isFinite(id))
-    : undefined;
-  const { userCode, userName } = actor(req);
-  try {
-    const { rows } = ids && ids.length > 0
-      ? await pool.query(`DELETE FROM stock_movements WHERE id = ANY($1::int[]) AND reason LIKE 'Clear Stock (Settings)%' RETURNING id`, [ids])
-      : await pool.query(`DELETE FROM stock_movements WHERE reason LIKE 'Clear Stock (Settings)%' RETURNING id`);
-    if (userCode) {
-      await storage.logActivity({
-        pageName: 'Settings', action: 'delete', entityType: 'stock_movement', entityId: 'clear-stock-entries',
-        details: `Deleted ${rows.length} Clear Stock ledger entry/entries by ${userName ?? userCode}. Live stock untouched — run Recalculate Stock to rebuild it from history.`,
-        userCode, userName,
-      });
-    }
-    res.json({ success: true, deleted: rows.length });
-  } catch (error) {
-    console.error('Error deleting Clear Stock entries:', error);
-    res.status(500).json({ message: 'Failed to delete Clear Stock entries' });
-  }
-});
-
 // ── Settings > Data Management > "Remove All Operations Data" ───────────────────────────────────
 // Admin-only. Deletes the day-to-day WORK of a plant (or of every plant) from the database for
 // good: order scanning (sessions, items, events), unloading (batches, items, events), loading
-// (records, scan events, handoffs, load operations), stock (rows and their stock_movements
-// ledger), and the legacy scan-history tables.
+// (records, scan events, handoffs, load operations), stock (Stock Overview: the lines' book), and the legacy scan-history tables.
 //
 // Optionally scoped to an ORDER DATE: "remove everything up to 15 Sep" means everything belonging
 // to orders DATED on or before 15 Sep — never the day someone happened to scan it. Each area has
@@ -537,16 +288,15 @@ router.delete('/settings/clear-stock-entries', requireAdminRole, async (req: Req
 //   Load operations → its own order_date column
 //   Stock movements → the order date of the order the movement came from; a movement with no order
 //                     (manual Adjust, Opening Stock, exchange, Clear Stock) uses the day it was
-//                     made — the same rule the Overall Stock ledger already follows
+//                     made — the same rule the Stock Overview ledger already follows
 //   Old scan history→ the slip's order_date
 // Rows that have no order date at all (the activity log, the legacy scan_sessions tables) are only
 // removed by a full, no-date reset; a date-scoped reset leaves them alone rather than guessing.
 //
-// Stock needs its own treatment when a date is set: a stock row is a running TOTAL with no date of
-// its own, so deleting it would also throw away stock that orders AFTER the cutoff brought in.
-// With a date, the rows are therefore kept and adjusted by exactly what the in-scope orders
-// contributed (receiving and unloading added stock, loading took it away) — the same reversal
-// Clear Stock does — with one audit movement per item+plant. With no date the rows are deleted.
+// Stock Overview needs its own treatment when a date is set: a line is a running TOTAL, so deleting it would also throw away stock that orders AFTER
+// the cutoff brought in. With a date, the in-scope operations are therefore taken back off the book exactly - receiving and unloading are reversed
+// on the day they posted, every loading entry is given back to its line. With no date every stock line in the plant scope is wiped (days, corrections,
+// Stock back to 0).
 //
 // Deliberately KEPT either way: Product Master, Vehicle Master, proforma slips (only their loading
 // progress is reset, so an order can be loaded again from scratch), users, plants and settings.
@@ -573,19 +323,8 @@ const ORDER_SESSIONS_IN_SCOPE = `SELECT id FROM order_import_sessions WHERE ${PL
 const UNLOAD_SESSIONS_IN_SCOPE = `SELECT id FROM unload_import_sessions WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR order_date <= $2::text)`;
 const SLIP_NUMBERS_IN_SCOPE = `SELECT order_number FROM proforma_slips WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR order_date <= $2::date)`;
 
-// What a movement's ORDER date is: its receiving/unloading session's, else the day it was made.
-const MOVEMENT_ORDER_DATE = `COALESCE(
-  CASE WHEN source = 'unloading'
-       THEN (SELECT uis.order_date FROM unload_import_sessions uis WHERE uis.id = stock_movements.session_id)
-       ELSE (SELECT ois.order_date FROM order_import_sessions ois WHERE ois.id = stock_movements.session_id) END,
-  created_at::date::text)`;
-
 function resetScope(dateScoped: boolean): ResetPart[] {
   const parts: ResetPart[] = [
-    // FIRST, before the sessions below are gone: a movement's order date is looked up through its
-    // session, so deleting the sessions first would make every movement look undated (and a
-    // date-scoped run would then leave them all behind).
-    { key: 'stockMovements', table: 'stock_movements', where: `${PLANT_MATCH} AND ($2::text IS NULL OR ${MOVEMENT_ORDER_DATE} <= $2::text)` },
     // Strictly by session. A scan row of a LATER part that points at an in-scope CSV row (this
     // happens after a remap) is left alone — its foreign key is ON DELETE SET NULL, so nothing
     // breaks, and that part's own scanning is not this removal's to take.
@@ -605,9 +344,7 @@ function resetScope(dateScoped: boolean): ResetPart[] {
     { key: 'scanHistory', table: 'scan_history', where: `order_number IN (${SLIP_NUMBERS_IN_SCOPE})` },
   ];
   if (!dateScoped) {
-    // Only a full reset deletes these: a stock row is a running total (adjusted instead when a date
-    // is set — see the header), and the legacy scan tables carry no order date to judge them by.
-    parts.push({ key: 'stockRows', table: 'product_plant_stock', where: `${PLANT_MATCH} AND $2::text IS NULL` });
+    // Only a full reset deletes these: the legacy scan tables carry no order date to judge them by.
     parts.push({ key: 'legacyScanSessions', table: 'scan_sessions', where: `${PLANT_MATCH} AND $2::text IS NULL` });
   }
   return parts;
@@ -645,54 +382,18 @@ async function countResetScope(plant: string | null, orderDateUpTo: string | nul
     `SELECT COUNT(*)::int AS n FROM proforma_slips WHERE ${SLIPS_LOADING_WHERE}`, [plant, orderDateUpTo],
   );
   counts.slipsLoadingReset = slipRows[0]?.n ?? 0;
-  // With a date the stock rows aren't deleted but adjusted — show how many rows that touches.
-  if (orderDateUpTo) {
-    const { rows: stockRows } = await pool.query(
-      `SELECT COUNT(*)::int AS n FROM product_plant_stock
-       WHERE ${PLANT_MATCH} AND $2::text IS NOT NULL AND (in_stock <> 0 OR extra_qty <> 0)`,
-      [plant, orderDateUpTo],
-    );
-    counts.stockRows = stockRows[0]?.n ?? 0;
-  }
+  // Stock Overview lines: wiped with no date; with a date, the lines that currently hold stock are the ones the reversal can move.
+  const { rows: stockRows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM stock_v2_lines WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR stock_qty <> 0)`,
+    [plant, orderDateUpTo],
+  );
+  counts.stockRows = stockRows[0]?.n ?? 0;
   // Activity log: only ever in scope for a full all-plants reset (it has no plant and no order date).
   if (plant === null && !orderDateUpTo) {
     const { rows: actRows } = await pool.query(`SELECT COUNT(*)::int AS n FROM activities`);
     counts.activities = actRows[0]?.n ?? 0;
   }
   return counts;
-}
-
-// Brings products.in_stock (the legacy cross-plant total) back in line with product_plant_stock.
-// Only rows whose value is actually wrong are written, in id order, so two of these can never take
-// each other's locks in the opposite order; a lost deadlock race is retried a couple of times and,
-// failing that, reported as a warning rather than an error — the removal itself is already done and
-// Settings > Recalculate Stock fixes the mirror at any time.
-async function recomputeProductStockMirror(): Promise<string | null> {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      await pool.query(
-        `UPDATE products p SET in_stock = t.correct
-         FROM (
-           SELECT p2.id,
-                  COALESCE((SELECT SUM(pps.in_stock)::int FROM product_plant_stock pps
-                            WHERE LOWER(TRIM(pps.barcode)) = LOWER(TRIM(p2.barcode))), 0) AS correct
-           FROM products p2
-           ORDER BY p2.id
-         ) t
-         WHERE t.id = p.id AND p.in_stock IS DISTINCT FROM t.correct`,
-      );
-      return null;
-    } catch (error: any) {
-      const isDeadlock = error?.code === '40P01';
-      if (!isDeadlock || attempt === 3) {
-        console.error('Could not recompute products.in_stock after a reset:', error);
-        return 'The data was removed, but the product stock totals could not be refreshed '
-          + '(the database was busy). Run Settings > Recalculate Stock to fix them.';
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-    }
-  }
-  return null;
 }
 
 // The phrase the person has to type, so a mis-click can never run this.
@@ -757,35 +458,26 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
 
     const counts: ResetCounts = { ...EMPTY_COUNTS };
 
-    // 1. Stock, when a date is set: take it back down by exactly what the in-scope LEDGER rows did,
-    //    read before those rows are deleted just below. No compensating "adjust" entry is written —
-    //    these entries are being removed, not reversed, the same way the Order Import / Scan removal
-    //    works. Reading the ledger rather than the scan events also picks up edits and rollbacks
-    //    that already corrected a quantity, and gets the direction right for free: receiving and
-    //    unloading rows are positive so the stock comes down, loading rows are negative so what a
-    //    load took out comes back.
-    //    (With no date the stock rows are deleted outright instead — see resetScope.)
+    // 1. Stock Overview, before the entries are deleted: with a date, take the in-scope operations back off the book exactly (receiving and unloading
+    //    on the day they posted, loading given back to its line); with no date, wipe every line in the plant scope.
     if (orderDateUpTo) {
-      const { rows: effects } = await client.query(
-        `SELECT MIN(barcode) AS barcode, MIN(plant) AS plant,
-                SUM(qty)::int AS qty, SUM(COALESCE(extra_qty, 0))::int AS extra
-         FROM stock_movements
-         WHERE ${PLANT_MATCH} AND ($2::text IS NULL OR ${MOVEMENT_ORDER_DATE} <= $2::text)
-         GROUP BY LOWER(TRIM(barcode)), LOWER(TRIM(plant))`,
-        [plant, orderDateUpTo],
-      );
-      for (const effect of effects as any[]) {
-        const qty = Number(effect.qty ?? 0);
-        const extra = Number(effect.extra ?? 0);
-        if (qty === 0 && extra === 0) continue;
-        const { rowCount } = await client.query(
-          `UPDATE product_plant_stock
-           SET in_stock = GREATEST(0, in_stock - $1), extra_qty = GREATEST(0, extra_qty - $2), updated_at = NOW()
-           WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($3)) AND LOWER(TRIM(plant)) = LOWER(TRIM($4))`,
-          [qty, extra, effect.barcode, effect.plant],
-        );
-        counts.stockRows += rowCount ?? 0;
+      const orderIds = (await client.query(ORDER_SESSIONS_IN_SCOPE, [plant, orderDateUpTo])).rows.map((r) => r.id as number);
+      const unloadIds = (await client.query(UNLOAD_SESSIONS_IN_SCOPE, [plant, orderDateUpTo])).rows.map((r) => r.id as number);
+      const slipNumbers = (await client.query(SLIP_NUMBERS_IN_SCOPE, [plant, orderDateUpTo])).rows.map((r) => String(r.order_number));
+      const a = await reverseOrderSessions(client, orderIds);
+      const b = await reverseUnloadSessions(client, unloadIds);
+      const c = await reverseLoadingOrders(client, slipNumbers);
+      counts.stockRows = a.lines + b.lines + c.entries;
+    } else {
+      const lines = await client.query(`SELECT id FROM stock_v2_lines WHERE ${PLANT_MATCH}`, [plant]);
+      const ids = lines.rows.map((r) => r.id as number);
+      if (ids.length) {
+        await client.query(`DELETE FROM stock_v2_daily WHERE line_id = ANY($1::int[])`, [ids]);
+        await client.query(`DELETE FROM stock_v2_ledger WHERE line_id = ANY($1::int[])`, [ids]);
+        await client.query(`DELETE FROM stock_v2_links WHERE line_id = ANY($1::int[])`, [ids]);
+        await client.query(`UPDATE stock_v2_lines SET stock_qty = 0, updated_at = now() WHERE id = ANY($1::int[])`, [ids]);
       }
+      counts.stockRows = ids.length;
     }
 
     // 2. The deletions. Children before parents, since a child's scope is defined by its parent.
@@ -804,7 +496,6 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
       } catch (error) {
         throw new Error(`while clearing ${part.table}: ${error instanceof Error ? error.message : String(error)}`);
       }
-      // stockRows already holds the adjusted-row count in date mode; only a full reset deletes them.
       counts[part.key] = result.rowCount ?? 0;
     }
 
@@ -825,16 +516,7 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
     }
     await client.query('COMMIT');
 
-    // products.in_stock is the legacy cross-plant mirror of product_plant_stock — recomputed from
-    // what is LEFT, so resetting one plant never wipes stock another plant still holds.
-    //
-    // Deliberately AFTER the commit and in its own statement: inside the transaction it rewrote
-    // every products row and held those locks for the whole removal, which deadlocked against the
-    // Notion product sync writing the same table — and took the entire deletion down with it
-    // ("deadlock detected ... while updating tuple in relation products"). Out here it touches only
-    // the rows whose number actually changes (usually a handful), and if it still loses a deadlock
-    // race the data is already removed; the response then says so instead of failing.
-    const mirrorWarning = await recomputeProductStockMirror();
+    const mirrorWarning: string | null = null;
 
     // Logged after the commit — for a full all-plants reset the log was just emptied, so this row is
     // the first entry of the fresh history, saying who did it and what went.
@@ -850,10 +532,7 @@ router.post('/settings/reset-operations', requireAdminRole, async (req: Request,
         + `(order scanning ${counts.orderSessions} CSV(s) / ${counts.orderScanEvents} scan(s), `
         + `unloading ${counts.unloadSessions} batch(es) / ${counts.unloadScanEvents} scan(s), `
         + `loading ${counts.loadingRecords} record(s) / ${counts.loadingScanEvents} scan(s), `
-        + `${counts.stockMovements} stock movement(s)); `
-        + (orderDateUpTo
-          ? `${counts.stockRows} stock row(s) reduced by what was removed; `
-          : `${counts.stockRows} stock row(s) deleted; `)
+        + `${counts.stockRows} stock line(s) ${orderDateUpTo ? 'reduced by what was removed' : 'wiped'}); `
         + `${counts.slipsLoadingReset} proforma slip(s) reset for loading.`,
       userCode,
       userName,
@@ -912,8 +591,8 @@ router.post('/settings/backup-csv', requireAdminRole, async (req: Request, res: 
 });
 
 // Operational-data-only backup — every table behind Scan History, Unloading, Loading, Product/
-// Plant/Vehicle Master, User Management and Proforma Slip, explicitly WITHOUT stock_movements or
-// product_plant_stock. The list is fixed here, not taken from the request, so this can never be
+// Plant/Vehicle Master, User Management and Proforma Slip, explicitly WITHOUT the stock_v2_* stock tables or
+// anything else. The list is fixed here, not taken from the request, so this can never be
 // pointed at an arbitrary table. Shares csvBackupRunning with the full backup above — only one
 // backup (of either kind) runs at a time.
 const OPERATIONAL_BACKUP_TABLES = [
@@ -964,15 +643,15 @@ router.post('/settings/backup-csv-scoped', requireAdminRole, async (req: Request
 // Order Import CSVs and the Scan Operations work done against them.
 //
 //   Removed : order_import_sessions + their items, order_scan_items, order_scan_events (the scan
-//             history itself, rows deleted outright), and the stock_movements those sessions
-//             wrote. Stock is taken back down by exactly what those movements added.
+//             history itself, rows deleted outright). Stock Overview is taken back down by exactly what
+//             those CSVs received, on the day it was booked.
 //   Untouched: Loading and Unloading — their batches, scans, records and their own stock
 //             movements all stay, including movements that merely happen to share a session id
 //             number with a receiving session (they are told apart by `source`).
 //
 // Deliberately NO compensating "adjust" entry is written: the request is for these entries to be
 // gone, not reversed, so the stock number is corrected in place and the ledger rows are deleted
-// with everything else. That means Overall Stock will show this period as if the receiving never
+// with everything else. That means Stock Overview will show this period as if the receiving never
 // happened — which is the point — while Loading's own sale figures are left exactly as they are.
 //
 // Optional order-date cut-off: the date on the CSV (order_import_sessions.order_date), never the
@@ -986,12 +665,6 @@ const SCAN_SESSIONS_IN_SCOPE = `SELECT id FROM order_import_sessions
   WHERE ($1::text IS NULL OR LOWER(TRIM(plant)) = LOWER(TRIM($1)))
     AND ($2::text IS NULL OR order_date <= $2::text)`;
 
-// A receiving session's own ledger rows. Loading and Unloading write their own movements with
-// their own session ids — the two id spaces are separate tables, so without this `source` test a
-// receiving reset could subtract an unloading batch's stock that merely shares an id number.
-const SCAN_MOVEMENTS_IN_SCOPE = `session_id IN (${SCAN_SESSIONS_IN_SCOPE})
-  AND COALESCE(source, '') NOT IN ('loading', 'unloading')`;
-
 const scanResetConfirmPhrase = (plantParam: string) =>
   (plantParam.toLowerCase() === 'all' ? 'DELETE SCAN ALL' : `DELETE SCAN ${plantParam}`).toUpperCase();
 
@@ -1003,15 +676,18 @@ async function countScanResetScope(plant: string | null, orderDateUpTo: string |
     importItems: await one(`SELECT COUNT(*)::int AS n FROM order_import_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`),
     scanItems: await one(`SELECT COUNT(*)::int AS n FROM order_scan_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`),
     scanEvents: await one(`SELECT COUNT(*)::int AS n FROM order_scan_events WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`),
-    stockMovements: await one(`SELECT COUNT(*)::int AS n FROM stock_movements WHERE ${SCAN_MOVEMENTS_IN_SCOPE}`),
+    stockMovements: 0,
     stockRowsAdjusted: 0,
     qtyRemoved: 0,
   };
+  // What taking these CSVs off the book would move: the physically received boxes, per CSV and barcode.
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS rows, COALESCE(SUM(qty), 0)::int AS qty FROM (
-       SELECT LOWER(TRIM(barcode)) AS b, LOWER(TRIM(plant)) AS p, SUM(qty)::int AS qty
-       FROM stock_movements WHERE ${SCAN_MOVEMENTS_IN_SCOPE}
-       GROUP BY 1, 2
+       SELECT e.session_id, LOWER(TRIM(e.barcode)) AS b, SUM(e.total_qty)::int AS qty
+         FROM order_scan_events e
+        WHERE e.session_id IN (${SCAN_SESSIONS_IN_SCOPE}) AND e.voided IS NOT TRUE AND e.is_credit IS NOT TRUE
+          AND e.barcode IS NOT NULL AND e.barcode <> 'EMPTY_BOX'
+        GROUP BY 1, 2 HAVING SUM(e.total_qty) <> 0
      ) g`,
     params,
   );
@@ -1063,36 +739,15 @@ router.post('/settings/reset-scan-data', requireAdminRole, async (req: Request, 
       stockMovements: 0, stockRowsAdjusted: 0, qtyRemoved: 0,
     };
 
-    // 1. Take the stock back down by exactly what these sessions' own ledger rows added, BEFORE
-    //    those rows are deleted. Read from the ledger rather than from the scan events, so a CSV
-    //    edit or a rollback that already corrected a quantity is accounted for too. No adjust
-    //    row is written — these entries are being removed, not reversed.
-    const { rows: effects } = await client.query(
-      `SELECT MIN(barcode) AS barcode, MIN(plant) AS plant,
-              SUM(qty)::int AS qty, SUM(COALESCE(extra_qty, 0))::int AS extra
-       FROM stock_movements
-       WHERE ${SCAN_MOVEMENTS_IN_SCOPE}
-       GROUP BY LOWER(TRIM(barcode)), LOWER(TRIM(plant))`,
-      params,
-    );
-    for (const effect of effects as any[]) {
-      const qty = Number(effect.qty ?? 0);
-      const extra = Number(effect.extra ?? 0);
-      if (qty === 0 && extra === 0) continue;
-      const { rowCount } = await client.query(
-        `UPDATE product_plant_stock
-         SET in_stock = GREATEST(0, in_stock - $1), extra_qty = GREATEST(0, extra_qty - $2), updated_at = NOW()
-         WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($3)) AND LOWER(TRIM(plant)) = LOWER(TRIM($4))`,
-        [qty, extra, effect.barcode, effect.plant],
-      );
-      counts.stockRowsAdjusted += rowCount ?? 0;
-      counts.qtyRemoved += qty;
-    }
+    // 1. Take these CSVs back off Stock Overview - the physically received boxes, per CSV and barcode, on the day they were booked - BEFORE the
+    //    scans are deleted. No adjust entry is written: these entries are being removed, not reversed.
+    const scoped = (await client.query(SCAN_SESSIONS_IN_SCOPE, params)).rows.map((r) => r.id as number);
+    const reversed = await reverseOrderSessions(client, scoped);
+    counts.stockRowsAdjusted = reversed.lines;
+    counts.qtyRemoved = reversed.qty;
 
-    // 2. The deletions — the ledger rows first (their scope is defined through the session), then
-    //    the scanning work, then the CSVs themselves.
+    // 2. The deletions - the scanning work, then the CSVs themselves.
     const del = async (sql: string) => (await client.query(sql, params)).rowCount ?? 0;
-    counts.stockMovements = await del(`DELETE FROM stock_movements WHERE ${SCAN_MOVEMENTS_IN_SCOPE}`);
     counts.scanEvents = await del(`DELETE FROM order_scan_events WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`);
     counts.scanItems = await del(`DELETE FROM order_scan_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`);
     counts.importItems = await del(`DELETE FROM order_import_items WHERE session_id IN (${SCAN_SESSIONS_IN_SCOPE})`);
@@ -1100,9 +755,7 @@ router.post('/settings/reset-scan-data', requireAdminRole, async (req: Request, 
 
     await client.query('COMMIT');
 
-    // products.in_stock is the legacy cross-plant mirror — refreshed after the commit and only
-    // where it is actually wrong, so it can't deadlock the removal against the Notion sync.
-    const mirrorWarning = await recomputeProductStockMirror();
+    const mirrorWarning: string | null = null;
 
     const totalRows = counts.sessions + counts.importItems + counts.scanItems + counts.scanEvents + counts.stockMovements;
     await storage.createActivity({

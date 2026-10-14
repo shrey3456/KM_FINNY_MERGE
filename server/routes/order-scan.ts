@@ -11,7 +11,7 @@ import {
 import { eq, and, or, desc, asc, gte, sql, inArray } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
-import { v2Purchase } from '../lib/stockV2';
+import { v2Purchase, orderStockLeft } from '../lib/stockV2';
 import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
 import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
 import { sessionMiddleware } from '../auth';
@@ -271,7 +271,7 @@ async function checkSessionPlantOrRespond(req: Request, res: Response, sessionId
 }
 
 // Which plant names a user may view/act on — the single source of truth for plant access
-// across every page (Scan, Order Management, Overall Stock, Scan History). Returns null for
+// across every page (Scan, Order Management, Stock Overview, Scan History). Returns null for
 // admin/super-admin/billing → "see ALL plants, no filter". Otherwise returns EXACTLY the
 // user's assigned plants from the Users page (users.plants JSON array), lowercased — no
 // fallback to guessing a plant from department/role text (e.g. "Dispatch Valsad") anymore.
@@ -2197,18 +2197,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
               }
 
               if (plant) {
-                const { rows: pps } = await client.query(
-                  `UPDATE product_plant_stock
-                   SET extra_qty = GREATEST(0, extra_qty - $1), updated_at = NOW()
-                   WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
-                   RETURNING product_id`,
-                  [take, event.barcode, plant],
-                );
-                await client.query(
-                  `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-                   VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
-                  [event.barcode, pps[0]?.product_id ?? null, plant, -take, 'Extra reclassified to Regular — backfilled a shortfall left by a voided scan', event.session_id],
-                );
+                // Stock stays; only the Extra figure of the purchase shrinks - those boxes now count toward this order.
                 await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: -take });
               }
 
@@ -2248,18 +2237,6 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       );
       if (plant && event.barcode) {
         const qty = Number(event.total_qty ?? 0);
-        const { rows: pps } = await client.query(
-          `UPDATE product_plant_stock
-           SET extra_qty = extra_qty + $1, updated_at = NOW()
-           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
-           RETURNING product_id`,
-          [qty, event.barcode, plant],
-        );
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-           VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
-          [event.barcode, pps[0]?.product_id ?? null, plant, qty, 'Un-did a backfill conversion — restored to Extra', event.session_id],
-        );
         await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: qty });
       }
       await client.query('COMMIT');
@@ -2288,18 +2265,6 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       // (same session_id on both sides is what tells these two apart).
       if (src && plant && Number(src.session_id) === Number(event.session_id)) {
         const qty = Number(event.total_qty ?? 0);
-        const { rows: pps } = await client.query(
-          `UPDATE product_plant_stock
-           SET extra_qty = extra_qty + $1, updated_at = NOW()
-           WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
-           RETURNING product_id`,
-          [qty, src.barcode, plant],
-        );
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-           VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
-          [src.barcode, pps[0]?.product_id ?? null, plant, qty, 'Voided a backfill — qty restored to Extra', event.session_id],
-        );
         await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: src.barcode, qty: 0, extraQty: qty });
       }
     } else if (plant && event.barcode) {
@@ -2307,11 +2272,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       // reverseLiveScanStock itself clamps at 0 (GREATEST) as a last-resort backstop, but that
       // clamp is silent — it would let this void quietly under-reverse instead of telling the
       // caller these boxes are already used elsewhere. Reject up front instead.
-      const { rows: stockRows } = await client.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
-        [event.barcode, plant],
-      );
-      const currentStock = Number(stockRows[0]?.inStock ?? 0);
+      const currentStock = await orderStockLeft(client, event.session_id, plant, event.barcode);
       if (currentStock < qty) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -2629,25 +2590,7 @@ router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), 
     );
     const productId = productRows[0]?.id ?? null;
 
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, origin, created_by_code, created_at)
-       VALUES ($1, $2, $3, $4, 0, 'receive', $5, $6, 'credit', $7, NOW())`,
-      [
-        extra.barcode, productId, extra.session_plant, -qty,
-        `Purchase moved to ${target.csv_file_name} (${String(target.session_order_date).slice(0, 10)}) via Adjust Exchange Extra`,
-        extra.session_id, userCode,
-      ],
-    );
     await v2Purchase(client, { source: 'order', sessionId: extra.session_id, plant: extra.session_plant, barcode: extra.barcode, qty: -qty });
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, origin, created_by_code, created_at)
-       VALUES ($1, $2, $3, $4, 0, 'receive', $5, $6, 'credit', $7, NOW())`,
-      [
-        target.barcode, productId, target.session_plant, qty,
-        `Purchase moved from ${extraCsvName}'s Extra (${String(extra.session_order_date).slice(0, 10)}) via Adjust Exchange Extra`,
-        target.session_id, userCode,
-      ],
-    );
     await v2Purchase(client, { source: 'order', sessionId: target.session_id, plant: target.session_plant, barcode: target.barcode, qty });
 
     await client.query('COMMIT');
@@ -2709,11 +2652,14 @@ router.get('/order-scan/exchange/stock', requirePageAccess('adjust-exchange'), a
     if (userPlants !== null && !userPlants.includes(plant.toLowerCase())) {
       return res.status(403).json({ message: 'Access denied for this plant' });
     }
+    // Stock Overview: the lines at that plant for those barcodes (twins add up), and how much of it is Extra (extra bought less extra sold, never below 0).
     const { rows } = await pool.query(
-      `SELECT LOWER(barcode) AS "bkey", COALESCE(SUM(in_stock), 0)::int AS "inStock", COALESCE(SUM(extra_qty), 0)::int AS "extraQty"
-         FROM product_plant_stock
-        WHERE LOWER(plant) = LOWER($1) AND LOWER(barcode) = ANY($2::text[])
-        GROUP BY LOWER(barcode)`,
+      `SELECT LOWER(l.barcode) AS "bkey", COALESCE(SUM(l.stock_qty), 0)::int AS "inStock",
+              GREATEST(0, COALESCE(SUM(d.extra), 0))::int AS "extraQty"
+         FROM stock_v2_lines l
+         LEFT JOIN (SELECT line_id, SUM(extra_purchase_qty - extra_sale_qty) AS extra FROM stock_v2_daily GROUP BY line_id) d ON d.line_id = l.id
+        WHERE LOWER(l.plant) = LOWER($1) AND LOWER(l.barcode) = ANY($2::text[])
+        GROUP BY LOWER(l.barcode)`,
       [plant, barcodes],
     );
     res.json(rows);
@@ -2796,11 +2742,7 @@ router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite
     const newScanItemId = sameOrderItemRows[0]?.id ?? null;
 
     // The boxes must still be in stock to move — the same rule voiding a scan has.
-    const { rows: stockRows } = await client.query(
-      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
-      [event.barcode, event.plant],
-    );
-    const currentStock = Number(stockRows[0]?.inStock ?? 0);
+    const currentStock = await orderStockLeft(client, event.session_id, event.plant, event.barcode);
     if (currentStock < qty) {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -2952,11 +2894,7 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
     if (plant && event.barcode) {
       // Same guard as void — reject up front rather than let reverseLiveScanStock's own
       // GREATEST(0, ...) backstop silently under-reverse it.
-      const { rows: stockRows } = await client.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE LOWER(barcode) = LOWER($1) AND LOWER(plant) = LOWER($2) FOR UPDATE`,
-        [event.barcode, plant],
-      );
-      const currentStock = Number(stockRows[0]?.inStock ?? 0);
+      const currentStock = await orderStockLeft(client, event.session_id, plant, event.barcode);
       if (currentStock < oldQty) {
         await client.query('ROLLBACK');
         return res.status(409).json({

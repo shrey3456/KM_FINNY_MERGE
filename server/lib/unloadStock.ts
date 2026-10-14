@@ -1,22 +1,20 @@
 import type { PoolClient, Pool } from 'pg';
-import { v2Purchase, v2Transfer } from './stockV2';
+import { v2Purchase, v2Transfer, resolveLine, linkKey, csvSapFor, lockLineStock } from './stockV2';
 
 // Unloading can name TWO plants for a batch (a whole CSV, chosen once at import and locked):
-//   - the STOCK plant   (unload_import_sessions.plant)          — where the boxes are added to the live
-//     count and later loaded from. This is what every scan has always used.
-//   - the PURCHASE plant (unload_import_sessions.purchase_plant) — the plant the purchase belongs to.
-//     Null / the same name = one plant, exactly the old behaviour.
+//   - the STOCK plant   (unload_import_sessions.plant)          - where the boxes end up and are later loaded from.
+//   - the PURCHASE plant (unload_import_sessions.purchase_plant) - the plant the purchase belongs to.
+//     Null / the same name = one plant.
 //
-// The live count (product_plant_stock) only ever changes at the STOCK plant — that is unchanged. What
-// this adds is the LEDGER (stock_movements), which Overall Stock reads: when the two plants differ,
-// every unloading stock change is written as three rows that net to the live count:
-//   1. the purchase side at the PURCHASE plant (a normal receive / void / correction row),
-//   2. a transfer OUT at the purchase plant (transfer_dir 'out', other_plant = the stock plant),
-//   3. a transfer IN at the stock plant     (transfer_dir 'in',  other_plant = the purchase plant).
-// All dated by the batch's own order date through session_id, exactly like a purchase. A void or a
-// correction passes a negative qty, so the same three rows reverse each other.
+// Everything is on Stock Overview: the receive is a purchase at the PURCHASE plant's line; when the two plants differ it is followed by a transfer
+// out of the purchase plant's line and a transfer in on the stock plant's line, so the boxes land at the stock plant. A void or a correction
+// passes a negative qty, so the same postings reverse each other. All booked on the scan's own day.
 
 type Db = PoolClient | Pool;
+
+// The day an unloading scan is booked on: today, India time. Stored on the scan (unload_scan_events.booked_day) so a later void or correction
+// can be booked on that same day.
+export const scanDay = (): string => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
 export async function getUnloadPlants(client: Db, sessionId: number): Promise<{ stockPlant: string; purchasePlant: string }> {
   const { rows } = await client.query(`SELECT plant, purchase_plant AS "purchasePlant" FROM unload_import_sessions WHERE id = $1`, [sessionId]);
@@ -25,35 +23,37 @@ export async function getUnloadPlants(client: Db, sessionId: number): Promise<{ 
   return { stockPlant, purchasePlant: purchase && purchase.toLowerCase() !== stockPlant.toLowerCase() ? purchase : stockPlant };
 }
 
+// The stock plant's line this batch's barcode lands on (the same line a receive posts to when there is one plant), made when it has none yet.
+export async function unloadStockLine(client: Db, sessionId: number, barcode: string) {
+  const { stockPlant } = await getUnloadPlants(client, sessionId);
+  const sap = await csvSapFor(client, 'unload', sessionId, barcode);
+  return resolveLine(client, 'unload_session', linkKey(sap ? [sessionId, barcode, stockPlant, sap] : [sessionId, barcode, stockPlant]), stockPlant, barcode, sap);
+}
+
+// The boxes now on that line (locked), so a void / correction / rollback can refuse to take back boxes that were already loaded out.
+export async function unloadStockLeft(client: Db, sessionId: number, barcode: string): Promise<number> {
+  const line = await unloadStockLine(client, sessionId, barcode);
+  return line ? lockLineStock(client, line.id) : 0;
+}
+
 export async function postUnloadMovement(client: Db, p: {
   sessionId: number;
   barcode: string;
   productId?: number | null;
-  /** Signed change in boxes at the stock plant: + a receive, − a void / correction / rollback. */
+  /** Signed change in boxes at the stock plant: + a receive, - a void / correction / rollback. */
   qty: number;
   extraQty?: number;
   type: 'receive' | 'adjust';
   origin?: string | null;
   reason: string;
   userCode?: string | null;
+  /** The day this stock row counts on (YYYY-MM-DD): the scan booked day. Empty = the CSV order date. */
+  day?: string | null;
 }): Promise<void> {
   const { stockPlant, purchasePlant } = await getUnloadPlants(client, p.sessionId);
   const sameName = stockPlant.toLowerCase() === purchasePlant.toLowerCase();
-  const insert = (plant: string, qty: number, extra: number, type: string, origin: string | null, reason: string, dir: string | null, other: string | null) =>
-    client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, origin, transfer_dir, other_plant)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'unloading',$10,$11,$12)`,
-      [p.barcode, p.productId ?? null, plant, qty, extra, type, reason, p.sessionId, p.userCode ?? null, origin, dir, other],
-    );
-
-  // Purchase side — at the purchase plant when there is a different one, otherwise the stock plant.
-  await insert(purchasePlant, p.qty, p.extraQty ?? 0, p.type, p.origin ?? null, p.reason, null, null);
-  // Stock (New): the same purchase (and transfer, below) on the batch's day.
-  await v2Purchase(client, { source: 'unload', sessionId: p.sessionId, plant: purchasePlant, barcode: p.barcode, qty: p.qty, extraQty: p.extraQty ?? 0 });
+  // Purchase at the purchase plant (or the stock plant when there is no other one), on the batch day.
+  await v2Purchase(client, { source: 'unload', sessionId: p.sessionId, plant: purchasePlant, barcode: p.barcode, qty: p.qty, extraQty: p.extraQty ?? 0, day: p.day ?? null });
   if (sameName || p.qty === 0) return;
-  await v2Transfer(client, { sessionId: p.sessionId, purchasePlant, stockPlant, barcode: p.barcode, qty: p.qty });
-
-  const note = `Transfer ${purchasePlant} → ${stockPlant}: ${p.reason}`;
-  await insert(purchasePlant, -p.qty, 0, 'transfer', 'transfer', note, 'out', stockPlant);
-  await insert(stockPlant, p.qty, 0, 'transfer', 'transfer', note, 'in', purchasePlant);
+  await v2Transfer(client, { sessionId: p.sessionId, purchasePlant, stockPlant, barcode: p.barcode, qty: p.qty, day: p.day ?? null });
 }

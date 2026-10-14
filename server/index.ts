@@ -2,7 +2,6 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { pool } from "./db";
-import { tagStockMovementSources } from './lib/stockRecalc';
 import { ensureStockV2Schema } from './lib/stockV2Schema';
 
 
@@ -212,7 +211,7 @@ app.use((req, res, next) => {
       )
     `);
     // Per-scan audit trail for Loading's item-loading step — see loadingScanEvents' comment in
-    // shared/schema.ts. Each confirmed row here is what actually decrements product_plant_stock.
+    // shared/schema.ts. Each confirmed row here is what actually takes boxes off Stock Overview.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS loading_scan_events (
         id SERIAL PRIMARY KEY,
@@ -239,23 +238,6 @@ app.use((req, res, next) => {
         ADD COLUMN IF NOT EXISTS voided_by_code TEXT REFERENCES users(user_code),
         ADD COLUMN IF NOT EXISTS voided_at TIMESTAMP,
         ADD COLUMN IF NOT EXISTS void_reason TEXT
-    `);
-    // Per-plant breakdown of a loading_scan_events row's stock debit — see server/lib/statePool.ts.
-    // Loading now pools stock across every plant in the same state (plants.state), so a single
-    // scan can pull from more than one plant's product_plant_stock row; this is what lets a void
-    // or reset credit each contributing plant back exactly, instead of assuming it all came from
-    // the loading plant's own row.
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS loading_stock_pulls (
-        id SERIAL PRIMARY KEY,
-        loading_scan_event_id INTEGER NOT NULL REFERENCES loading_scan_events(id) ON DELETE CASCADE,
-        source_plant TEXT NOT NULL,
-        qty INTEGER NOT NULL,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_loading_stock_pulls_event_id ON loading_stock_pulls(loading_scan_event_id)
     `);
     // Sort Slip (server/routes/sort-slips.ts) — godown picking. See sortSlips in shared/schema.ts:
     // these tables are the ONLY place a pick is written; nothing here feeds Load Operations.
@@ -470,27 +452,19 @@ app.use((req, res, next) => {
     // trailing whitespace (an old CSV export padded to a fixed width, a pre-fix Notion sync
     // row, a barcode-gun double-fire captured before the trim-at-write fixes in storage.ts/
     // order-scan.ts/loading.ts/unloading.ts existed) silently fails every one of those matches,
-    // and Overall Stock/Scan History fall back to showing the bare barcode instead of the
+    // and Stock Overview/Scan History fall back to showing the bare barcode instead of the
     // resolved item name. Cleaned up once here, idempotently (WHERE barcode <> TRIM(barcode)
     // is a no-op once everything's clean) — every write from here on is already trimmed at the
     // source, so this can't reaccumulate.
     await pool.query(`UPDATE products SET barcode = TRIM(barcode) WHERE barcode <> TRIM(barcode)`);
-    // stock_movements.source — marks a person's manual Overall Stock adjustment ('manual'), the
-    // only 'adjust' rows Scan History lists. Earlier manual edits that kept the default reason
-    // are backfilled; ones given a custom reason can't be told apart and stay untagged.
-    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS source TEXT`);
-    // Unloading with two plants (purchase plant -> stock plant). unload_import_sessions.purchase_plant
-    // is null for every batch that has one plant (all of them before this). A move between the two is
-    // written as a pair of stock_movements rows, type = 'transfer': transfer_dir 'out' at the
-    // purchase plant and 'in' at the stock plant, other_plant naming the plant on the far side.
+    // Unloading with two plants (purchase plant -> stock plant): unload_import_sessions.purchase_plant is null for a one-plant batch.
     await pool.query(`ALTER TABLE unload_import_sessions ADD COLUMN IF NOT EXISTS purchase_plant TEXT`);
-    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS other_plant TEXT`);
-    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS transfer_dir TEXT`);
-    await pool.query(`UPDATE stock_movements SET source = 'manual' WHERE type = 'adjust' AND source IS NULL AND reason = 'Manual adjustment (Overall Stock)'`);
-    // Tag older Loading / Unloading ledger rows (see server/lib/stockRecalc.ts) — the same
-    // function Settings > Recalculate Stock runs.
-    await tagStockMovementSources(pool);
-    // Stock (New) tables — separate from the old stock tables (see server/lib/stockV2Schema.ts).
+    // Unloading is booked on the day it is SCANNED: unload_scan_events.booked_day = that day (empty on older scans, which keep being dated by their
+    // CSV's order date). A void / correction takes the booked day of the scan it cancels, so the two net out on one day.
+    await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS booked_day DATE`);
+    // A loading entry remembers the Stock Overview line it took its boxes from, so a void / edit / reset gives them back to exactly that line.
+    await pool.query(`ALTER TABLE loading_scan_events ADD COLUMN IF NOT EXISTS stock_line_id INTEGER`);
+    // Stock Overview's tables (see server/lib/stockV2Schema.ts).
     await ensureStockV2Schema(pool);
     // loading_scan_events.is_adjust — marks the Loading Items table's +/- corrections ("Loading
     // Adjust"). Older ones are found through the stock ledger row the same request wrote (same
@@ -535,14 +509,28 @@ app.use((req, res, next) => {
           AND ${column} LIKE '%"load-operations"%'`);
       if (rowCount) console.log(`[migration] removed the retired load-operations grant from ${rowCount} user(s) (${column})`);
     }
+    // The temporary "Stock (New)" page (key overall-stock-v2) became Stock Overview (overall-stock): whoever had the grant keeps access under the
+    // surviving key, and the retired key is taken out of every user.
+    for (const column of ['allowed_pages', 'page_write_access']) {
+      const { rowCount } = await pool.query(`
+        UPDATE users
+        SET ${column} = (
+          SELECT COALESCE(jsonb_agg(DISTINCT v), '[]')::text FROM (
+            SELECT CASE WHEN value = 'overall-stock-v2' THEN 'overall-stock' ELSE value END AS v
+            FROM jsonb_array_elements_text(${column}::jsonb) AS value
+          ) s
+        )
+        WHERE ${column} IS NOT NULL
+          AND TRIM(${column}) LIKE '[%'
+          AND ${column} LIKE '%"overall-stock-v2"%'`);
+      if (rowCount) console.log(`[migration] moved the Stock (New) grant to Stock Overview for ${rowCount} user(s) (${column})`);
+    }
 
     // hidden_in_history — "Remove entry" on the Scan History page, allowed only on a row that is
-    // already VOIDED or on a stock line written by Settings > Remove All Operations Data (see the
-    // endpoint, which re-checks that rule). The row itself is KEPT on purpose: Overall Stock sums
-    // its Opening/Purchase/Sale straight out of stock_movements, and a voided scan is what proves
-    // the void happened — deleting either would quietly change numbers that are already right.
+    // already VOIDED (see the endpoint, which re-checks that rule). The row itself is KEPT on
+    // purpose: a voided scan is what proves the void happened.
     // The flag only takes the line out of the Scan History list, and Activities records who did it.
-    for (const table of ['order_scan_events', 'loading_scan_events', 'unload_scan_events', 'stock_movements']) {
+    for (const table of ['order_scan_events', 'loading_scan_events', 'unload_scan_events']) {
       await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS hidden_in_history BOOLEAN DEFAULT false`);
     }
     // adjusted_at — when a scan was CORRECTED, kept apart from scanned_at, when it happened.
@@ -554,42 +542,6 @@ app.use((req, res, next) => {
     for (const table of ['order_scan_events', 'loading_scan_events', 'unload_scan_events']) {
       await pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS adjusted_at TIMESTAMP`);
     }
-    // Settings' own ledger lines (Clear Stock, Remove All Operations Data) write one row per item
-    // — hundreds at a time — and they filled Scan History with "Stock Adjust" entries nobody
-    // scanned. New ones are written hidden; the ones past runs already left behind are hidden here.
-    // They stay in stock_movements on purpose: Overall Stock sums Opening/Purchase/Sale out of that
-    // table, so deleting them would make it show cleared stock as still on hand.
-    {
-      const { rowCount } = await pool.query(`
-        UPDATE stock_movements SET hidden_in_history = true
-        WHERE type = 'adjust' AND NOT COALESCE(hidden_in_history, false)
-          AND (reason LIKE 'Clear Stock (Settings)%' OR reason LIKE 'Remove operations data (Settings)%')`);
-      if (rowCount) console.log(`[migration] hid ${rowCount} Settings stock-correction row(s) from Scan History`);
-    }
-    // Remove All Operations Data used to write a minus ledger line per item AND delete the very
-    // rows that line was offsetting, in the same run. What is left is a correction with nothing
-    // to correct: Stock Overview adds up the survivors and reports a purchase of minus a million
-    // for stock that no longer has any record of arriving. The action no longer writes them (it
-    // corrects the stock directly), so the orphans from earlier runs are cleared out here.
-    // Clear Stock's own lines are deliberately NOT touched — that action leaves its purchases in
-    // place, so its minus line is what explains the clear.
-    {
-      const { rowCount } = await pool.query(
-        `DELETE FROM stock_movements WHERE type = 'adjust' AND reason LIKE 'Remove operations data (Settings)%'`,
-      );
-      if (rowCount) console.log(`[migration] removed ${rowCount} orphaned "Remove operations data" ledger row(s)`);
-    }
-    // stock_movements.origin — WHO made a correction, as a real value rather than something to be
-    // guessed from the reason text (which changes the moment a message is reworded, or when the
-    // person types their own):
-    //   'page'      a per-item edit from Stock Overview's Adjust dialog
-    //   'operation' a correction a normal action produced — a voided scan, a deleted CSV, an
-    //               exchange, a loading/unloading qty edit
-    //   'settings'  a Settings-wide action: Clear Stock (Remove All Operations Data no longer
-    //               writes any ledger line at all)
-    // Stock Overview keeps the first two together as Adjust and the third in its own column, so a
-    // bulk clear can never swamp the corrections an operator actually made.
-    await pool.query(`ALTER TABLE stock_movements ADD COLUMN IF NOT EXISTS origin TEXT`);
     // products.box_image / box_image_hash — Notion's second image per product ("Box Image", the
     // packed carton). Cached on disk like the product shot, under <id>-box.jpg.
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS box_image TEXT`);
@@ -600,99 +552,13 @@ app.use((req, res, next) => {
     // without downloading anything.
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS product_image_ref TEXT`);
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS box_image_ref TEXT`);
-    {
-      const { rowCount } = await pool.query(`
-        UPDATE stock_movements SET origin = CASE
-            WHEN reason LIKE 'Clear Stock (Settings)%'
-              OR reason LIKE 'Remove operations data (Settings)%' THEN 'settings'
-            WHEN source = 'manual' THEN 'page'
-            ELSE 'operation'
-          END
-        WHERE origin IS NULL AND type IN ('adjust', 'exchange')`);
-      if (rowCount) console.log(`[migration] tagged ${rowCount} existing stock correction(s) with where they came from`);
-    }
-    await pool.query(`
-      UPDATE loading_scan_events lse SET is_adjust = true
-      WHERE lse.is_adjust IS NOT TRUE AND (
-        lse.total_qty < 0
-        OR EXISTS (
-          SELECT 1 FROM stock_movements sm
-          WHERE sm.type = 'adjust' AND sm.reason LIKE 'Loaded quantity manually %'
-            AND sm.reason LIKE '% for order ' || lse.order_number
-            AND LOWER(TRIM(sm.barcode)) = LOWER(TRIM(lse.barcode))
-            AND LOWER(TRIM(sm.plant)) = LOWER(TRIM(lse.plant))
-            AND sm.qty = -lse.total_qty
-            AND ABS(EXTRACT(EPOCH FROM (sm.created_at - lse.scanned_at))) < 10
-        )
-      )`);
-    await pool.query(`UPDATE stock_movements SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
+    await pool.query(`UPDATE loading_scan_events SET is_adjust = true WHERE is_adjust IS NOT TRUE AND total_qty < 0`);
     await pool.query(`UPDATE order_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE order_scan_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE order_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE loading_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE unload_import_items SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
     await pool.query(`UPDATE unload_scan_events SET barcode = TRIM(barcode) WHERE barcode IS NOT NULL AND barcode <> TRIM(barcode)`);
-
-    // product_plant_stock is UNIQUE(barcode, plant) — unlike the tables above, blindly trimming
-    // its barcode can collide with a row that already exists under the trimmed barcode for the
-    // same plant. Same merge-or-rename dance as reconcileProductPlantStockBarcode.ts (which
-    // handles the equivalent collision for a live barcode edit), run once here for any row still
-    // holding a padded barcode from before the trim-at-write fixes existed.
-    {
-      const { rows: paddedRows } = await pool.query(
-        `SELECT id, barcode, plant, in_stock, extra_qty FROM product_plant_stock WHERE barcode <> TRIM(barcode)`
-      );
-      for (const row of paddedRows) {
-        const trimmed = row.barcode.trim();
-        const { rows: targetRows } = await pool.query(
-          `SELECT id FROM product_plant_stock WHERE barcode = $1 AND plant = $2`,
-          [trimmed, row.plant],
-        );
-        if (targetRows[0]) {
-          await pool.query(
-            `UPDATE product_plant_stock SET in_stock = in_stock + $1, extra_qty = extra_qty + $2, updated_at = NOW() WHERE id = $3`,
-            [row.in_stock, row.extra_qty, targetRows[0].id],
-          );
-          await pool.query(`DELETE FROM product_plant_stock WHERE id = $1`, [row.id]);
-        } else {
-          await pool.query(
-            `UPDATE product_plant_stock SET barcode = $1, updated_at = NOW() WHERE id = $2`,
-            [trimmed, row.id],
-          );
-        }
-      }
-    }
-
-    // product_plant_stock/stock_movements previously linked to a product ONLY by barcode text.
-    // A product's barcode can be edited later (most commonly via the Notion inventory sync,
-    // which matches/updates existing products by their stable Notion page id, not barcode, and
-    // overwrites barcode whenever Notion's value differs) — once that happens, stock recorded
-    // under the old barcode no longer matches any current product row, and Overall Stock falls
-    // back to showing just the bare barcode instead of the item's name/category/etc. product_id
-    // is a stable link alongside barcode that survives a later barcode edit. Backfilled from
-    // each row's CURRENT barcode below — only fixes rows that haven't drifted yet (nothing
-    // remembers what a barcode used to be), but every write from here on populates product_id
-    // directly, so this can't happen again going forward. WHERE product_id IS NULL makes this
-    // safe to run on every server start — a no-op once everything's backfilled. TRIM() here too,
-    // belt-and-braces alongside the cleanup above, in case a row was added between the two.
-    await pool.query(`
-      ALTER TABLE product_plant_stock
-      ADD COLUMN IF NOT EXISTS product_id INTEGER
-    `);
-    await pool.query(`
-      ALTER TABLE stock_movements
-      ADD COLUMN IF NOT EXISTS product_id INTEGER
-    `);
-    await pool.query(`
-      UPDATE product_plant_stock pps SET product_id = p.id
-      FROM products p
-      WHERE pps.product_id IS NULL AND LOWER(TRIM(p.barcode)) = LOWER(TRIM(pps.barcode))
-    `);
-    await pool.query(`
-      UPDATE stock_movements sm SET product_id = p.id
-      FROM products p
-      WHERE sm.product_id IS NULL AND LOWER(TRIM(p.barcode)) = LOWER(TRIM(sm.barcode))
-    `);
 
     // vehicle_info predates Vehicle Master and previously had a different, narrower column set
     // (see shared/schema.ts's comment on the vehicleInfo table) — add whatever's missing rather

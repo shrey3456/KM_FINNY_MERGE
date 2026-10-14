@@ -1,15 +1,14 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
+import { storage } from '../storage';
 import { requireAdminRole, requirePageAccess } from '../lib/pageAccess';
 import { getUserPlants } from './order-scan';
-import { rebuildStockV2 } from '../lib/stockV2Backfill';
-import { getOpeningState, startFresh, setOpening, loadingUsesV2, setLoadingUsesV2 } from '../lib/stockV2';
+import { getOpeningState, startFresh, setOpening, postAdjust, lockLineStock, todayIst } from '../lib/stockV2';
 
-// Stock (New) — read side: the report behind the Stock (New) page, the line drill-down, and the Compare
-// view that sets it beside the old Stock Overview while both are kept in step. Admin-only Rebuild redoes
-// the one-time conversion. Writes from the operations go through server/lib/stockV2.ts.
+// Stock - the report behind the Stock page, the line drill-down, and the admin actions on one line (Adjust, Clear, Delete). Writes from the
+// operations (Order Scan, Unloading, Loading) go through server/lib/stockV2.ts.
 const router = Router();
-const PAGE = 'overall-stock-v2';
+const PAGE = 'overall-stock';
 
 const isoDay = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
 
@@ -155,7 +154,7 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
     res.json({ items, total: items.length, plants: allowed, from, to });
   } catch (e) {
     console.error('[StockV2] report failed:', e);
-    res.status(500).json({ message: 'Could not load Stock (New)' });
+    res.status(500).json({ message: 'Could not load Stock Overview' });
   }
 });
 
@@ -176,7 +175,7 @@ router.get('/stock-v2/line/:id/days', requirePageAccess(PAGE), async (req: Reque
                 extra_sale_qty AS "extraSaleQty", transfer_in_qty AS "transferIn", transfer_out_qty AS "transferOut"
            FROM stock_v2_daily WHERE line_id = $1 ORDER BY stock_date DESC`, [id]),
       pool.query(
-        `SELECT id, stock_date::text AS date, kind, qty, reason, origin, source, created_by_code AS "by", created_at AS "at"
+        `SELECT id, stock_date::text AS date, kind, qty, reason, origin, source, created_by_code AS "by", (SELECT u.name FROM users u WHERE u.user_code = stock_v2_ledger.created_by_code LIMIT 1) AS "byName", created_at AS "at"
            FROM stock_v2_ledger WHERE line_id = $1 ORDER BY stock_date DESC, id DESC`, [id]),
     ]);
     res.json({ days: days.rows, ledger: ledger.rows });
@@ -186,47 +185,156 @@ router.get('/stock-v2/line/:id/days', requirePageAccess(PAGE), async (req: Reque
   }
 });
 
-// GET /api/stock-v2/compare — old live count vs the new line's Stock, per plant + barcode; only mismatches.
-router.get('/stock-v2/compare', requireAdminRole, async (_req: Request, res: Response) => {
+// DELETE /api/stock-v2/ledger/:id — admin: removes ONE correction (Adjust / Opening / Clear / Exchange) from the book, like the Delete entry on the
+// Stock Overview's Adjustments list. It only edits the ledger: the line's Stock (stock_qty) is NOT changed, so a stray or duplicate entry stops
+// counting toward Opening / Adjust / Total P & O without moving the stock that has already moved on since.
+router.delete('/stock-v2/ledger/:id', requireAdminRole, async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid entry id' });
   try {
     const { rows } = await pool.query(
-      `WITH old AS (
-         SELECT LOWER(plant) AS plant, LOWER(barcode) AS barcode, MAX(plant) AS plant_name, MAX(barcode) AS barcode_raw, SUM(in_stock)::int AS qty
-           FROM product_plant_stock GROUP BY 1,2
-       ), nw AS (
-         SELECT LOWER(plant) AS plant, LOWER(barcode) AS barcode, MAX(item_name) AS item_name, SUM(stock_qty)::int AS qty
-           FROM stock_v2_lines GROUP BY 1,2
-       )
-       SELECT COALESCE(old.plant_name, nw.plant) AS plant, COALESCE(old.barcode_raw, nw.barcode) AS barcode, nw.item_name AS "itemName",
-              COALESCE(old.qty,0) AS "oldQty", COALESCE(nw.qty,0) AS "newQty", COALESCE(nw.qty,0) - COALESCE(old.qty,0) AS diff
-         FROM old FULL JOIN nw ON old.plant = nw.plant AND old.barcode = nw.barcode
-        WHERE COALESCE(old.qty,0) <> COALESCE(nw.qty,0)
-        ORDER BY 1, 2`,
+      `DELETE FROM stock_v2_ledger d USING stock_v2_lines l
+        WHERE d.id = $1 AND l.id = d.line_id
+        RETURNING l.plant, l.barcode, l.item_name AS "itemName", d.qty, d.kind, d.reason`,
+      [id],
     );
-    const totals = await pool.query(
-      `SELECT (SELECT COUNT(*) FROM stock_v2_lines)::int AS lines, (SELECT COUNT(*) FROM product_plant_stock)::int AS "oldRows",
-              (SELECT last_rebuild_at FROM stock_v2_config WHERE id = 1) AS "lastRebuildAt"`,
-    );
-    res.json({ mismatches: rows, ...totals.rows[0], loadingUsesV2: await loadingUsesV2(pool) });
+    const gone = rows[0];
+    if (!gone) return res.status(404).json({ message: 'Entry not found' });
+    const u = req.user as any;
+    const userCode = u?.userCode ?? undefined;
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Stock Overview', action: 'delete', entityType: 'stock_v2_ledger', entityId: String(id),
+        details: `Deleted a ${gone.kind} entry for ${gone.itemName} (${gone.barcode}) at ${gone.plant} by ${u?.name ?? userCode}: ${gone.qty >= 0 ? '+' : ''}${gone.qty} (${gone.reason ?? 'no reason recorded'}). Stock was not changed.`,
+        userCode, userName: u?.name ?? userCode,
+      });
+    }
+    res.json({ success: true });
   } catch (e) {
-    console.error('[StockV2] compare failed:', e);
-    res.status(500).json({ message: 'Could not compare' });
+    console.error('[StockV2] delete ledger entry failed:', e);
+    res.status(500).json({ message: 'Could not delete this entry' });
   }
 });
 
-// POST /api/stock-v2/rebuild — admin: redo the one-time conversion from the old stock.
-router.post('/stock-v2/rebuild', requireAdminRole, async (req: Request, res: Response) => {
+// The line an admin action is about (locked), with its plant checked against the caller's plants.
+async function lockedLine(client: any, req: Request, id: number) {
+  const r = await client.query(`SELECT id, plant, barcode, item_name AS "itemName", stock_qty AS "stockQty" FROM stock_v2_lines WHERE id = $1 FOR UPDATE`, [id]);
+  const line = r.rows[0];
+  if (!line) return { error: { status: 404, message: 'Stock line not found' } };
+  const allowed = getUserPlants(req.user);
+  if (allowed !== null && !allowed.includes(String(line.plant).toLowerCase())) return { error: { status: 403, message: 'Access denied for this plant' } };
+  return { line };
+}
+const actorOf = (req: Request) => { const u = req.user as any; return { userCode: u?.userCode as string | undefined, userName: (u?.name || u?.username || u?.userCode) as string | undefined }; };
+
+// POST /api/stock-v2/line/:id/adjust — admin. body: { mode: 'add' | 'remove' | 'set', qty, expectedCurrentQty?, reason? }
+//   add / remove: qty is a positive amount; set: qty is the new Stock. expectedCurrentQty is the Stock the dialog showed - if it moved since
+//   (someone scanned meanwhile) the change is refused with 409 instead of applying a different one than previewed.
+//   Written as an 'adjust' correction on the book (shows in the Adjust column and as a Stock Adjust row in Scan History).
+router.post('/stock-v2/line/:id/adjust', requireAdminRole, async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const mode: 'add' | 'remove' | 'set' = req.body?.mode === 'add' || req.body?.mode === 'remove' ? req.body.mode : 'set';
+  const qty = Math.round(Number(req.body?.qty));
+  const rawExpected = req.body?.expectedCurrentQty;
+  const expected = rawExpected === undefined || rawExpected === null || rawExpected === '' ? null : Math.round(Number(rawExpected));
+  const reason = (typeof req.body?.reason === 'string' ? req.body.reason.trim() : '') || 'Manual adjustment (Stock)';
+  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid line' });
+  if (!Number.isFinite(qty) || qty < 0) return res.status(400).json({ message: 'Quantity must be a non-negative number' });
+  if (mode !== 'set' && qty === 0) return res.status(400).json({ message: 'Enter a quantity greater than 0' });
+  const { userCode, userName } = actorOf(req);
+  const client = await pool.connect();
   try {
-    const result = await rebuildStockV2((req.user as any)?.userCode ?? null);
-    res.json(result);
+    await client.query('BEGIN');
+    const got: any = await lockedLine(client, req, id);
+    if (got.error) { await client.query('ROLLBACK'); return res.status(got.error.status).json({ message: got.error.message }); }
+    const { line } = got;
+    const current = await lockLineStock(client, id);
+    if (expected !== null && Number.isFinite(expected) && expected !== current) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: `Stock for ${line.itemName} at ${line.plant} is now ${current} (it was ${expected} when you opened this). Check the new number and try again.`, currentTotal: current });
+    }
+    const next = mode === 'add' ? current + qty : mode === 'remove' ? current - qty : qty;
+    if (next < 0) { await client.query('ROLLBACK'); return res.status(400).json({ message: `Can't remove ${qty} — only ${current} in stock at ${line.plant}.` }); }
+    const delta = next - current;
+    await postAdjust(client, id, todayIst(), delta, { kind: 'adjust', source: 'manual', origin: 'page', reason, userCode: userCode ?? null });
+    await client.query('COMMIT');
+    if (userCode && delta !== 0) {
+      await storage.logActivity({
+        pageName: 'Stock Overview', action: 'update', entityType: 'stock_v2_line', entityId: String(id),
+        details: `Adjusted ${line.itemName} (${line.barcode}) at ${line.plant} by ${userName ?? userCode} (${mode}): ${current} -> ${next} (${delta >= 0 ? '+' : ''}${delta}). Reason: ${reason}`,
+        userCode, userName,
+      });
+    }
+    res.json({ success: true, previousQty: current, newQty: next, delta, plant: line.plant });
   } catch (e) {
-    console.error('[StockV2] rebuild failed:', e);
-    res.status(500).json({ message: 'Rebuild failed — nothing was changed' });
-  }
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[Stock] adjust failed:', e);
+    res.status(500).json({ message: 'Failed to adjust stock' });
+  } finally { client.release(); }
+});
+
+// POST /api/stock-v2/line/:id/clear — admin: takes this line's Stock to 0 with a 'clear' correction (the book keeps its history).
+router.post('/stock-v2/line/:id/clear', requireAdminRole, async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid line' });
+  const { userCode, userName } = actorOf(req);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const got: any = await lockedLine(client, req, id);
+    if (got.error) { await client.query('ROLLBACK'); return res.status(got.error.status).json({ message: got.error.message }); }
+    const { line } = got;
+    const current = await lockLineStock(client, id);
+    await postAdjust(client, id, todayIst(), -current, { kind: 'clear', source: 'clear', origin: 'page', reason: 'Clear Stock (Stock page)', userCode: userCode ?? null });
+    await client.query('COMMIT');
+    if (userCode && current !== 0) {
+      await storage.logActivity({
+        pageName: 'Stock Overview', action: 'update', entityType: 'stock_v2_line', entityId: String(id),
+        details: `Cleared ${line.itemName} (${line.barcode}) at ${line.plant} by ${userName ?? userCode}: ${current} -> 0.`, userCode, userName,
+      });
+    }
+    res.json({ success: true, previousQty: current, newQty: 0 });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[Stock] clear failed:', e);
+    res.status(500).json({ message: 'Failed to clear stock' });
+  } finally { client.release(); }
+});
+
+// DELETE /api/stock-v2/line/:id — admin: forgets the line completely - its days, its corrections and its links - and zeroes it. Scan entries
+// (Order Scan, Unloading, Loading) are NOT touched; their own void / reset flows own them. The line is made again, empty, the next time the item moves.
+router.delete('/stock-v2/line/:id', requireAdminRole, async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid line' });
+  const { userCode, userName } = actorOf(req);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const got: any = await lockedLine(client, req, id);
+    if (got.error) { await client.query('ROLLBACK'); return res.status(got.error.status).json({ message: got.error.message }); }
+    const { line } = got;
+    const days = await client.query(`DELETE FROM stock_v2_daily WHERE line_id = $1`, [id]);
+    const ledger = await client.query(`DELETE FROM stock_v2_ledger WHERE line_id = $1`, [id]);
+    await client.query(`DELETE FROM stock_v2_links WHERE line_id = $1`, [id]);
+    await client.query(`UPDATE stock_v2_lines SET stock_qty = 0, updated_at = now() WHERE id = $1`, [id]);
+    await client.query('COMMIT');
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Stock Overview', action: 'delete', entityType: 'stock_v2_line', entityId: String(id),
+        details: `Deleted the stock history of ${line.itemName} (${line.barcode}) at ${line.plant} by ${userName ?? userCode} — ${days.rowCount ?? 0} day row(s) and ${ledger.rowCount ?? 0} correction(s) removed; Stock was ${line.stockQty}.`,
+        userCode, userName,
+      });
+    }
+    res.json({ success: true, daysRemoved: days.rowCount ?? 0, correctionsRemoved: ledger.rowCount ?? 0 });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[Stock] delete line failed:', e);
+    res.status(500).json({ message: 'Failed to delete this item' });
+  } finally { client.release(); }
 });
 
 // ── Opening stock: only at a fresh start ──
-// Normally closed. Start fresh clears Stock (New) and opens a window dated D; entries set each line's
+// Normally closed. Start fresh clears Stock Overview and opens a window dated D; entries set each line's
 // opening figure (re-entering an item replaces it); Lock closes the window until the next fresh start.
 router.get('/stock-v2/opening', requirePageAccess(PAGE), async (_req: Request, res: Response) => {
   try { res.json(await getOpeningState(pool)); } catch (e) { res.status(500).json({ message: 'Could not read opening state' }); }
@@ -266,15 +374,6 @@ router.post('/stock-v2/opening/set', requireAdminRole, async (req: Request, res:
 router.post('/stock-v2/opening/lock', requireAdminRole, async (_req: Request, res: Response) => {
   try { await pool.query(`UPDATE stock_v2_config SET opening_open = false WHERE id = 1`); res.json(await getOpeningState(pool)); }
   catch (e) { res.status(500).json({ message: 'Could not lock' }); }
-});
-
-// POST /api/stock-v2/loading-source — body { useV2: boolean }: which stock Loading draws from. Admin only.
-// Stock (New) is always kept in step, so this can be flipped back at any time.
-router.post('/stock-v2/loading-source', requireAdminRole, async (req: Request, res: Response) => {
-  try {
-    await setLoadingUsesV2(req.body?.useV2 === true);
-    res.json({ loadingUsesV2: await loadingUsesV2(pool) });
-  } catch (e) { res.status(500).json({ message: 'Could not change the Loading stock source' }); }
 });
 
 export default router;

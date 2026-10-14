@@ -1704,7 +1704,7 @@ export default function OrderImport() {
                       key={name}
                       onClick={() => selectPlantTab(name)}
                       // Each pill keeps its Plant Management colour whether selected or not; the
-                      // selected one gets a navy ring (same treatment as Overall Stock / Proforma
+                      // selected one gets a navy ring (same treatment as Stock Overview / Proforma
                       // Slips) instead of turning solid navy and losing its colour.
                       style={c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
                       className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${

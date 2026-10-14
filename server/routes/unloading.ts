@@ -5,12 +5,11 @@ import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/p
 import { getPlantStateCode, resolvePalletSizeOrQty, getPalletSize, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
-import { postUnloadMovement } from '../lib/unloadStock';
+import { postUnloadMovement, scanDay, unloadStockLeft } from '../lib/unloadStock';
 import {
   computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId,
   computeUnloadDateReport, computeUnloadDateActivity,
 } from '../lib/unloadGroupReport';
-import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 
 // Unloading — vehicle-wise receiving. See unloadImportSessions' comment in shared/schema.ts:
@@ -1075,39 +1074,31 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
 
       // clientRequestId is recorded on only the FIRST of the (up to two) rows this attempt
       // produces — see loading.ts's identical comment for why.
+      // The purchase is booked on the day of the scan (not the CSV's order date).
+      const bookedDay = scanDay();
       let requestIdRecorded = false;
       const insertEvent = (totalQty: number, isExtra: boolean) => {
         const idForThisRow = requestIdRecorded ? null : clientRequestId;
         requestIdRecorded = true;
         return client.query(
           `INSERT INTO unload_scan_events
-             (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, client_request_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+             (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, client_request_id, booked_day)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::date)`,
           [
             id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
             itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
             itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-            totalQty, isExtra, stv, session.plant, session.vehicle_number, userCode ?? null, userName ?? null, idForThisRow,
+            totalQty, isExtra, stv, session.plant, session.vehicle_number, userCode ?? null, userName ?? null, idForThisRow, bookedDay,
           ],
         );
       };
       if (regularQty > 0) await insertEvent(regularQty, false);
       if (extraQty > 0) await insertEvent(extraQty, true);
 
-      // If this product's barcode changed since stock was last received under an old one, fold
-      // it onto this barcode first — see stockBarcodeReconcile.ts.
-      await reconcileProductPlantStockBarcode(client, product?.id, session.plant, barcode);
-      await client.query(
-        `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty)
-         VALUES ($1,$2,$3,$4,0)
-         ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
-        [barcode, product?.id ?? null, session.plant, qty],
-      );
-      // One row at the one plant — or, when the batch has a separate purchase plant, the purchase row
-      // plus the transfer pair (see server/lib/unloadStock.ts). The live count above is unchanged.
+      // One purchase at the one plant - or, when the batch has a separate purchase plant, the purchase plus the transfer pair (see server/lib/unloadStock.ts).
       await postUnloadMovement(client, {
         sessionId: id, barcode, productId: product?.id ?? null, qty, extraQty, type: 'receive',
-        reason: `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, userCode: userCode ?? null,
+        reason: `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, userCode: userCode ?? null, day: bookedDay,
       });
       await client.query('COMMIT');
     } catch (err) {
@@ -1319,27 +1310,23 @@ router.delete('/unloading/sessions/:id', requireUnloadingDeleteAccess, async (re
 
     const stockReversed: Array<{ barcode: string; qty: number }> = [];
     if (discard) {
+      // Per barcode AND booked day: each day's scans are taken back on that same day (an older scan with no booked day keeps the old rule).
       const { rows: received } = await client.query(
-        `SELECT barcode, SUM(total_qty)::int AS qty
+        `SELECT barcode, to_char(booked_day, 'YYYY-MM-DD') AS day, SUM(total_qty)::int AS qty
          FROM unload_scan_events WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
-         GROUP BY barcode HAVING SUM(total_qty) <> 0`,
+         GROUP BY barcode, to_char(booked_day, 'YYYY-MM-DD') HAVING SUM(total_qty) <> 0
+         ORDER BY barcode, 2 NULLS FIRST`,
         [id],
       );
+      const stockLeft = new Map<string, number>();
       for (const r of received) {
-        const { rows: plantRows } = await client.query(
-          `SELECT in_stock, product_id FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-          [r.barcode, session.plant],
-        );
-        const actualQty = Math.min(r.qty, Number(plantRows[0]?.in_stock ?? 0));
+        if (!stockLeft.has(r.barcode)) stockLeft.set(r.barcode, await unloadStockLeft(client, id, r.barcode));
+        const actualQty = Math.min(r.qty, stockLeft.get(r.barcode)!);
         if (actualQty <= 0) continue;
-        const productId = plantRows[0]?.product_id ?? null;
-        await client.query(
-          `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
-          [actualQty, r.barcode, session.plant],
-        );
+        stockLeft.set(r.barcode, stockLeft.get(r.barcode)! - actualQty);
         await postUnloadMovement(client, {
-          sessionId: id, barcode: r.barcode, productId, qty: -actualQty, type: 'adjust',
-          reason: 'Unloading CSV deleted — rollback', userCode: userCode ?? null,
+          sessionId: id, barcode: r.barcode, qty: -actualQty, type: 'adjust',
+          reason: 'Unloading CSV deleted - rollback', userCode: userCode ?? null, day: r.day ?? null,
         });
         stockReversed.push({ barcode: r.barcode, qty: actualQty });
       }
@@ -1427,7 +1414,7 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows: eventRows } = await client.query(`SELECT * FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const { rows: eventRows } = await client.query(`SELECT *, to_char(booked_day, 'YYYY-MM-DD') AS booked_day_s FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
     const event = eventRows[0];
     if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Scan event not found' }); }
     if (!canAccessPlant(req, event.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Access denied for this plant' }); }
@@ -1437,31 +1424,21 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
     let product: any = null;
     if (qty > 0 && event.plant && event.barcode) {
       product = await storage.getProductByBarcode(event.barcode, event.plant);
-      await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-      // Voiding a receive removes stock (the mirror of adding it) — but if those boxes have
-      // already been consumed elsewhere (loaded out, etc.) since they were received, there
-      // isn't enough left to take back. Reject rather than letting the pool go negative.
-      const { rows: stockRows } = await client.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-        [event.barcode, event.plant],
-      );
-      const currentStock = Number(stockRows[0]?.inStock ?? 0);
+      // Voiding a receive removes stock (the mirror of adding it) - but if those boxes have already been used elsewhere (loaded out, etc.)
+      // since they were received, there isn't enough left to take back. Reject rather than letting the line go negative.
+      const currentStock = await unloadStockLeft(client, event.session_id, event.barcode);
       if (currentStock < qty) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           message: `Can't undo this — only ${currentStock} of these boxes are still in stock (${qty} were received here); the rest are already used elsewhere.`,
         });
       }
-      await client.query(
-        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
-        [qty, event.barcode, event.plant],
-      );
       // origin = 'void' — same reasoning as Order Scan's own void (see reverseLiveScanStock in
-      // server/lib/orderGroupReport.ts): lets Overall Stock fold this back into Purchase instead
+      // server/lib/orderGroupReport.ts): lets Stock Overview fold this back into Purchase instead
       // of Adjust, always in the same period as the receive it's reversing (same session_id).
       await postUnloadMovement(client, {
         sessionId: event.session_id, barcode: event.barcode, productId: product?.id ?? null, qty: -qty, type: 'adjust', origin: 'void',
-        reason: reason ?? 'Unloading scan voided', userCode: userCode ?? null,
+        reason: reason ?? 'Unloading scan voided', userCode: userCode ?? null, day: event.booked_day_s ?? null,
       });
     }
     await client.query(
@@ -1517,7 +1494,7 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows: eventRows } = await client.query(`SELECT * FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const { rows: eventRows } = await client.query(`SELECT *, to_char(booked_day, 'YYYY-MM-DD') AS booked_day_s FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
     const event = eventRows[0];
     if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Scan event not found' }); }
     if (!canAccessPlant(req, event.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Access denied for this plant' }); }
@@ -1546,25 +1523,16 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
 
     // Reverse the old qty's stock — same direction the void handler above uses. Same guard too:
     // if these boxes are already used elsewhere, there isn't enough left to take back.
-    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-    const { rows: stockRows } = await client.query(
-      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-      [event.barcode, event.plant],
-    );
-    const currentStock = Number(stockRows[0]?.inStock ?? 0);
+    const currentStock = await unloadStockLeft(client, event.session_id, event.barcode);
     if (currentStock < oldQty) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         message: `Can't correct this — only ${currentStock} of these boxes are still in stock (${oldQty} were received here); the rest are already used elsewhere.`,
       });
     }
-    await client.query(
-      `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
-      [oldQty, event.barcode, event.plant],
-    );
     await postUnloadMovement(client, {
       sessionId: event.session_id, barcode: event.barcode, productId: product?.id ?? null, qty: -oldQty, type: 'adjust',
-      reason: `Qty correction — old scan reversed (edited by ${editorLabel})`, userCode: userCode ?? null,
+      reason: `Qty correction — old scan reversed (edited by ${editorLabel})`, userCode: userCode ?? null, day: event.booked_day_s ?? null,
     });
 
     await client.query(
@@ -1594,29 +1562,22 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
       // is_adjust: this is a qty correction, not a fresh scan — shown as "Unload Adjust".
       // Original scan time kept, correction time recorded — same as Order Scan and Loading.
       `INSERT INTO unload_scan_events
-         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at, adjusted_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),NOW())`,
+         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at, adjusted_at, booked_day)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),NOW(),$15::date)`,
       [
         event.session_id, event.barcode, event.item_name, event.sap_code,
         itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
         itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
         totalQty, isExtra, hasStv ? newStv : event.stv, event.plant, event.vehicle_number,
-        event.scanned_by_code, event.scanned_by_name, event.scanned_at,
+        event.scanned_by_code, event.scanned_by_name, event.scanned_at, event.booked_day_s ?? null,
       ],
     );
     if (regularQty > 0) await insertEvent(regularQty, false);
     if (extraQty > 0) await insertEvent(extraQty, true);
 
-    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-    await client.query(
-      `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
-       VALUES ($1,$2,$3,$4,0,NOW())
-       ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
-      [event.barcode, product?.id ?? null, event.plant, newQty],
-    );
     await postUnloadMovement(client, {
       sessionId: event.session_id, barcode: event.barcode, productId: product?.id ?? null, qty: newQty as number, extraQty, type: 'adjust',
-      reason: `Qty corrected (edited by ${editorLabel})`, userCode: userCode ?? null,
+      reason: `Qty corrected (edited by ${editorLabel})`, userCode: userCode ?? null, day: event.booked_day_s ?? null,
     });
 
     // This correction just changed how much of this barcode is "scanned" for this session —

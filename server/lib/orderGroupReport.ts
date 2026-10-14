@@ -2,7 +2,6 @@ import { db, pool } from '../db';
 import { v2Purchase } from './stockV2';
 import { orderImportSessions, orderImportItems } from '../../shared/schema';
 import { eq, and, asc, inArray } from 'drizzle-orm';
-import { reconcileProductPlantStockBarcode } from './stockBarcodeReconcile';
 
 // Shared by order-import.ts (the report endpoint) and order-scan.ts (the live
 // "already covered by an earlier part" credit shown while scanning) — kept in its
@@ -348,98 +347,11 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
   };
 }
 
-// Adds a completed session's physically-received boxes to stock, exactly once. Writes THREE
-// places atomically (all on the caller's transaction client, guarded by stock_applied_at +
-// a row lock so a retried /complete can't double-count):
-//   1. products.in_stock          — global all-plants running total (backward compat).
-//   2. product_plant_stock         — plant-wise running total for THIS session's plant, split
-//                                    into in_stock (all boxes, extras included) + extra_qty
-//                                    (the over-order portion, shown separately, never hidden).
-//   3. stock_movements             — one append-only 'receive' ledger row per barcode.
-// "Received" per barcode = SUM(total_qty) over all non-voided events (covers CSV lines incl.
-// over-scan AND pure extras). "Extra" per barcode = SUM(total_qty) WHERE is_extra — because
-// every scan is split at scan time into a regular event (is_extra=false, capped at the order
-// qty) and an extra event (is_extra=true, the overflow), so is_extra already IS the raw extra.
-// Barcodes with no matching product row still get plant stock + a movement (an extra that
-// isn't in the catalogue is still a physical box), but are skipped for the global products
-// update. Returns the number of barcodes that moved stock (0 if already applied / nothing scanned).
-export async function applySessionStock(client: import('pg').PoolClient, sessionId: number): Promise<number> {
-  // Lock the session row and re-check the guard inside the lock. Also grab the plant.
-  const guard = await client.query(
-    'SELECT stock_applied_at, plant FROM order_import_sessions WHERE id = $1 FOR UPDATE',
-    [sessionId],
-  );
-  if (guard.rows.length === 0 || guard.rows[0].stock_applied_at != null) return 0;
-  const plant: string = guard.rows[0].plant;
-
-  // Per-barcode received + extra for this session. Barcodes are numeric here so the raw
-  // string equals its lowercase — MAX(barcode) picks a canonical spelling per group. Grouped
-  // by TRIM()med barcode too — a stray whitespace-padded scan (barcode gun double-fire, a
-  // camera decode glitch) would otherwise group as its OWN barcode and later become a second,
-  // orphaned product_plant_stock row instead of adding to the real one.
-  const { rows: received } = await client.query(
-    `SELECT MAX(TRIM(barcode)) AS barcode,
-            SUM(total_qty)::int AS qty,
-            COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
-     FROM order_scan_events
-     WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
-       AND barcode <> 'EMPTY_BOX'
-     GROUP BY LOWER(TRIM(barcode))
-     HAVING SUM(total_qty) <> 0`,
-    [sessionId],
-  );
-
-  for (const r of received) {
-    // 1. Global all-plants total (only for barcodes that exist in the catalogue). RETURNING id
-    //    so the same product row's stable id (rather than its barcode, which can be edited in
-    //    Notion later and silently orphan a barcode-only join) is recorded on the stock rows
-    //    below too.
-    const { rows: productRows } = await client.query(
-      `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1
-       WHERE LOWER(barcode) = LOWER($2)
-       RETURNING id`,
-      [r.qty, r.barcode],
-    );
-    const productId = productRows[0]?.id ?? null;
-
-    // 2. Plant-wise running total (upsert; extras tracked alongside the physical total).
-    // product_id is only ever set from empty/NULL on conflict — an existing row's link to its
-    // product must never be overwritten by a later scan of the same barcode under a different
-    // (possibly stale) product_id.
-    await client.query(
-      `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (barcode, plant) DO UPDATE
-         SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
-             extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
-             product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
-             updated_at = NOW()`,
-      [r.barcode, productId, plant, r.qty, r.extra_qty],
-    );
-
-    // 3. Append-only ledger row (positive = received). Future dispatch inserts negatives.
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, 'receive', 'Order scan completed', $6, NOW())`,
-      [r.barcode, productId, plant, r.qty, r.extra_qty, sessionId],
-    );
-  }
-
-  await client.query(
-    'UPDATE order_import_sessions SET stock_applied_at = $1 WHERE id = $2',
-    [new Date(), sessionId],
-  );
-  return received.length;
-}
-
-// Applies ONE physical scan's stock delta immediately, instead of waiting for the session
-// to complete. Called once per scan request with the real order/extra split determined by
-// the sequential cross-part resolver in order-scan.ts's /scan handler — never once per
-// bookkeeping event. That distinction matters because a single scan can now generate TWO
-// report-level events (an Extra logged against the current "front" part plus a Scanned
-// logged against whichever later part actually matched, per the dual-logging rule); both
-// describe the same physical box, so stock must only move once for it. `sessionId` here is
-// only used as the stock_movements ledger's reference column, not as an aggregation scope.
+// Applies ONE physical scan's stock delta immediately, instead of waiting for the session to complete. Called once per scan request with the real
+// order/extra split determined by the sequential cross-part resolver in order-scan.ts's /scan handler - never once per bookkeeping event. That
+// distinction matters because a single scan can generate TWO report-level events (an Extra logged against the current "front" part plus a Scanned
+// logged against whichever later part actually matched); both describe the same physical box, so stock must only move once for it.
+// The stock is Stock Overview: a purchase at the plant's line for the barcode, on the CSV's day. `sessionId` picks the CSV (its day and its SAP code).
 export async function applyLiveScanStock(
   client: import('pg').PoolClient,
   plant: string,
@@ -448,50 +360,14 @@ export async function applyLiveScanStock(
   extraQty: number,
   sessionId: number,
 ): Promise<void> {
-  // Trimmed defensively — the /scan endpoint that's the normal caller already trims at its own
-  // boundary, but this is also the exact function whose ON CONFLICT (barcode, plant) upsert
-  // creates a second, orphaned product_plant_stock row for any caller that doesn't.
   barcode = barcode.trim();
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
-
-  const { rows: productRows } = await client.query(
-    `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
-    [totalQty, barcode],
-  );
-  const productId = productRows[0]?.id ?? null;
-
-  // If this product's barcode changed since an earlier scan (e.g. the Notion sync overwriting
-  // it), fold any stock still parked under the old barcode onto this one first — otherwise the
-  // upsert below would start a second, disconnected pile under the new barcode instead of
-  // adding to what's already there. See stockBarcodeReconcile.ts.
-  await reconcileProductPlantStockBarcode(client, productId, plant, barcode);
-
-  await client.query(
-    `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())
-     ON CONFLICT (barcode, plant) DO UPDATE
-       SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
-           extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
-           product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
-           updated_at = NOW()`,
-    [barcode, productId, plant, totalQty, extraQty],
-  );
-
-  await client.query(
-    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-     VALUES ($1, $2, $3, $4, $5, 'receive', 'Order scan', $6, NOW())`,
-    [barcode, productId, plant, totalQty, extraQty, sessionId],
-  );
-  // Stock (New): the same purchase, on the CSV's day.
   await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: totalQty, extraQty });
 }
 
-// Reverses applyLiveScanStock — used when an admin voids a mistaken scan. Subtracts back out
-// exactly what the original scan added; never edits or deletes that original 'receive' row,
-// so stock_movements stays a true append-only audit trail (a logged 'adjust' entry explains
-// the change instead). Clamped at 0 with GREATEST so a data inconsistency elsewhere can't push
-// a plant's stock negative.
+// Reverses applyLiveScanStock - used when an admin voids a mistaken scan. Takes back out of the same day's purchase exactly what the original scan
+// added. Callers check the boxes are still in stock first (see the void / edit handlers in order-scan.ts).
 export async function reverseLiveScanStock(
   client: import('pg').PoolClient,
   plant: string,
@@ -503,36 +379,6 @@ export async function reverseLiveScanStock(
   barcode = barcode.trim();
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
-
-  const { rows: productRows } = await client.query(
-    `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
-    [totalQty, barcode],
-  );
-  const productId = productRows[0]?.id ?? null;
-
-  // Backfills product_id here too when it's still missing on this row (an older row from
-  // before this column existed, or one whose original insert somehow couldn't resolve it) -
-  // free to do opportunistically since this UPDATE already has the barcode/plant to key on.
-  await client.query(
-    `UPDATE product_plant_stock
-     SET in_stock  = GREATEST(0, in_stock  - $1),
-         extra_qty = GREATEST(0, extra_qty - $2),
-         product_id = COALESCE(product_plant_stock.product_id, $5),
-         updated_at = NOW()
-     WHERE LOWER(barcode) = LOWER($3) AND LOWER(plant) = LOWER($4)`,
-    [totalQty, extraQty, barcode, plant, productId],
-  );
-
-  // origin = 'void' — lets the Overall Stock report (server/routes/scan-sessions.ts,
-  // /reports/plant-stock) fold this back into Purchase instead of Adjust: this row always shares
-  // the original scan's session_id, so it's always dated into the SAME period as the purchase
-  // it's reversing — never a stray negative number landing in some unrelated period.
-  await client.query(
-    `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, origin, created_at)
-     VALUES ($1, $2, $3, $4, $5, 'adjust', 'Voided scan', $6, 'void', NOW())`,
-    [barcode, productId, plant, -totalQty, -extraQty, sessionId],
-  );
-  // Stock (New): taken back out of the same day's purchase.
   await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: -totalQty, extraQty: -extraQty });
 }
 

@@ -669,6 +669,8 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   voidedByCode: text("voided_by_code").references(() => users.userCode),
   voidedAt: timestamp("voided_at"),
   voidReason: text("void_reason"),
+  // The Stock Overview line this entry took its boxes from, so a void / edit / reset gives them back to exactly that line.
+  stockLineId: integer("stock_line_id"),
   // A UUID the CLIENT generates once per scan attempt and resends unchanged on every retry of
   // that same attempt — the offline queue's safety net. Without this, a scan queued while
   // offline that actually reached the server but whose response was lost to a flaky connection
@@ -1568,7 +1570,7 @@ export const insertBackupSettingsSchema = createInsertSchema(backupSettings).pic
 });
 
 // Single-row settings table — same pattern as backupSettings above. Currently holds just the
-// Sales tracking start date (Overall Stock's ledger: proforma data before this date isn't
+// Sales tracking start date (Stock Overview's ledger: proforma data before this date isn't
 // reliable, so the "all dates" Sales total starts counting from here instead of the true
 // beginning — see SALES_TRACKING_START's old hardcoded home in server/routes/scan-sessions.ts).
 // Room to grow if another admin-editable, no-code-change setting shows up later.
@@ -1675,67 +1677,6 @@ export type LoadingOpItemBackup = typeof loadingOpItemsBackup.$inferSelect;
 export type LoadingOperationBackup = typeof loadingOperationsBackup.$inferSelect;
 export type ProformaSlipBackup = typeof proformaSlipsBackup.$inferSelect;
 export type ProformaSlipItemBackup = typeof proformaSlipItemsBackup.$inferSelect;
-
-// ============================================================================
-// PRODUCT PLANT STOCK  — plant-wise running stock totals
-// Purpose : One row per (barcode, plant). The live plant-wise stock count.
-//           inStock = all boxes physically received for that plant (extras
-//           included). extraQty = how many of those arrived beyond the ordered
-//           quantity (shown separately in Overall Stock, never hidden/netted).
-//           Written by applySessionStock() on order completion; global
-//           products.in_stock stays the all-plants sum for backward compat.
-// Design  : Additive today (receiving only). A future dispatch/out flow will
-//           decrement inStock and log a negative stock_movements row — the
-//           table shape already supports that with no rework.
-// ============================================================================
-export const productPlantStock = pgTable("product_plant_stock", {
-  id: serial("id").primaryKey(),
-  barcode: text("barcode").notNull(),
-  // Stable link to the product row, alongside barcode — a product's barcode can be edited in
-  // Notion and synced in (notionInventorySync.ts matches/updates existing products by
-  // notionPageId, not barcode, and overwrites barcode when it differs), which silently orphans
-  // any stock already recorded under the old barcode from a barcode-only join. product_id
-  // survives that rename since it never changes. Nullable/no FK constraint: older rows written
-  // before this column existed won't have it until backfilled, and a product can be deleted
-  // without needing to touch historical stock rows.
-  productId: integer("product_id"),
-  plant: text("plant").notNull(),
-  inStock: integer("in_stock").default(0).notNull(),
-  extraQty: integer("extra_qty").default(0).notNull(),
-  updatedAt: timestamp("updated_at").defaultNow(),
-}, (t) => ({
-  uniqBarcodePlant: unique("uq_product_plant_stock_barcode_plant").on(t.barcode, t.plant),
-}));
-
-// ============================================================================
-// STOCK MOVEMENTS  — append-only ledger of every change to plant stock
-// Purpose : Full in/out history per plant. qty is +received (today) and will be
-//           −dispatched once the future out-flow is added. Gives an audit trail
-//           and makes future subtraction trivial (just insert a negative row).
-// ============================================================================
-export const stockMovements = pgTable("stock_movements", {
-  id: serial("id").primaryKey(),
-  barcode: text("barcode").notNull(),
-  // Same reasoning as product_plant_stock.productId above — a stable id alongside barcode so a
-  // later barcode edit in Product Master/Notion can't orphan this row's link to its product.
-  productId: integer("product_id"),
-  plant: text("plant").notNull(),
-  qty: integer("qty").notNull(),                 // +received / −sent (future)
-  extraQty: integer("extra_qty").default(0),     // portion of qty that was extra (over-order)
-  type: text("type").notNull(),                  // 'receive' | 'dispatch' | 'adjust' | 'exchange'
-  reason: text("reason"),
-  // Who/what wrote an 'adjust' row. 'manual' = a person's Add/Remove/Set on Overall Stock's
-  // Adjust dialog (server/routes/plant-stock-admin.ts) — the only adjustments Scan History lists.
-  // Null for system-written rows (void rollbacks, Clear Stock, CSV edits…), which already appear
-  // as their own events elsewhere; the free-text reason can't tell the two apart.
-  source: text("source"),
-  sessionId: integer("session_id"),              // order_import_sessions.id when from a scan completion
-  createdByCode: text("created_by_code"),
-  createdAt: timestamp("created_at").defaultNow(),
-});
-
-export type ProductPlantStock = typeof productPlantStock.$inferSelect;
-export type StockMovement = typeof stockMovements.$inferSelect;
 
 // ============================================================================
 // STOCK (NEW) — plant-wise stock lines and the day-by-day book (server/lib/stockV2.ts).

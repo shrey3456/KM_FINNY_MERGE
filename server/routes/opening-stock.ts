@@ -3,19 +3,12 @@ import { v2Adjust } from '../lib/stockV2';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
-import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
 
-// Settings > Data Management > "Opening Stock" — ADDS each barcode's quantity onto the plant's
-// CURRENT stock (product_plant_stock.in_stock), exactly like a real receipt would, but tagged so
-// Stock Overview's own ledger (server/routes/scan-sessions.ts) attributes it to Opening Stock
-// instead of Purchase. This is additive, never an absolute override — re-importing adds MORE on
-// top of whatever's already there, it never resets a barcode to a fixed number (Order Scan/
-// Unloading add via scan events the exact same way; Clear Stock, which zeroes everything, is the
-// one actually-destructive action in this group). Dated "as of" whichever day was actually
-// counted (defaults to today) — each stock_movements row (origin='opening') is dated the day
-// BEFORE that pick (see dayBefore below), the same way a plain accounting Opening Balance works,
-// so the report picks it up as Opening for any period starting on or after that date. Admin-only,
-// same severity class as Clear Stock.
+// Settings > Data Management > "Opening Stock" - ADDS each barcode's quantity onto the plant's CURRENT stock on Stock Overview, exactly like a real
+// receipt would, but recorded as an 'opening' correction so the Stock page attributes it to Opening instead of Purchase. This is additive, never an
+// absolute override - re-importing adds MORE on top of whatever is already there. Dated "as of" whichever day was actually counted (defaults to
+// today): the correction is booked the day BEFORE that pick (see dayBefore below), the same way a plain accounting Opening Balance works, so the
+// report picks it up as Opening for any period starting on or after that date. Admin-only, same severity class as Clear Stock.
 const router = Router();
 
 function actor(req: Request): { userCode?: string; userName?: string } {
@@ -62,7 +55,7 @@ router.post('/opening-stock/preview', requireAdminRole, async (req: Request, res
 
     const barcodes = [...new Set(rows.map((r) => r.barcode))];
     const { rows: existingRows } = await pool.query(
-      `SELECT barcode, in_stock FROM product_plant_stock WHERE plant = $1 AND barcode = ANY($2::text[])`,
+      `SELECT barcode, SUM(stock_qty)::int AS in_stock FROM stock_v2_lines WHERE LOWER(plant) = LOWER($1) AND barcode = ANY($2::text[]) GROUP BY barcode`,
       [plant, barcodes],
     );
     const existingByBarcode = new Map<string, number>(existingRows.map((r: any) => [r.barcode, Number(r.in_stock ?? 0)]));
@@ -100,40 +93,12 @@ router.post('/opening-stock/import', requireAdminRole, async (req: Request, res:
 
     let rowsSet = 0;
     for (const row of rows) {
-      const product = await storage.getProductByBarcode(row.barcode, plant);
-      // Fold any stock still parked under a stale (old) barcode for this product into the
-      // current one first — otherwise an addition below would land on the old barcode's row
-      // while everything else already reads the new one. See stockBarcodeReconcile.ts.
-      await reconcileProductPlantStockBarcode(client, product?.id, plant, row.barcode);
-
-      // Additive — same as a real receipt (Order Scan/Unloading): ADDS row.quantity onto
-      // whatever is already here, never resets it to an absolute number.
-      await client.query(
-        `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty)
-         VALUES ($1,$2,$3,$4,0)
-         ON CONFLICT (barcode, plant) DO UPDATE
-           SET in_stock = product_plant_stock.in_stock + $4,
-               product_id = COALESCE(product_plant_stock.product_id, $2), updated_at = NOW()`,
-        [row.barcode, product?.id ?? null, plant, row.quantity],
-      );
-      // Same addition, recorded on the ledger — origin='opening', qty is a plain additive delta
-      // like every other stock_movements row, dated effectiveDate so Stock Overview's period
-      // math attributes it to Opening Stock instead of Purchase/Adjust.
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, created_by_code, origin, created_at)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,'opening',$7::date)`,
-        [row.barcode, product?.id ?? null, plant, row.quantity, 'Opening stock import (Settings)', userCode ?? null, effectiveDate],
-      );
-      await v2Adjust(client, { plant, barcode: row.barcode, qty: row.quantity, kind: 'opening', reason: 'Opening stock import (Settings)', userCode, date: effectiveDate });
+      // Additive - same as a real receipt (Order Scan/Unloading): ADDS row.quantity onto whatever is already here.
+      if (row.quantity > 0) {
+        await v2Adjust(client, { plant, barcode: row.barcode, qty: row.quantity, kind: 'opening', reason: 'Opening stock import (Settings)', userCode, date: effectiveDate });
+      }
       rowsSet++;
     }
-
-    // Recompute the legacy cross-plant mirror, same convention as Clear Stock.
-    await client.query(
-      `UPDATE products p
-       SET in_stock = COALESCE((SELECT SUM(pps.in_stock) FROM product_plant_stock pps WHERE pps.barcode = p.barcode), 0)
-       WHERE EXISTS (SELECT 1 FROM product_plant_stock pps WHERE pps.barcode = p.barcode)`,
-    );
 
     await client.query('COMMIT');
 

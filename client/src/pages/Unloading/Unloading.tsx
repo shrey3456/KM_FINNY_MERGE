@@ -249,7 +249,7 @@ export default function Unloading() {
   const allSessions = sessionsQuery.data?.sessions ?? [];
   const total = sessionsQuery.data?.total ?? 0;
 
-  // Same filter engine and UI as Overall Stock / Scan History / Scan Viewer: a "+ Filter" button,
+  // Same filter engine and UI as Stock Overview / Scan History / Scan Viewer: a "+ Filter" button,
   // a filter icon on each column header, and removable chips. Applied client-side over the page
   // already fetched — plant/vehicle/date/status tab still go to the server as before.
   // "Ready" vs "Locked (queued)" splits available batches the same way the row's own button does:
@@ -1113,7 +1113,7 @@ export default function Unloading() {
   };
 
   // Item table columns — DataTable gives column resizing, its own search box, and expandable
-  // rows for free (client/src/components/ui/data-table), same component Order Scan/Overall Stock
+  // rows for free (client/src/components/ui/data-table), same component Order Scan/Stock Overview
   // use for their own item tables.
   // Widths kept compact (total ~660px, close to Order Scan's own kiosk table's 640px) so the
   // rotated/kiosk view never needs horizontal scrolling — DataTable floors the table at the sum
