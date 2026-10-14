@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { drawPdfHeader, drawPdfFooter, greenTotalRow, setPdfProperties } from "./pdfBranding";
 
 export type ExportCell = string | number | null | undefined;
 
@@ -49,19 +50,10 @@ export function downloadExcel(filename: string, rows: ExportCell[][], sheetName 
 export function downloadPdf(filename: string, title: string, rows: ExportCell[][], subtitle?: string) {
   const [header, ...body] = clean(rows);
   const doc = new jsPDF({ orientation: "landscape" });
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 12;
 
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(14);
-  doc.setTextColor(...HEAD_TEXT);
-  doc.text(title, margin, 14);
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(8);
-  doc.setTextColor(110, 118, 130);
-  doc.text(subtitle ?? "", margin, 19);
-  doc.text(`Generated ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`, pageWidth - margin, 14, { align: "right" });
+  setPdfProperties(doc, title, subtitle);
+  const startY = drawPdfHeader(doc, { title, subtitle, margin });
 
   const columnStyles: Record<number, { halign: "right" }> = {};
   (header ?? []).forEach((cell, i) => {
@@ -71,21 +63,16 @@ export function downloadPdf(filename: string, title: string, rows: ExportCell[][
   autoTable(doc, {
     head: [(header ?? []) as string[]],
     body: body as string[][],
-    startY: 23,
+    startY,
     theme: "grid",
     margin: { left: margin, right: margin },
     styles: { fontSize: 7.5, cellPadding: 2, lineColor: RULE, lineWidth: 0.1, textColor: [40, 48, 60], overflow: "linebreak" },
     headStyles: { fillColor: HEAD_FILL, textColor: HEAD_TEXT, fontStyle: "bold", halign: "left" },
     alternateRowStyles: { fillColor: STRIPE_FILL },
     columnStyles,
+    didParseCell: greenTotalRow,
   });
 
-  const pageCount = doc.getNumberOfPages();
-  for (let page = 1; page <= pageCount; page++) {
-    doc.setPage(page);
-    doc.setFontSize(8);
-    doc.setTextColor(150, 156, 166);
-    doc.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 7, { align: "right" });
-  }
+  drawPdfFooter(doc, margin);
   doc.save(filename);
 }

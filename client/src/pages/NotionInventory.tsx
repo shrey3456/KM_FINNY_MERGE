@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import Papa from "papaparse";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { drawPdfHeader, drawPdfFooter, setPdfProperties } from "@/lib/pdfBranding";
 import {
   AlertTriangle,
   ArrowDown,
@@ -582,19 +583,20 @@ export default function NotionInventory() {
   }
 
   function exportPdf() {
-    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a3" });
-    doc.setFontSize(14);
-    doc.text("Product Master", 40, 32);
-    doc.setFontSize(9);
-    doc.text(`Exported ${new Date().toLocaleString()} · ${filteredProducts.length} products`, 40, 48);
+    const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a3" });
+    const subtitle = `${filteredProducts.length} products`;
+    setPdfProperties(doc, "Product Master", subtitle);
+    const startY = drawPdfHeader(doc, { title: "Product Master", subtitle, margin: 14 });
     autoTable(doc, {
       head: [productColumns.map((c) => c.label)],
       body: filteredProducts.map((p) => productColumns.map((col) => cellValue(p, col.key))),
-      startY: 58,
-      styles: { fontSize: 6.5, cellPadding: 2 },
+      startY,
+      margin: { left: 14, right: 14 },
+      styles: { fontSize: 6.5, cellPadding: 0.8 },
       headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold" },
       alternateRowStyles: { fillColor: [248, 250, 252] },
     });
+    drawPdfFooter(doc, 14);
     doc.save(`products-${new Date().toISOString().slice(0, 10)}.pdf`);
   }
 

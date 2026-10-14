@@ -40,7 +40,8 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
     const { rows } = await pool.query(
       `SELECT l.id, l.plant, l.state, l.barcode, l.item_name AS "itemName", l.sap_code AS "sapCode",
               l.sap_is_fallback AS "sapIsFallback", COALESCE(NULLIF(TRIM(pm.new_sr), ''), l.sr_no) AS "srNo", l.brand, l.category,
-              l.pallet_size AS "palletSize", l.stock_qty AS "stock",
+              COALESCE(NULLIF(CASE UPPER(COALESCE(l.state,'')) WHEN 'GJ' THEN pm.gj_plt WHEN 'MP' THEN pm.mp_plt END, 0), NULLIF(l.pallet_size, 0)) AS "palletSize",
+              l.stock_qty AS "stock",
               COALESCE(d.opening,0)::int + COALESCE(a.opening,0)::int AS "openingStock",
               COALESCE(d.purchase,0)::int AS "purchaseQty", COALESCE(d.xpurchase,0)::int AS "extraPurchaseQty",
               COALESCE(d.sale,0)::int AS "saleQty", COALESCE(d.xsale,0)::int AS "extraSaleQty",
@@ -123,7 +124,7 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
     if (missing.length) {
       const bcs = [...new Set(missing.map((k) => k.split('|')[1]))];
       const pr = await pool.query(
-        `SELECT DISTINCT ON (LOWER(barcode)) LOWER(barcode) AS bc, barcode, name, brand, category, new_sr, COALESCE(gj_sap, mp_sap, sap_code) AS sap
+        `SELECT DISTINCT ON (LOWER(barcode)) LOWER(barcode) AS bc, barcode, name, brand, category, new_sr, gj_plt, mp_plt, COALESCE(gj_sap, mp_sap, sap_code) AS sap
            FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY LOWER(barcode), id`, [bcs]);
       const byBc = new Map<string, any>(pr.rows.map((r: any) => [r.bc, r]));
       const nameOf = new Map<string, any>(plantRows.rows.map((p: any) => [String(p.name).toLowerCase(), p]));
@@ -134,7 +135,7 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
         if (!p || !pt) continue;
         extraRows.push({
           id: null, plant: pt.name, state: pt.state, barcode: p.barcode, itemName: p.name, sapCode: p.sap, sapIsFallback: false,
-          srNo: p.new_sr, brand: p.brand, category: p.category, palletSize: null, stock: 0, openingStock: 0, purchaseQty: 0,
+          srNo: p.new_sr, brand: p.brand, category: p.category, palletSize: (String(pt.state ?? '').toUpperCase() === 'GJ' ? p.gj_plt : String(pt.state ?? '').toUpperCase() === 'MP' ? p.mp_plt : null) || null, stock: 0, openingStock: 0, purchaseQty: 0,
           extraPurchaseQty: 0, saleQty: 0, extraSaleQty: 0, transferIn: 0, transferOut: 0, adjustQty: 0,
         });
       }

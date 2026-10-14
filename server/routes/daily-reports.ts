@@ -75,6 +75,24 @@ async function withExpectedPallets<T extends { barcode: string; expectedQty: num
   return out;
 }
 
+// Expected pallets per key (slip / unloading session) from its own items' expected qty, so a slip nothing has been
+// scanned on yet still shows them. The key's items are summed per barcode first, then each barcode is sized as above.
+async function expectedPalletsByKey(lines: Array<{ key: string; plant: string | null; barcode: string; qty: number }>): Promise<Map<string, number>> {
+  const byKey = new Map<string, { plant: string | null; items: Array<{ barcode: string; expectedQty: number }> }>();
+  for (const l of lines) {
+    if (!l.barcode) continue;
+    const g = byKey.get(l.key) ?? { plant: l.plant, items: [] };
+    g.items.push({ barcode: l.barcode, expectedQty: Number(l.qty) || 0 });
+    byKey.set(l.key, g);
+  }
+  const out = new Map<string, number>();
+  for (const [key, g] of byKey) {
+    const sized = await withExpectedPallets(g.items, g.plant);
+    out.set(key, Number(sized.reduce((x, i) => x + i.expectedPallets, 0).toFixed(2)));
+  }
+  return out;
+}
+
 type Row = {
   key: string;
   label: string;
@@ -84,6 +102,7 @@ type Row = {
   orderCount: number;
   expectedQty: number;
   actualQty: number;
+  extraQty?: number;
   eventCount: number;
   startTime: string | null;
   endTime: string | null;
@@ -147,6 +166,15 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
     );
 
     const orderNumbers = orderRows.map((r) => r.orderNumber);
+    const slipPlantByOrder = new Map<string, string | null>(orderRows.map((r) => [r.orderNumber, r.plant ?? null]));
+    const expectedPalletsByOrder = orderNumbers.length
+      ? await expectedPalletsByKey((await pool.query(
+          `SELECT ps.order_number AS "key", psi.barcode, SUM(psi.quantity)::int AS "qty"
+             FROM proforma_slip_items psi JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
+            WHERE ps.order_number = ANY($1) GROUP BY ps.order_number, psi.barcode`,
+          [orderNumbers],
+        )).rows.map((r: any) => ({ ...r, plant: slipPlantByOrder.get(r.key) ?? null })))
+      : new Map<string, number>();
     const eventsByOrder = new Map<string, { actualQty: number; regularQty: number; regularPallets: number; extraPallets: number; startTime: string | null; endTime: string | null; eventCount: number }>();
     let activities: Array<{ barcode: string; itemName: string | null; qty: number; pallets: number; stv: string | null; isExtra: boolean; scannedByName: string | null; scannedAt: string }> = [];
     if (orderNumbers.length > 0) {
@@ -192,10 +220,11 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
         orderCount: 1,
         expectedQty: o.expectedQty,
         actualQty: ev?.actualQty ?? 0,
+        extraQty: Math.max(0, (ev?.actualQty ?? 0) - (ev?.regularQty ?? 0)),
         eventCount: ev?.eventCount ?? 0,
         startTime: ev?.startTime ?? null,
         endTime: ev?.endTime ?? null,
-        expectedPallets: ev?.regularQty > 0 ? Number(((ev.regularPallets ?? 0) * o.expectedQty / ev.regularQty).toFixed(2)) : 0,
+        expectedPallets: expectedPalletsByOrder.get(o.orderNumber) ?? 0,
         receivedPallets: Number(((ev?.regularPallets ?? 0) + (ev?.extraPallets ?? 0)).toFixed(2)),
         extraPallets: Number((ev?.extraPallets ?? 0).toFixed(2)),
       };
@@ -232,7 +261,7 @@ router.get('/daily-reports/loading/slip', requirePageAccess('daily-reports'), as
     const slip = slipRows[0];
     const [expectedRes, actualRes, activityRes] = await Promise.all([
       pool.query(
-        `SELECT barcode, item_name AS "itemName", MIN(sr_no) AS "srNo", COALESCE(SUM(quantity), 0)::int AS "expectedQty"
+        `SELECT barcode, item_name AS "itemName", MIN(sr_no) AS "srNo", MIN(sap_code) AS "sapCode", COALESCE(SUM(quantity), 0)::int AS "expectedQty"
            FROM proforma_slip_items WHERE proforma_slip_id = $1 GROUP BY barcode, item_name
           ORDER BY MIN(sr_no) ASC NULLS LAST, item_name`,
         [slip.id],
@@ -258,7 +287,7 @@ router.get('/daily-reports/loading/slip', requirePageAccess('daily-reports'), as
     const itemTotals = await withExpectedPallets(expectedRes.rows.map((r: any) => {
       const actual = actualByBarcode.get(r.barcode);
       return {
-        barcode: r.barcode, itemName: r.itemName, srNo: r.srNo ?? null, expectedQty: r.expectedQty,
+        barcode: r.barcode, itemName: r.itemName, sapCode: r.sapCode ?? null, srNo: r.srNo ?? null, expectedQty: r.expectedQty,
         actualQty: actual?.actualQty ?? 0, extraQty: actual?.extraQty ?? 0, pallets: actual?.pallets ?? 0,
       };
     }), slip.plant);
@@ -290,6 +319,14 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
     );
 
     const sessionIds = sessionRows.map((r) => r.id);
+    const sessionPlant = new Map<string, string | null>(sessionRows.map((r) => [String(r.id), r.plant ?? null]));
+    const expectedPalletsBySession = sessionIds.length
+      ? await expectedPalletsByKey((await pool.query(
+          `SELECT session_id::text AS "key", barcode, SUM(quantity)::int AS "qty"
+             FROM unload_import_items WHERE session_id = ANY($1) GROUP BY session_id, barcode`,
+          [sessionIds],
+        )).rows.map((r: any) => ({ ...r, plant: sessionPlant.get(r.key) ?? null })))
+      : new Map<string, number>();
     // Start = first scan entry, still from the events themselves. End = when the session was
     // actually marked Complete (scanCompletedAt on the session row) — NOT the last scan event,
     // which can predate the operator pressing Complete by any amount of time.
@@ -332,9 +369,10 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
       const ev = eventsBySession.get(s.id);
       const row = byVehicle.get(key) ?? {
         key, label: key, plant: s.plant,
-        orderCount: 0, expectedQty: 0, actualQty: 0, eventCount: 0, startTime: null, endTime: null,
+        orderCount: 0, expectedQty: 0, actualQty: 0, extraQty: 0, eventCount: 0, startTime: null, endTime: null,
       };
       row.orderCount += 1;
+      row.extraQty = (row.extraQty ?? 0) + Math.max(0, (ev?.actualQty ?? 0) - (ev?.regularQty ?? 0));
       row.expectedQty += s.expectedQty;
       row.actualQty += ev?.actualQty ?? 0;
       row.eventCount += ev?.eventCount ?? 0;
@@ -342,12 +380,9 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
       // shows — falling back to the first scan only if it was never formally activated.
       row.startTime = minDate(row.startTime, s.scanActivatedAt ?? ev?.startTime ?? null);
       row.endTime = maxDate(row.endTime, s.scanCompletedAt ?? null);
-      row.expectedPallets = row.expectedPallets ?? 0;
+      row.expectedPallets = Number(((row.expectedPallets ?? 0) + (expectedPalletsBySession.get(String(s.id)) ?? 0)).toFixed(2));
       row.receivedPallets = Number(((row.receivedPallets ?? 0) + (ev?.regularPallets ?? 0) + (ev?.extraPallets ?? 0)).toFixed(2));
       row.extraPallets = Number(((row.extraPallets ?? 0) + (ev?.extraPallets ?? 0)).toFixed(2));
-      if ((ev?.regularQty ?? 0) > 0) {
-        row.expectedPallets = Number(((row.expectedPallets ?? 0) + (ev!.regularPallets ?? 0) * s.expectedQty / ev!.regularQty).toFixed(2));
-      }
       byVehicle.set(key, row);
     }
 
@@ -386,7 +421,7 @@ router.get('/daily-reports/unloading/vehicle', requirePageAccess('daily-reports'
 
     const [expectedRes, actualRes, activityRes] = await Promise.all([
       pool.query(
-        `SELECT barcode, item_name AS "itemName", COALESCE(SUM(quantity), 0)::int AS "expectedQty"
+        `SELECT barcode, item_name AS "itemName", MIN(sap_code) AS "sapCode", COALESCE(SUM(quantity), 0)::int AS "expectedQty"
            FROM unload_import_items WHERE session_id = ANY($1) GROUP BY barcode, item_name`,
         [sessionIds],
       ),
@@ -412,7 +447,7 @@ router.get('/daily-reports/unloading/vehicle', requirePageAccess('daily-reports'
     const itemTotals = await withExpectedPallets(expectedRes.rows.map((r: any) => {
       const a = actualByBarcode.get(r.barcode);
       return {
-        barcode: r.barcode, itemName: r.itemName, expectedQty: r.expectedQty,
+        barcode: r.barcode, itemName: r.itemName, sapCode: r.sapCode ?? null, expectedQty: r.expectedQty,
         actualQty: a?.actualQty ?? 0, extraQty: a?.extraQty ?? 0, pallets: a?.pallets ?? 0,
       };
     }), plant);
@@ -447,11 +482,12 @@ router.get('/daily-reports/scan', requirePageAccess('daily-reports'), async (req
     // Start = first scan entry, from the events themselves. End = when the session was actually
     // marked Complete (scanCompletedAt on the session row), not the last scan event — same
     // correction applied to Unloading, for the same reason.
-    const eventsBySession = new Map<number, { actualQty: number; startTime: string | null; eventCount: number }>();
+    const eventsBySession = new Map<number, { actualQty: number; extraQty: number; startTime: string | null; eventCount: number }>();
     if (sessionIds.length > 0) {
       const { rows: eventRows } = await pool.query(
         `SELECT session_id AS "sessionId",
                 COALESCE(SUM(total_qty), 0)::int AS "actualQty",
+                COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS "extraQty",
                 MIN(scanned_at) AS "startTime",
                 COUNT(*)::int AS "eventCount"
            FROM order_scan_events
@@ -466,7 +502,7 @@ router.get('/daily-reports/scan', requirePageAccess('daily-reports'), async (req
       const ev = eventsBySession.get(s.id);
       return {
         key: s.csvFileName, label: s.csvFileName, plant: s.plant,
-        orderCount: 1, expectedQty: s.expectedQty, actualQty: ev?.actualQty ?? 0,
+        orderCount: 1, expectedQty: s.expectedQty, actualQty: ev?.actualQty ?? 0, extraQty: ev?.extraQty ?? 0,
         eventCount: ev?.eventCount ?? 0, startTime: s.scanActivatedAt ?? ev?.startTime ?? null, endTime: s.scanCompletedAt ?? null,
       };
     });
@@ -474,12 +510,12 @@ router.get('/daily-reports/scan', requirePageAccess('daily-reports'), async (req
     // Day-wide item totals and activity list — across EVERY session for this date, not just one
     // CSV/order. Same shape as Unloading's per-vehicle drill-down, just aggregated over the
     // whole day instead of one vehicle.
-    let itemTotals: Array<{ barcode: string; itemName: string | null; expectedQty: number; expectedPallets: number; actualQty: number; extraQty: number; pallets: number }> = [];
+    let itemTotals: Array<{ barcode: string; itemName: string | null; sapCode?: string | null; expectedQty: number; expectedPallets: number; actualQty: number; extraQty: number; pallets: number }> = [];
     let activities: Array<{ barcode: string; itemName: string | null; qty: number; pallets: number; stv: string | null; isExtra: boolean; scannedByName: string | null; scannedAt: string }> = [];
     if (sessionIds.length > 0) {
       const [expectedRes, actualRes, activityRes] = await Promise.all([
         pool.query(
-          `SELECT barcode, item_name AS "itemName", COALESCE(SUM(expected_qty), 0)::int AS "expectedQty",
+          `SELECT barcode, item_name AS "itemName", MIN(sap_code) AS "sapCode", COALESCE(SUM(expected_qty), 0)::int AS "expectedQty",
                   COALESCE(SUM(expected_qty::float / NULLIF(items_per_pallet, 0)), 0)::real AS "expectedPallets"
              FROM order_scan_items WHERE session_id = ANY($1) GROUP BY barcode, item_name`,
           [sessionIds],
@@ -505,7 +541,7 @@ router.get('/daily-reports/scan', requirePageAccess('daily-reports'), async (req
       itemTotals = expectedRes.rows.map((r: any) => {
         const a = actualByBarcode.get(r.barcode);
         return {
-          barcode: r.barcode, itemName: r.itemName, expectedQty: r.expectedQty, expectedPallets: r.expectedPallets ?? 0,
+          barcode: r.barcode, itemName: r.itemName, sapCode: r.sapCode ?? null, expectedQty: r.expectedQty, expectedPallets: r.expectedPallets ?? 0,
           actualQty: a?.actualQty ?? 0, extraQty: a?.extraQty ?? 0, pallets: a?.pallets ?? 0,
         };
       });
@@ -548,7 +584,7 @@ router.get('/daily-reports/scan/csv', requirePageAccess('daily-reports'), async 
 
     const [expectedRes, actualRes, activityRes] = await Promise.all([
       pool.query(
-        `SELECT barcode, item_name AS "itemName", COALESCE(SUM(expected_qty), 0)::int AS "expectedQty",
+        `SELECT barcode, item_name AS "itemName", MIN(sap_code) AS "sapCode", COALESCE(SUM(expected_qty), 0)::int AS "expectedQty",
                 COALESCE(SUM(expected_qty::float / NULLIF(items_per_pallet, 0)), 0)::real AS "expectedPallets"
            FROM order_scan_items WHERE session_id = ANY($1) GROUP BY barcode, item_name`,
         [sessionIds],
@@ -575,7 +611,7 @@ router.get('/daily-reports/scan/csv', requirePageAccess('daily-reports'), async 
     const itemTotals = expectedRes.rows.map((r: any) => {
       const a = actualByBarcode.get(r.barcode);
       return {
-        barcode: r.barcode, itemName: r.itemName, expectedQty: r.expectedQty, expectedPallets: r.expectedPallets ?? 0,
+        barcode: r.barcode, itemName: r.itemName, sapCode: r.sapCode ?? null, expectedQty: r.expectedQty, expectedPallets: r.expectedPallets ?? 0,
         actualQty: a?.actualQty ?? 0, extraQty: a?.extraQty ?? 0, pallets: a?.pallets ?? 0,
       };
     });

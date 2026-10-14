@@ -1,3 +1,4 @@
+import { drawPdfHeader, drawPdfFooter, greenTotalRow, setPdfProperties } from "@/lib/pdfBranding";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -72,6 +73,26 @@ const bySr = (a: Row, b: Row) => {
   if (!a.srNo) return 1;
   if (!b.srNo) return -1;
   return a.srNo.localeCompare(b.srNo, undefined, { numeric: true, sensitivity: "base" }) || a.itemName.localeCompare(b.itemName);
+};
+
+// Pallets for a figure: each plant's own boxes divided by that plant's own pallet size (GJ and MP can differ), added up
+// across a combined row's plants. Null when no plant has a pallet size set.
+const palletsOf = (r: Row, f: (x: Row) => number): number | null => {
+  let total = 0, any = false;
+  for (const p of r.parts?.length ? r.parts : [r]) {
+    if (p.palletSize && p.palletSize > 0) { total += f(p) / p.palletSize; any = true; }
+  }
+  return any ? total : null;
+};
+// The figure with its pallets written underneath it, in small grey type.
+const withPallets = (r: Row, f: (x: Row) => number, node: React.ReactNode) => {
+  const pal = f(r) ? palletsOf(r, f) : null;
+  return (
+    <div className="flex flex-col items-center leading-tight">
+      {node}
+      {pal != null ? <span className="text-[10px] font-medium tabular-nums text-[#001d6e]">{pal.toFixed(2)} plt</span> : null}
+    </div>
+  );
 };
 
 const totalPO = (r: Row) => r.openingStock + r.purchaseQty + r.adjustQty + r.transferIn - r.transferOut;
@@ -258,35 +279,35 @@ export default function StockOverview() {
     { id: "category", header: "Category", width: 112, align: "center", sortable: true, totalable: false, accessor: (r) => r.category, cellClassName: "text-gray-700", render: (r) => r.category ?? dash },
     { id: "brand", header: "Brand", width: 92, align: "center", sortable: true, totalable: false, accessor: (r) => r.brand, cellClassName: "text-gray-700", render: (r) => r.brand ?? dash },
     ...(merged ? [] : [{ id: "plant", header: "Plant", hideable: false, width: 96, align: "center", sortable: true, totalable: false, accessor: (r) => r.plant, render: (r) => <PlantBadge plant={r.plant} /> } as DataTableColumn<Row>]),
-    { id: "opening", header: "Opening", width: 100, align: "center", sortable: true, accessor: (r) => r.openingStock, total: (rs) => num(sumOf(rs, (r) => r.openingStock)), render: (r) => figure(r.openingStock) },
-    { id: "expectedPurchase", header: "Expected Purchase", width: 164, align: "center", sortable: true, accessor: (r) => r.expectedPurchase, total: (rs) => num(sumOf(rs, (r) => r.expectedPurchase)), render: (r) => figure(r.expectedPurchase, 0, "text-purple-700") },
-    { id: "purchase", header: "Purchase", width: 104, align: "center", sortable: true, accessor: (r) => r.purchaseQty, total: (rs) => num(sumOf(rs, (r) => r.purchaseQty)), render: (r) => figure(r.purchaseQty) },
-    { id: "extra", header: "Extra Purchase", width: 142, align: "center", sortable: true, accessor: (r) => r.extraPurchaseQty, total: (rs) => num(sumOf(rs, (r) => r.extraPurchaseQty)), render: (r) => (r.extraPurchaseQty ? <span className="tabular-nums text-amber-600">{num(r.extraPurchaseQty)}</span> : dash) },
+    { id: "opening", header: "Opening", width: 100, align: "center", sortable: true, accessor: (r) => r.openingStock, total: (rs) => num(sumOf(rs, (r) => r.openingStock)), render: (r) => withPallets(r, (x) => x.openingStock, figure(r.openingStock)) },
+    { id: "expectedPurchase", header: "Expected Purchase", width: 164, align: "center", sortable: true, accessor: (r) => r.expectedPurchase, total: (rs) => num(sumOf(rs, (r) => r.expectedPurchase)), render: (r) => withPallets(r, (x) => x.expectedPurchase, figure(r.expectedPurchase, 0, "text-purple-700")) },
+    { id: "purchase", header: "Purchase", width: 104, align: "center", sortable: true, accessor: (r) => r.purchaseQty, total: (rs) => num(sumOf(rs, (r) => r.purchaseQty)), render: (r) => withPallets(r, (x) => x.purchaseQty, figure(r.purchaseQty)) },
+    { id: "extra", header: "Extra Purchase", width: 142, align: "center", sortable: true, accessor: (r) => r.extraPurchaseQty, total: (rs) => num(sumOf(rs, (r) => r.extraPurchaseQty)), render: (r) => (r.extraPurchaseQty ? withPallets(r, (x) => x.extraPurchaseQty, <span className="tabular-nums text-amber-600">{num(r.extraPurchaseQty)}</span>) : dash) },
     {
       // Click the figure to read the corrections behind it (an admin can delete one there), as on the Stock Overview.
       id: "adjust", header: "Adjust", width: 92, align: "center", sortable: true, preventRowClick: true, accessor: (r) => r.adjustQty, total: (rs) => signed(sumOf(rs, (r) => r.adjustQty)),
       render: (r) => (r.adjustQty
-        ? <button type="button" title="See the adjustments behind this figure" onClick={() => setAdjustTarget(r)} className="tabular-nums font-medium text-[#001d6e] underline decoration-dotted underline-offset-2 hover:text-[#0a2b7e]">{signed(r.adjustQty)}</button>
+        ? withPallets(r, (x) => x.adjustQty, <button type="button" title="See the adjustments behind this figure" onClick={() => setAdjustTarget(r)} className="tabular-nums font-medium text-[#001d6e] underline decoration-dotted underline-offset-2 hover:text-[#0a2b7e]">{signed(r.adjustQty)}</button>)
         : dash),
     },
-    { id: "transferIn", header: "Transfer In", width: 114, align: "center", sortable: true, accessor: (r) => r.transferIn, total: (rs) => num(sumOf(rs, (r) => r.transferIn)), render: (r) => figure(r.transferIn) },
-    { id: "transferOut", header: "Transfer Out", width: 124, align: "center", sortable: true, accessor: (r) => r.transferOut, total: (rs) => num(sumOf(rs, (r) => r.transferOut)), render: (r) => figure(r.transferOut) },
+    { id: "transferIn", header: "Transfer In", width: 114, align: "center", sortable: true, accessor: (r) => r.transferIn, total: (rs) => num(sumOf(rs, (r) => r.transferIn)), render: (r) => withPallets(r, (x) => x.transferIn, figure(r.transferIn)) },
+    { id: "transferOut", header: "Transfer Out", width: 124, align: "center", sortable: true, accessor: (r) => r.transferOut, total: (rs) => num(sumOf(rs, (r) => r.transferOut)), render: (r) => withPallets(r, (x) => x.transferOut, figure(r.transferOut)) },
     {
       // Total P & O = Opening + Purchase + Adjust + Transfer In - Transfer Out (everything that has come in, before any Sale).
       id: "totalPO", header: "Total P & O", width: 116, align: "center", sortable: true, accessor: (r) => totalPO(r),
       total: (rs) => num(sumOf(rs, (r) => totalPO(r))),
-      cellClassName: "font-semibold", render: (r) => <span className="tabular-nums">{num(totalPO(r))}</span>,
+      cellClassName: "font-semibold", render: (r) => withPallets(r, totalPO, <span className="tabular-nums">{num(totalPO(r))}</span>),
     },
-    { id: "expectedSale", header: "Expected Sale", width: 130, align: "center", sortable: true, accessor: (r) => r.expectedSale, total: (rs) => num(sumOf(rs, (r) => r.expectedSale)), render: (r) => figure(r.expectedSale, 0, "text-purple-700") },
-    { id: "sale", header: "Sale", width: 84, align: "center", sortable: true, accessor: (r) => r.saleQty, total: (rs) => num(sumOf(rs, (r) => r.saleQty)), render: (r) => figure(r.saleQty, 0, "text-emerald-700") },
-    { id: "extraSale", header: "Extra Sale", width: 110, align: "center", sortable: true, accessor: (r) => r.extraSaleQty, total: (rs) => num(sumOf(rs, (r) => r.extraSaleQty)), render: (r) => (r.extraSaleQty ? <span className="tabular-nums text-amber-600">{num(r.extraSaleQty)}</span> : dash) },
+    { id: "expectedSale", header: "Expected Sale", width: 130, align: "center", sortable: true, accessor: (r) => r.expectedSale, total: (rs) => num(sumOf(rs, (r) => r.expectedSale)), render: (r) => withPallets(r, (x) => x.expectedSale, figure(r.expectedSale, 0, "text-purple-700")) },
+    { id: "sale", header: "Sale", width: 84, align: "center", sortable: true, accessor: (r) => r.saleQty, total: (rs) => num(sumOf(rs, (r) => r.saleQty)), render: (r) => withPallets(r, (x) => x.saleQty, figure(r.saleQty, 0, "text-emerald-700")) },
+    { id: "extraSale", header: "Extra Sale", width: 110, align: "center", sortable: true, accessor: (r) => r.extraSaleQty, total: (rs) => num(sumOf(rs, (r) => r.extraSaleQty)), render: (r) => (r.extraSaleQty ? withPallets(r, (x) => x.extraSaleQty, <span className="tabular-nums text-amber-600">{num(r.extraSaleQty)}</span>) : dash) },
     {
       id: "closing", header: "Closing", width: 100, align: "center", sortable: true, accessor: (r) => r.closingStock,
       total: (rs) => num(sumOf(rs, (r) => r.closingStock)),
-      cellClassName: "font-semibold", render: (r) => <span className={`tabular-nums ${r.closingStock < 0 ? "text-amber-600" : ""}`}>{num(r.closingStock)}</span>,
+      cellClassName: "font-semibold", render: (r) => withPallets(r, (x) => x.closingStock, <span className={`tabular-nums ${r.closingStock < 0 ? "text-amber-600" : ""}`}>{num(r.closingStock)}</span>),
     },
     ...(isAdmin ? [{ id: "actions", header: "", hideable: false, width: 52, fixedWidth: true, align: "center", preventRowClick: true, totalable: false, render: (r: Row) => (r.id != null || r.parts?.length ? <LineActions row={r} /> : null) } as DataTableColumn<Row>] : []),
-    { id: "stock", header: "Stock", width: 88, align: "center", sortable: true, accessor: (r) => r.stock, total: (rs) => num(sumOf(rs, (r) => r.stock)), cellClassName: "font-semibold text-[#001d6e]", render: (r) => <span className="tabular-nums">{num(r.stock)}</span> },
+    { id: "stock", header: "Stock", width: 88, align: "center", sortable: true, accessor: (r) => r.stock, total: (rs) => num(sumOf(rs, (r) => r.stock)), cellClassName: "font-semibold text-[#001d6e]", render: (r) => withPallets(r, (x) => x.stock, <span className="tabular-nums">{num(r.stock)}</span>) },
   ];
 
   // The same column look as the Stock Overview: ruled cells, ruled navy header cells, a funnel on every column that can be filtered.
@@ -307,8 +328,13 @@ export default function StockOverview() {
   // Export — what is visible, in the table's order: CSV, Excel or PDF.
   // What you see is what is exported: the rows left after the pills, date, search and funnel filters, in the table's current sort,
   // with the visible columns in their current order, and a Total row like the table's.
-  const exportRows = (): Array<Array<string | number>> => {
-    const cols = baseColumns.filter((c) => c.id !== "actions" && (visibleSet.has(c.id) || (c as any).hideable === false));
+  // `onlyPicked` (the PDF): exactly the columns ticked in the Columns button — the always-shown Sr No / Item / Plant are left out
+  // unless nothing is ticked, so a PDF of 5 picked columns has 5 columns.
+  const exportRows = (onlyPicked = false): Array<Array<string | number>> => {
+    const picked = baseColumns.filter((c) => c.id !== "actions" && (c as any).hideable !== false && visibleSet.has(c.id));
+    const cols = onlyPicked && picked.length > 0
+      ? picked
+      : baseColumns.filter((c) => c.id !== "actions" && (visibleSet.has(c.id) || (c as any).hideable === false));
     const ordered = columnOrder.length ? [...cols].sort((a, b) => (columnOrder.indexOf(a.id) + 1 || 999) - (columnOrder.indexOf(b.id) + 1 || 999)) : cols;
     let list = rows;
     if (sortState) {
@@ -331,7 +357,7 @@ export default function StockOverview() {
     return [head, ...body, totals];
   };
   const exportAs = (fmt: "CSV" | "Excel" | "PDF") => {
-    const data = exportRows();
+    const data = exportRows(fmt === "PDF");
     const stamp = `${state || "all"}${plant ? "-" + plant : ""}-${format(new Date(), "yyyy-MM-dd")}`;
     if (fmt === "CSV") {
       const csv = data.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -345,13 +371,15 @@ export default function StockOverview() {
     } else {
       const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
       const scope = [state ? `State ${state}` : "All states", plant || "", search ? `search "${search}"` : "", Object.keys(columnConditions).length ? `${Object.keys(columnConditions).length} filter(s)` : ""].filter(Boolean).join(" · ");
-      doc.setFontSize(14); doc.setTextColor(0, 29, 110); doc.text("Stock Overview Report", 10, 12);
-      doc.setFontSize(8); doc.setTextColor(110, 110, 110); doc.text(`${period} · ${scope} · ${rows.length} rows · generated ${format(new Date(), "d MMM yyyy, HH:mm")}`, 10, 17);
+      const subtitle = `${period} · ${scope} · ${rows.length} rows`;
+      setPdfProperties(doc, "Stock Overview Report", subtitle);
+      const startY = drawPdfHeader(doc, { title: "Stock Overview Report", subtitle, margin: 10, generated: format(new Date(), "d MMM yyyy, HH:mm") });
       autoTable(doc, {
-        head: [data[0].map(String)], body: data.slice(1).map((r) => r.map(String)), startY: 21, theme: "grid",
+        head: [data[0].map(String)], body: data.slice(1).map((r) => r.map(String)), startY, theme: "grid",
         styles: { fontSize: 7, cellPadding: 2, lineColor: [210, 210, 210], lineWidth: 0.15 },
-        headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold" }, alternateRowStyles: { fillColor: [245, 247, 251] }, margin: { left: 10, right: 10 },
+        headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold" }, alternateRowStyles: { fillColor: [245, 247, 251] }, margin: { left: 10, right: 10 }, didParseCell: greenTotalRow,
       });
+      drawPdfFooter(doc, 10);
       doc.save(`stock-new-${stamp}.pdf`);
     }
   };
