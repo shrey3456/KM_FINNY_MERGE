@@ -364,6 +364,8 @@ export const proformaSlips = pgTable("proforma_slips", {
   dispatchedAt: timestamp("dispatched_at"),
   // Set when an admin reopens a Dispatched load; cleared by "Complete & Dispatch". While set, the normal Complete is off and nothing completes the load by itself.
   reopenedFromDispatch: boolean("reopened_from_dispatch").notNull().default(false),
+  // The status the admin reopened it from (e.g. SHORTAGE); "Complete & return" puts the load back to exactly that status.
+  reopenedFromStatus: text("reopened_from_status"),
   storeKeeperInfo: text("storekeeper_info"),
   // Full raw property map read off the Notion page at import time (property name -> extracted
   // display value), so any Notion column not mapped to its own DB field above is still kept

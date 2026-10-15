@@ -7,6 +7,7 @@ import { requireAdminRole } from '../lib/pageAccess';
 import { applyVehiclePageFromNotionWebhook } from '../services/notionVehicleSync';
 import { applyProductPageFromNotionWebhook } from '../services/notionInventorySync';
 import { isNotionStatusGuarded, isLaterStageStatus } from '../services/notionOrderStatusSync';
+import { dispatchUnlockPatch } from '../services/autoDispatch';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Notion webhook — Notion calls this the moment a page changes, so the app follows Notion directly
@@ -82,8 +83,11 @@ async function applyOrderStatus(page: any): Promise<string> {
   if (isNotionStatusGuarded(orderNumber) && !isLaterStageStatus(status)) {
     return `ignored (#${orderNumber} → ${status ?? 'empty'} — the app is about to restore its own status after a vehicle change)`;
   }
+  // Notion moving a load that had gone out back to Ready for Dispatch / Loading lifts its dispatch lock (see dispatchUnlockPatch).
+  const { rows: curRows } = await pool.query(`SELECT notion_status AS "notionStatus", dispatched_at AS "dispatchedAt" FROM proforma_slips WHERE order_number = $1 LIMIT 1`, [orderNumber]);
+  const unlock = dispatchUnlockPatch(curRows[0], status);
   const { rowCount } = await pool.query(
-    `UPDATE proforma_slips SET notion_status = $1
+    `UPDATE proforma_slips SET notion_status = $1${unlock ? ', dispatched_at = NULL, auto_dispatch = false' : ''}
      WHERE order_number = $2 AND notion_status IS DISTINCT FROM $1`,
     [status, orderNumber],
   );

@@ -8338,6 +8338,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     console.log('[Proforma Sync] 5-hour auto sync scheduler registered');
   }
 
+  // Daily Notion sync (Settings > Data Management): once a day at the admin's set time (India time) - Product Master, 5 minutes later tomorrow's Proforma
+  // Slips. One timer when switched on, none when off; separate from the 5-hour scheduler above. See server/services/dailyNotionSync.ts.
+  try {
+    const { startDailyNotionSync } = await import('./services/dailyNotionSync');
+    await startDailyNotionSync();
+  } catch (err) {
+    console.error('[Daily Notion Sync] Could not start:', err);
+  }
+
   // Return the HTTP server with WebSocket support
   return httpServer;
 }

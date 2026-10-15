@@ -35,6 +35,7 @@ import { SyncProgressDialog, type SyncProgress } from '@/components/SyncProgress
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import LoadingFromSalesCard from '@/components/settings/LoadingFromSalesCard';
 import StockResetCard from '@/components/settings/StockResetCard';
+import DailyNotionSyncCard from '@/components/settings/DailyNotionSyncCard';
 import OpeningStockEditorCard from '@/components/settings/OpeningStockEditorCard';
 import { hasPageWriteAccess } from '@/lib/permissions';
 import {
@@ -1290,6 +1291,8 @@ const Settings = () => {
                     <LoadingFromSalesCard isAdmin={isAdminUser} />
 
                     <StockResetCard isAdmin={isAdminUser} />
+
+                    <DailyNotionSyncCard isAdmin={isAdminUser} />
 
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>

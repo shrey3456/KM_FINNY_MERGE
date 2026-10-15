@@ -10,6 +10,7 @@ import { storage } from '../storage';
 import { pool } from '../db';
 import { extractText } from '../lib/notionProperties';
 import type { InsertProformaSlip } from '@shared/schema';
+import { dispatchUnlockPatch } from './autoDispatch';
 
 export interface OrderItemData {
   productId: number;
@@ -280,6 +281,10 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
     notionFields.vehicleInfoId = resolved?.id ?? null;
   }
 
+  // Notion moving a load that had gone out back to Ready for Dispatch / Loading lifts its dispatch lock.
+  const unlock = dispatchUnlockPatch(existingSlip as any, orderData.notionStatus);
+  if (unlock) Object.assign(notionFields, unlock);
+
   let slipId: number;
   let created = false;
 
@@ -341,6 +346,34 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
   });
 
   return { created, itemsCreated, totalQuantity: finalTotalQuantity, totalVolume: finalTotalVolume };
+}
+
+// ─── Daily Notion sync (server/services/dailyNotionSync.ts) ───────────────────────────────────────────
+// One order date, read from Notion and written straight away - new slips and changed ones, exactly what "Sync from Notion" > Apply does for that date -
+// but WITHOUT the shared review list (pendingOrders / pendingReport) and its lock, so it can never replace a review someone has open on the Proforma
+// Slips page. It still refuses to start while that screen's own sync is running (and the reverse), so two writers never work on the slips at once.
+let dailySyncing = false;
+export async function syncDateAndApply(date: string): Promise<{ totalOrders: number; created: number; updated: number; unchanged: number; failed: number }> {
+  if (isSyncing || dailySyncing) throw new Error('A sync is already in progress — please wait');
+  dailySyncing = true;
+  try {
+    const orders = await fetchProformaOrdersFromNotion(date, date);
+    let created = 0, updated = 0, unchanged = 0, failed = 0;
+    for (const [, orderData] of Array.from(orders.entries())) {
+      try {
+        const diff = await diffOrder(orderData);
+        if (!diff.isNew && diff.fieldChanges.length === 0 && diff.itemChanges.length === 0) { unchanged++; continue; }
+        const r = await writeOrderToDb(orderData);
+        if (r.created) created++; else updated++;
+      } catch (error) {
+        failed++;
+        console.error(`[Daily Notion Sync] Error applying order ${orderData.orderNumber}:`, error);
+      }
+    }
+    return { totalOrders: orders.size, created, updated, unchanged, failed };
+  } finally {
+    dailySyncing = false;
+  }
 }
 
 // ─── Detect / diff for the "Sync from Notion" review flow ─────────────────────
@@ -462,7 +495,7 @@ export async function detectProformaChanges(
   triggeredBy: string,
   options: { existingOnly?: boolean } = {},
 ): Promise<SyncReport> {
-  if (isSyncing) throw new Error('A sync is already in progress — please wait');
+  if (isSyncing || dailySyncing) throw new Error('A sync is already in progress — please wait');
   isSyncing = true;
   try {
     const ordersMap = await fetchProformaOrdersFromNotion(startDate, endDate);
@@ -538,7 +571,7 @@ export async function applyPendingProformaChanges(
   selectedOrderNumbers?: string[],
 ): Promise<{ slipsCreated: number; slipsUpdated: number; itemsCreated: number; createdOrderNumbers: string[]; updatedOrderNumbers: string[] }> {
   if (!pendingOrders || !pendingReport) throw new Error('No pending changes. Run detection first.');
-  if (isSyncing) throw new Error('A sync is already in progress — please wait');
+  if (isSyncing || dailySyncing) throw new Error('A sync is already in progress — please wait');
 
   isSyncing = true;
   try {
@@ -656,7 +689,11 @@ export async function syncLatestDateFromOrderDb(apply: boolean): Promise<{ date:
       const qty = props['Proforma Qty :']?.rollup?.number ?? props['For Qty :']?.formula?.number ?? undefined;
       const changes: Partial<InsertProformaSlip> = {};
       if (plant && plant !== slip.plant) changes.plant = plant;
-      if (status && status !== slip.notionStatus) changes.notionStatus = status;
+      if (status && status !== slip.notionStatus) {
+        changes.notionStatus = status;
+        const unlock = dispatchUnlockPatch(slip as any, status);
+        if (unlock) Object.assign(changes, unlock);
+      }
       if (qty !== undefined && qty !== slip.totalQuantity) changes.totalQuantity = qty;
       if (Object.keys(changes).length > 0) {
         // apply=false (auto-apply toggle off): only count what would change, write nothing.
