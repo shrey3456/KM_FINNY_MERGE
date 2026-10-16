@@ -7,7 +7,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { LayoutList, CalendarDays, Boxes, History, ShoppingCart, RotateCw, Loader2, Scale, Plus, Search, ChevronLeft, ChevronDown, FileDown, Trash2 } from "lucide-react";
+import { LayoutList, CalendarDays, Boxes, History, ShoppingCart, RotateCw, Loader2, Scale, Pencil, Plus, Search, ChevronLeft, ChevronDown, FileDown, Trash2 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -399,8 +399,8 @@ export default function StockOverview() {
           { icon: History, tone: "navy" as const, value: num(tOpen), label: "Opening", hint: `Start of period` },
           { icon: CalendarDays, tone: "navy" as const, value: num(tExpP), label: "Expected Purchase", hint: period },
           { icon: Boxes, tone: "navy" as const, value: num(tPurchase), label: "Purchase", hint: tExtraP ? `${period} · incl. ${num(tExtraP)} extra` : period },
-          { icon: ShoppingCart, tone: "emerald" as const, value: num(tSale), label: "Sale (loaded)", hint: period },
           { icon: ShoppingCart, tone: "navy" as const, value: num(tExpS), label: "Expected Sale", hint: period },
+          { icon: ShoppingCart, tone: "emerald" as const, value: num(tSale), label: "Sale (loaded)", hint: period },
           { icon: Scale, tone: "navy" as const, value: num(tStock), label: "Stock", hint: "Total on hand now" },
         ]}
       />
@@ -569,7 +569,7 @@ function LineActions({ row: top }: { row: Row }) {
   });
   return (
     <>
-      <Button type="button" variant="ghost" size="icon" className="h-7 w-7" title="Adjust stock" onClick={() => setOpen(true)}><Scale className="h-4 w-4" /></Button>
+      <Button type="button" variant="ghost" size="icon" className="h-7 w-7" title="Adjust stock" onClick={() => setOpen(true)}><Pencil className="h-4 w-4" /></Button>
       <Dialog open={open} onOpenChange={(o) => { if (!o) close(); }}>
         <DialogContent className="max-w-md">
           <DialogHeader>

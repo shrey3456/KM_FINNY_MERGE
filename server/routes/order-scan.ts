@@ -1223,13 +1223,16 @@ router.post('/order-scan/sessions/:id/reopen', requirePageWrite('order-import'),
       return res.status(400).json({ message: 'Only a completed session can be reopened.' });
     }
 
-    // Must be the LAST completed session for this plant — nothing else completed after it.
+    // Must be the LAST completed session for this plant — nothing else completed after it. The session's own completion time is read INSIDE
+    // the query, never passed back from JavaScript: a Date keeps only milliseconds, but a completion stamped by NOW() (Auto Complete) has
+    // microseconds, so the rounded-down time made the session count as later than itself and blocked its own Reopen.
     const { rows: laterRows } = await client.query(
-      `SELECT id FROM order_import_sessions
-       WHERE LOWER(plant) = LOWER($1) AND is_deleted = false AND scan_status = 'completed'
-         AND (scan_completed_at > $2 OR (scan_completed_at = $2 AND id > $3))
+      `SELECT o.id FROM order_import_sessions o, order_import_sessions me
+       WHERE me.id = $2
+         AND LOWER(o.plant) = LOWER($1) AND o.is_deleted = false AND o.scan_status = 'completed' AND o.id <> me.id
+         AND (o.scan_completed_at > me.scan_completed_at OR (o.scan_completed_at = me.scan_completed_at AND o.id > me.id))
        LIMIT 1`,
-      [session.plant, session.scanCompletedAt, id],
+      [session.plant, id],
     );
     if (laterRows.length > 0) {
       await client.query('ROLLBACK');
