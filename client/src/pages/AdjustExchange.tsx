@@ -60,6 +60,8 @@ type ExtraRow = {
   voided: boolean; voidReason: string | null;
   plant: string; csvFileName: string; orderDate: string;
   srNo: string | null;
+  // This product's SAP for the plant's state (blank when it has none) - tells two products with one barcode apart.
+  sapCode?: string | null;
   itemsPerPallet: number | null;
 };
 type ShortfallRow = {
@@ -72,7 +74,7 @@ type ShortfallRow = {
 // product scanned as Extra several times that day (different STVs, different moments) used to
 // list every single entry separately. Clicking a product's row expands it to that full history.
 type GroupedExtra = {
-  key: string; barcode: string; itemName: string | null; srNo: string | null; plant: string;
+  key: string; barcode: string; itemName: string | null; srNo: string | null; sapCode?: string | null; plant: string;
   totalQty: number; totalAvailable: number; entryCount: number; anyVoided: boolean;
   extraPallets: number; availablePallets: number; creditedQty: number;
 };
@@ -126,7 +128,7 @@ export default function AdjustExchange() {
     const map = new Map<string, GroupedExtra>();
     for (const r of extrasQuery.data ?? []) {
       const key = `${r.plant}::${r.barcode}::${r.productId ?? ""}`;
-      const g = map.get(key) ?? { key, barcode: r.barcode, itemName: r.itemName, srNo: r.srNo, plant: r.plant, totalQty: 0, totalAvailable: 0, entryCount: 0, anyVoided: false, extraPallets: 0, availablePallets: 0, creditedQty: 0 };
+      const g = map.get(key) ?? { key, barcode: r.barcode, itemName: r.itemName, srNo: r.srNo, sapCode: r.sapCode ?? null, plant: r.plant, totalQty: 0, totalAvailable: 0, entryCount: 0, anyVoided: false, extraPallets: 0, availablePallets: 0, creditedQty: 0 };
       g.totalQty += r.totalQty;
       g.totalAvailable += r.available;
       g.extraPallets += palletsOf(r.totalQty, r.itemsPerPallet);
@@ -354,7 +356,7 @@ export default function AdjustExchange() {
           <ProductPhoto name={r.itemName} className="h-10 w-10 shrink-0 rounded border border-gray-200 bg-white object-contain" zoomable />
           <div className="min-w-0">
             <p className="truncate font-medium">{r.itemName || "—"}</p>
-            <p className="break-all font-mono text-xs text-gray-500">{r.barcode}</p>
+            <p className="break-all font-mono text-xs text-gray-500">{r.barcode}{r.sapCode ? ` · SAP ${r.sapCode}` : ""}</p>
           </div>
         </div>
       ),
@@ -480,7 +482,7 @@ export default function AdjustExchange() {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate font-semibold text-gray-900">{g.itemName || "—"}</p>
-                      <p className="break-all font-mono text-xs text-gray-500">{g.barcode}</p>
+                      <p className="break-all font-mono text-xs text-gray-500">{g.barcode}{g.sapCode ? ` · SAP ${g.sapCode}` : ""}</p>
                     </div>
                     <PlantBadge plant={g.plant} className="shrink-0 px-2 py-0 text-[11px]" />
                   </div>
@@ -639,7 +641,7 @@ export default function AdjustExchange() {
           isRowExpandable={() => true}
           expandedRowId={expandedGroupKey}
           renderExpandedRow={(r) => {
-            const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}` === r.key);
+            const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}::${e.productId ?? ""}` === r.key);
             return (
               <div className="border-y border-[#001d6e]/20 bg-slate-50/70 p-3">
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">

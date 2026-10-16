@@ -2439,10 +2439,15 @@ router.get('/order-scan/exchange/extras', requirePageAccess('adjust-exchange'), 
               e.scanned_at AS "scannedAt", e.scanned_by_name AS "scannedByName",
               COALESCE(e.voided, false) AS voided, e.void_reason AS "voidReason",
               s.plant, s.csv_file_name AS "csvFileName", s.order_date AS "orderDate",
-              pb.new_sr AS "srNo",
-              COALESCE(NULLIF(e.items_per_pallet, 0), pb.items_per_pallet, 0) AS "itemsPerPallet"
+              COALESCE(pp.new_sr, pb.new_sr) AS "srNo",
+              -- This product's SAP for the plant's state (blank when it has none there) - the SAP is what tells two products with one barcode apart.
+              CASE UPPER(COALESCE(pl.state, '')) WHEN 'GJ' THEN pp.gj_sap WHEN 'MP' THEN pp.mp_sap WHEN 'UP' THEN pp.up_sap END AS "sapCode",
+              COALESCE(NULLIF(e.items_per_pallet, 0), pp.items_per_pallet, pb.items_per_pallet, 0) AS "itemsPerPallet"
          FROM order_scan_events e
          JOIN order_import_sessions s ON s.id = e.session_id
+         LEFT JOIN plants pl ON LOWER(pl.name) = LOWER(s.plant)
+         -- The event's OWN product (two products can share a barcode); the barcode-wide figures below are only for an older event with no product.
+         LEFT JOIN products pp ON pp.id = e.product_id
          LEFT JOIN (
            SELECT LOWER(TRIM(barcode)) AS bkey, MIN(new_sr) AS new_sr, MAX(items_per_pallet) AS items_per_pallet
              FROM products WHERE barcode IS NOT NULL GROUP BY LOWER(TRIM(barcode))
