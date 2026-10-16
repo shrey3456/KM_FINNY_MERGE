@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { pool } from "./db";
 import { ensureStockV2Schema } from './lib/stockV2Schema';
+import { ensureAutoDispatchSchema } from './lib/autoDispatchSchema';
 
 
 const app = express();
@@ -466,9 +467,18 @@ app.use((req, res, next) => {
     await pool.query(`ALTER TABLE loading_scan_events ADD COLUMN IF NOT EXISTS stock_line_id INTEGER`);
     // Each CSV / slip line knows its own PRODUCT (two products can share a barcode: 65 g and 60 g), and every scan entry remembers which product it was for,
     // so progress, stock and corrections are per product, not per barcode.
+    await ensureAutoDispatchSchema(pool);
     await pool.query(`ALTER TABLE vehicle_planning_state ADD COLUMN IF NOT EXISTS setup_done BOOLEAN NOT NULL DEFAULT false`);
     await pool.query(`ALTER TABLE order_import_sessions ADD COLUMN IF NOT EXISTS auto_complete_suppressed BOOLEAN NOT NULL DEFAULT false`);
     await pool.query(`ALTER TABLE unload_import_sessions ADD COLUMN IF NOT EXISTS auto_complete_suppressed BOOLEAN NOT NULL DEFAULT false`);
+    // Older order lines (a row added by editing a CSV, or imported before products were tracked) have no product saved: give them the product their barcode
+    // means - the barcode's only product, or the one whose SAP the line carries. Idempotent: lines already set, or twins with no matching SAP, are left alone.
+    await pool.query(`
+      UPDATE order_scan_items i SET product_id = p.id
+        FROM products p
+       WHERE i.product_id IS NULL AND i.barcode IS NOT NULL AND LOWER(TRIM(p.barcode)) = LOWER(TRIM(i.barcode))
+         AND ((SELECT COUNT(*) FROM products x WHERE LOWER(TRIM(x.barcode)) = LOWER(TRIM(i.barcode))) = 1
+              OR (COALESCE(TRIM(i.sap_code), '') <> '' AND TRIM(i.sap_code) IN (COALESCE(p.gj_sap, ''), COALESCE(p.mp_sap, ''), COALESCE(p.up_sap, ''))))`);
     await pool.query(`ALTER TABLE order_scan_items ADD COLUMN IF NOT EXISTS product_id INTEGER`);
     await pool.query(`ALTER TABLE order_scan_events ADD COLUMN IF NOT EXISTS product_id INTEGER`);
     await pool.query(`ALTER TABLE unload_import_items ADD COLUMN IF NOT EXISTS product_id INTEGER`);

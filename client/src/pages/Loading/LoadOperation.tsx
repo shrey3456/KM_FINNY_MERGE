@@ -136,6 +136,10 @@ type ProformaSlip = {
   vehicleNumber: string | null; driverName: string | null; rtoNumber: string | null;
   vehicleVolume: number | null;
   loadingCompletedAt: string | null; loadingCompletedByCode: string | null;
+  // An admin reopened this load from a later status: normal Complete is off, only an admin's "Complete & return" finishes it.
+  reopenedFromDispatch?: boolean;
+  // The status it was reopened from (SHORTAGE, DISPATCHED ...): the admin's "Complete & return" puts it back there.
+  reopenedFromStatus?: string | null;
   vehicleAssignedByCode: string | null;
   // The order's real lifecycle stage from Notion's "Finny Status :" (this page also writes
   // LOADING/READY≈DESP into it) — DISPATCHED/DELIVERED/SHORTAGE/UNLOADING mean it has moved past
@@ -170,6 +174,8 @@ type VehicleSuggestion = {
   fromNotion?: boolean;
 };
 type LoadingRecord = {
+  // the status stored on the slip (Notion's "Finny Status"), and whether it was created under Auto Dispatch
+  notionStatus?: string | null; autoDispatch?: boolean; dispatchedAt?: string | null;
   id: number; orderNumber: string; partyName: string | null; plant: string | null;
   vehicleNumber: string; rtoNumber: string | null; volume: string | null;
   createdByCode: string | null; createdByName: string | null;
@@ -497,7 +503,7 @@ export default function LoadOperation() {
       setRecordsPage(1);
     }
   }, [recordsFilterSignature]);
-  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; slipsCount: number; loadingCount: number; readyDespCount: number }>({
+  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; slipsCount: number; loadingCount: number; readyDespCount: number; dispatchedCount?: number; otherCount?: number }>({
     queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab, createdByMe],
     queryFn: async () => {
       const params = new URLSearchParams({ limit: String(recordsPageSize), offset: String(recordsOffset) });
@@ -516,6 +522,8 @@ export default function LoadOperation() {
   const slipsCount = recordsQuery.data?.slipsCount ?? 0;
   const inProgressCount = recordsQuery.data?.loadingCount ?? 0;
   const readyDespCount = recordsQuery.data?.readyDespCount ?? 0;
+  const dispatchedCount = recordsQuery.data?.dispatchedCount ?? 0;
+  const otherCount = recordsQuery.data?.otherCount ?? 0;
 
   // Plant options for PlantFilter, straight from Plant Management (same source PlantBadge reads),
   // so the filter's colors match the badges rendered in the rows.
@@ -531,7 +539,13 @@ export default function LoadOperation() {
   // "READY≈DESP" once loading is complete, "LOADING" while it's still in progress — the same two
   // Finny Status values this page pushes to Notion (server/services/notionOrderStatusSync.ts), so
   // the status shown here reads identically to Load Operations' own status column.
-  const recordStatus = (r: LoadingRecord) => (r.loadingCompletedAt ? "READY≈DESP" : "LOADING");
+  // A later stage stored on the slip (Dispatched, Delivered ...) is shown as it is; otherwise Loading until completed, then Ready for Dispatch.
+  const LATER_STAGES = ["DISPATCHED", "DELIVERED", "UNLOADING", "SHORTAGE", "CANCELLED"];
+  const laterStageOf = (r: { notionStatus?: string | null }) => {
+    const v = String(r.notionStatus ?? "").trim().toUpperCase();
+    return LATER_STAGES.includes(v) ? v : null;
+  };
+  const recordStatus = (r: LoadingRecord) => laterStageOf(r) ?? (r.loadingCompletedAt ? "READY≈DESP" : "LOADING");
   // The status badge itself takes Notion's own colour for the status (NotionStatusBadge); this is
   // only the left accent strip on the mobile card list, by completed/paused/in-progress.
   const recordAccentBorderClass = (r: LoadingRecord) =>
@@ -550,8 +564,23 @@ export default function LoadOperation() {
     r.loadingCompletedAt ? (r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "") : "";
   // Reopen: an admin/super-admin, Supervisor, or the load's current owner (server enforces the
   // same rule).
+  // A load created under Auto Dispatch cannot be reopened by anyone but an admin once it has gone out (the server refuses it too).
+  const isLockedByDispatch = (r: LoadingRecord) => !!r.autoDispatch && (!!r.dispatchedAt || !!laterStageOf(r));
+  // A load that has gone out (any later status, or still stamped dispatched) is the admin's to reopen from ANY of those statuses, but only for a recent
+  // slip: order date within the last 3 days (server enforces it too). Every other load needs to be completed first.
+  const REOPEN_WINDOW_DAYS = 3;
+  const isRecentSlip = (r: LoadingRecord) => {
+    const day = String(r.orderDate ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+    const cutoff = new Date(`${new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })}T00:00:00Z`);
+    cutoff.setUTCDate(cutoff.getUTCDate() - REOPEN_WINDOW_DAYS);
+    return day >= cutoff.toISOString().slice(0, 10);
+  };
+  const hasGoneOut = (r: LoadingRecord) => !!laterStageOf(r) || !!r.dispatchedAt;
   const canReopenRecord = (r: LoadingRecord) =>
-    !!r.loadingCompletedAt && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
+    hasGoneOut(r)
+      ? admin && isRecentSlip(r)
+      : !!r.loadingCompletedAt && !isLockedByDispatch(r) && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
   const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
     { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
     { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
@@ -775,6 +804,8 @@ export default function LoadOperation() {
     },
     onSuccess: (_data, orderNumber) => {
       toast(withNotionNotice({ title: "Load reopened" }, _data));
+      // A load that had gone out and was reopened is back in Loading — show that tab.
+      if (activeViewTab === "dispatched" || activeViewTab === "other") setActiveViewTab("loading");
       recordsQuery.refetch();
       refreshOwnerHistory(orderNumber);
     },
@@ -785,6 +816,24 @@ export default function LoadOperation() {
   // each, same Dialog/target pattern Reset already uses, so an accidental tap can't undo a
   // completed load or take ownership away from whoever currently has it.
   const [reopenTarget, setReopenTarget] = useState<string | null>(null);
+
+  // "Sync status" — reads the status of every load from Notion and brings OUR stored status in line (Notion is only read here).
+  // Admin only; the server refuses anyone else.
+  const syncStatusMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/loading/sync-status-from-notion", {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Sync failed");
+      return res.json() as Promise<{ checked: number; updated: number; unchanged: number; notFound: number; changes: { orderNumber: string; from: string | null; to: string }[] }>;
+    },
+    onSuccess: (data) => {
+      toast({
+        title: data.updated > 0 ? `${data.updated} status${data.updated === 1 ? "" : "es"} updated from Notion` : "Statuses are already up to date",
+        description: `${data.checked} load(s) checked · ${data.unchanged} unchanged${data.notFound > 0 ? ` · ${data.notFound} not found in Notion` : ""}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+    },
+    onError: (err: any) => toast({ title: "Could not sync statuses", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
   const [claimTarget, setClaimTarget] = useState<string | null>(null);
 
   const [resetTarget, setResetTarget] = useState<LoadingRecord | null>(null);
@@ -853,6 +902,7 @@ export default function LoadOperation() {
   // Completing a load is confirmed first and announced afterwards, the same way Unloading does it.
   // A toast was too easy to miss on a busy scanning screen, and the +/- path showed nothing at all.
   const [confirmCompleteOpen, setConfirmCompleteOpen] = useState(false);
+  const [confirmDispatchOpen, setConfirmDispatchOpen] = useState(false);
   const [completedInfo, setCompletedInfo] = useState<
     { orderNumber: string; partyName: string; vehicleNumber: string | null; loadedQty: number; expectedQty: number; auto: boolean } | null
   >(null);
@@ -1992,6 +2042,27 @@ export default function LoadOperation() {
     onError: (err: any) => toast({ title: "Complete failed", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
+  // Admin only: finishes a load reopened from a later status and puts it straight back to that status.
+  const returnStatusName = String(slip?.reopenedFromStatus ?? "").trim().toUpperCase() || "DISPATCHED";
+  const completeReturnMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/complete-and-return`, {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Complete & return failed");
+      return res.json() as Promise<{ slip: ProformaSlip; items: ProformaItem[]; allComplete: boolean; loadedVolume: number }>;
+    },
+    onSuccess: (data) => {
+      setSlip(data.slip);
+      setItems(data.items);
+      setAllComplete(data.allComplete);
+      setLoadedVolume(data.loadedVolume);
+      setConfirmDispatchOpen(false);
+      refreshOwnerHistory(data.slip.orderNumber);
+      queryClient.invalidateQueries({ queryKey: ["/api/loading/records"] });
+      toast(withNotionNotice({ title: `Load completed and returned to ${returnStatusName}` }, data));
+    },
+    onError: (err: any) => toast({ title: "Complete & return failed", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
   // "Sync to Notion" — re-checks this load's vehicle and status in Notion right now and fixes
   // whatever differs (the server only writes to Notion here, never to this app).
   const syncNotionMutation = useMutation({
@@ -2958,7 +3029,7 @@ export default function LoadOperation() {
                 </Button>
               )}
 
-              <div className="grid shrink-0 grid-cols-4 gap-2">
+              <div className="grid shrink-0 grid-cols-3 gap-2 sm:grid-cols-6">
                 <Button
                   variant="outline"
                   size="sm"
@@ -2995,6 +3066,31 @@ export default function LoadOperation() {
                     <span className="text-sm font-semibold">{readyDespCount}</span>
                   </div>
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-auto min-w-0 justify-start bg-purple-50 px-2 py-1.5 hover:bg-purple-100 sm:px-3"
+                  onClick={() => setActiveViewTab("dispatched")}
+                >
+                  <Truck className="mr-1.5 h-4 w-4 shrink-0 text-purple-600 sm:mr-2" />
+                  <div className="flex flex-col items-start">
+                    <span className="whitespace-nowrap text-xs font-bold">DISPATCHED</span>
+                    <span className="text-sm font-semibold">{dispatchedCount}</span>
+                  </div>
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-auto min-w-0 justify-start bg-gray-50 px-2 py-1.5 hover:bg-gray-100 sm:px-3"
+                  onClick={() => setActiveViewTab("other")}
+                  title="Delivered, Unloading, Shortage, Cancelled"
+                >
+                  <Package className="mr-1.5 h-4 w-4 shrink-0 text-gray-600 sm:mr-2" />
+                  <div className="flex flex-col items-start">
+                    <span className="whitespace-nowrap text-xs font-bold">OTHER</span>
+                    <span className="text-sm font-semibold">{otherCount}</span>
+                  </div>
+                </Button>
                 {/* One click: only the slips THIS user created (link-vehicle's created_by_code),
                     newest first — toggles off back to everyone's, same sort/filter either way. */}
                 <Button
@@ -3023,6 +3119,8 @@ export default function LoadOperation() {
                   <TabsTrigger value="overall" className="flex-1 max-w-[200px]">All Operations</TabsTrigger>
                   <TabsTrigger value="loading" className="flex-1 max-w-[200px]">Loading</TabsTrigger>
                   <TabsTrigger value="ready-desp" className="flex-1 max-w-[200px]">Ready for Dispatch</TabsTrigger>
+                  <TabsTrigger value="dispatched" className="flex-1 max-w-[200px]">Dispatched</TabsTrigger>
+                  <TabsTrigger value="other" className="flex-1 max-w-[200px]">Other</TabsTrigger>
                 </TabsList>
               </Tabs>
             </div>
@@ -3078,6 +3176,19 @@ export default function LoadOperation() {
                   <DropdownMenuItem onSelect={resetListColumns} className="text-xs text-[#001d6e]">Reset to default columns and widths</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+              {admin && canWrite && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-9 shrink-0 gap-1.5 text-xs"
+                  disabled={syncStatusMutation.isPending}
+                  title="Read every load's status from Notion and update it here"
+                  onClick={() => syncStatusMutation.mutate()}
+                >
+                  {syncStatusMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
+                  Sync status
+                </Button>
+              )}
               <AddColumnFilterButton
                 columns={recordFilterColumns}
                 conditions={recordColumnConditions}
@@ -3736,7 +3847,18 @@ export default function LoadOperation() {
                         Sync to Notion
                       </Button>
                     )}
-                    {canComplete && !locked && (
+                    {admin && canWrite && !locked && slip?.reopenedFromDispatch && (
+                      <Button
+                        size="sm"
+                        className="h-6 rounded-full bg-indigo-600 px-2 text-[11px] text-white hover:bg-indigo-700 sm:h-7 sm:px-3 sm:text-xs"
+                        disabled={completeReturnMutation.isPending}
+                        onClick={() => setConfirmDispatchOpen(true)}
+                      >
+                        {completeReturnMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                        Complete & return to {returnStatusName}
+                      </Button>
+                    )}
+                    {canComplete && !locked && !slip?.reopenedFromDispatch && (
                       <Button
                         size="sm"
                         className="h-6 rounded-full bg-emerald-600 px-2 text-[11px] text-white hover:bg-emerald-700 sm:h-7 sm:px-3 sm:text-xs"
@@ -5224,14 +5346,38 @@ export default function LoadOperation() {
         </DialogContent>
       </Dialog>
 
+      {/* Complete & return — admin only, for a load reopened from a later status: puts it back to that status. */}
+      <Dialog open={confirmDispatchOpen} onOpenChange={(o) => { if (!o) setConfirmDispatchOpen(false); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Complete this load and return it to {returnStatusName}?</DialogTitle>
+            <DialogDescription>
+              The load is completed and put back to {returnStatusName} right away (also in Notion). It was reopened from {returnStatusName}, so this is how it is finished.
+            </DialogDescription>
+          </DialogHeader>
+          <p className="text-sm text-gray-600">
+            <span className="font-semibold text-gray-900">#{slip?.orderNumber}</span>
+            {slip?.partyName ? ` — ${slip.partyName}` : ""}
+            {slip?.vehicleNumber ? ` · ${slip.vehicleNumber}` : ""}
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDispatchOpen(false)} disabled={completeReturnMutation.isPending}>Cancel</Button>
+            <Button className="bg-indigo-600 text-white hover:bg-indigo-700" disabled={completeReturnMutation.isPending} onClick={() => completeReturnMutation.mutate()}>
+              {completeReturnMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+              Complete & return to {returnStatusName}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Reopen confirmation — admin-only action that undoes a completed, audited load. */}
       <Dialog open={!!reopenTarget} onOpenChange={(o) => { if (!o) setReopenTarget(null); }}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle className="text-amber-700">Reopen this load?</DialogTitle>
             <DialogDescription>
-              Order <span className="font-semibold text-gray-900">#{reopenTarget}</span> is marked complete.
-              Reopening puts it back to Loading so scanning can continue.
+              Order <span className="font-semibold text-gray-900">#{reopenTarget}</span> is marked complete (or has gone out).
+              Reopening puts it back to Loading so scanning can continue. A load that had gone out (Dispatched, Shortage ...) is finished again by an admin with "Complete & return", which puts it back to the status it was reopened from.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

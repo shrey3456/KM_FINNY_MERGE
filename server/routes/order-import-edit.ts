@@ -5,6 +5,7 @@ import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/p
 import { broadcastOrderImportUpdate } from '../lib/importEvents';
 import { getUserPlants, getPlantStateCode, resolvePalletSizeOrQty } from './order-scan';
 import { splitPallets, resplitEventsExtraFlag } from '../lib/orderScanRemap';
+import { resolveLineProduct } from '../lib/productSap';
 
 // ============================================================================
 `// ORDER IMPORT EDIT — a focused, non-admin-gated page for fixing mistakes in a
@@ -361,17 +362,16 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
         // recognize it at all.
         if (barcode) {
           const state = await getPlantStateCode(client, session.plant);
-          const { rows: prodRows } = await client.query(
-            `SELECT gj_plt AS "gjPlt", mp_plt AS "mpPlt" FROM products WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($1))`,
-            [barcode],
-          );
-          const itemsPerPallet = resolvePalletSizeOrQty(prodRows[0] ?? null, state, quantity);
+          // The line's own product (two products can share a barcode): found from its barcode + SAP, same as at CSV import. Its SAP is the
+          // plant state's SAP only (blank when it has none), and the pallet size is that product's.
+          const lp = await resolveLineProduct(client, barcode, sapCode, state);
+          const itemsPerPallet = resolvePalletSizeOrQty(lp.row ? { gjPlt: lp.row.gj_plt, mpPlt: lp.row.mp_plt } : null, state, quantity);
 
           const { rows: newScanItemRows } = await client.query(
-            `INSERT INTO order_scan_items (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `INSERT INTO order_scan_items (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet, product_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING id`,
-            [id, newItemId, barcode, itemName, sapCode, quantity, itemsPerPallet],
+            [id, newItemId, barcode, itemName, lp.productId ? lp.sap : sapCode, quantity, itemsPerPallet, lp.productId],
           );
           const newScanItemId = newScanItemRows[0].id;
 

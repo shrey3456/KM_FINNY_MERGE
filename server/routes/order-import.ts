@@ -1259,6 +1259,8 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         ose.product_id          AS "productId",
         MAX(ose.item_name)      AS "itemName",
         SUM(ose.total_qty)::int AS "scannedQty",
+        -- What is still an Extra: the part given to an earlier shortfall (Adjust Exchange Extra, or an automatic credit) is no longer an Extra.
+        SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0)))::int AS "unclaimedQty",
         MAX(ose.scanned_at)     AS "lastScannedAt"
       FROM order_scan_events ose
       WHERE ose.session_id = ANY($1::int[])
@@ -1294,6 +1296,9 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       const sole = Array.from(new Set(rawItems.filter((r: any) => r.sessionId === ex.sessionId && r.barcode === ex.barcode && r.productId != null).map((r: any) => r.productId)));
       const exPid: number | null = ex.productId ?? (sole.length === 1 ? (sole[0] as number) : null);
       const remaining = remainingExtraByKey.get(`${ex.sessionId}::${ex.barcode}::${exPid ?? ''}`);
+      const stillExtra = Math.min(remaining ?? ex.scannedQty, Number(ex.unclaimedQty ?? ex.scannedQty));
+      // Nothing left of this Extra (all of it went to an earlier shortfall): it is not shown as an Extra any more.
+      if (stillExtra <= 0) return;
       list.push({
         id: -1 - idx,
         sessionId: ex.sessionId,
@@ -1306,7 +1311,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         // "still sitting unclaimed" — remaining is what's left after that, not the full
         // original amount ever logged. Falls back to the raw total for sessions outside a
         // FIFO batch (remainingExtraByKey has no entry there).
-        scannedQty: remaining ?? ex.scannedQty,
+        scannedQty: stillExtra,
         scanStatus: 'extra',
         isExtra: true,
         lastScannedAt: ex.lastScannedAt ?? null,
@@ -1390,6 +1395,16 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
         ose.scanned_by_name AS "scannedByName", ose.scanned_at AS "scannedAt",
         ose.voided, ose.voided_by_code AS "voidedByCode", ose.voided_at AS "voidedAt",
         ose.void_reason AS "voidReason",
+        ose.is_credit AS "isCredit", COALESCE(ose.credited_qty, 0) AS "creditedQty",
+        (ose.is_credit AND COALESCE(ose.scanned_by_name, '') LIKE '%(Adjust Exchange Extra, from %') AS "isManualCredit",
+        -- Where an Extra went: each credit of it onto an earlier shortfall (Adjust Exchange Extra, or an automatic credit), with that CSV's name and date.
+        (SELECT COALESCE(json_agg(json_build_object('csv', s2.csv_file_name, 'orderDate', s2.order_date, 'qty', c.total_qty) ORDER BY c.id), '[]'::json)
+           FROM order_scan_events c JOIN order_import_sessions s2 ON s2.id = c.session_id
+          WHERE c.credit_source_event_id = ose.id AND c.voided IS NOT TRUE) AS "creditedTo",
+        -- A credit row: the Extra it came from.
+        (SELECT json_build_object('csv', s3.csv_file_name, 'orderDate', s3.order_date)
+           FROM order_scan_events x JOIN order_import_sessions s3 ON s3.id = x.session_id
+          WHERE x.id = ose.credit_source_event_id) AS "creditedFrom",
         ois.csv_file_name AS "orderName", ois.part_index AS "partIndex"
       FROM order_scan_events ose
       JOIN order_import_sessions ois ON ois.id = ose.session_id

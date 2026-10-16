@@ -5,6 +5,7 @@ import { pool } from '../db';
 import { requireAdminRole } from '../lib/pageAccess';
 import { reverseOrderSessions, reverseUnloadSessions, reverseLoadingOrders } from '../lib/stockReverse';
 import { runCsvBackup } from '../lib/csvBackup';
+import { getDailySyncConfig, saveDailySyncConfig, isValidRunTime, isDailySyncRunning, runDailySyncNow, msUntilNextRun } from '../services/dailyNotionSync';
 
 // Settings > Data Management > "Clear Stock" — an admin-only action that resets stock numbers
 // for a chosen plant (or every plant), optionally scoped further to only orders/slips dated on
@@ -227,6 +228,54 @@ router.post('/settings/clear-stock', requireAdminRole, async (req: Request, res:
     res.status(500).json({ message: 'Failed to clear stock' });
   } finally {
     client.release();
+  }
+});
+
+// ── Settings > Data Management > "Daily Notion sync" ─────────────────────────────────────────────────────
+// Admin only. GET: the switch, the India-time run time, when it runs next and how the last run went. PUT { enabled?, runTime? }: change them
+// (switching on or changing the time sets one fresh timer; switching off removes it). POST run-now: both steps back to back, once, in the
+// background. See server/services/dailyNotionSync.ts.
+async function dailySyncView() {
+  const cfg = await getDailySyncConfig();
+  return { ...cfg, running: isDailySyncRunning(), nextRunAt: cfg.enabled ? new Date(Date.now() + msUntilNextRun(cfg.runTime)).toISOString() : null };
+}
+router.get('/settings/daily-notion-sync', requireAdminRole, async (_req: Request, res: Response) => {
+  try { res.json(await dailySyncView()); }
+  catch (error) { console.error('Error reading the daily Notion sync setting:', error); res.status(500).json({ message: 'Failed to read the daily Notion sync setting' }); }
+});
+router.put('/settings/daily-notion-sync', requireAdminRole, async (req: Request, res: Response) => {
+  try {
+    const patch: { enabled?: boolean; runTime?: string } = {};
+    if (req.body?.enabled !== undefined) {
+      if (typeof req.body.enabled !== 'boolean') return res.status(400).json({ message: 'enabled must be true or false' });
+      patch.enabled = req.body.enabled;
+    }
+    if (req.body?.runTime !== undefined) {
+      if (!isValidRunTime(req.body.runTime)) return res.status(400).json({ message: 'runTime must be a time like 06:00' });
+      patch.runTime = req.body.runTime;
+    }
+    const { userCode, userName } = actor(req);
+    await saveDailySyncConfig(patch, userName ?? userCode ?? 'admin');
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Settings', action: 'update', entityType: 'daily_notion_sync', entityId: 'daily-notion-sync',
+        details: `Daily Notion sync set by ${userName ?? userCode}:${patch.enabled !== undefined ? ` ${patch.enabled ? 'on' : 'off'}` : ''}${patch.runTime ? ` at ${patch.runTime} IST` : ''}`,
+        userCode, userName,
+      });
+    }
+    res.json(await dailySyncView());
+  } catch (error) {
+    console.error('Error saving the daily Notion sync setting:', error);
+    res.status(500).json({ message: 'Failed to save the daily Notion sync setting' });
+  }
+});
+router.post('/settings/daily-notion-sync/run-now', requireAdminRole, async (req: Request, res: Response) => {
+  try {
+    const { userCode, userName } = actor(req);
+    runDailySyncNow(userName ?? userCode ?? 'admin');
+    res.json({ started: true });
+  } catch (error) {
+    res.status(409).json({ message: error instanceof Error ? error.message : 'Could not start the sync' });
   }
 });
 

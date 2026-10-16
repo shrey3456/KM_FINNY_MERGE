@@ -210,7 +210,10 @@ export default function ProformaSlips() {
     direction: 'asc'
   });
 
-  const DEFAULT_VISIBLE_COLUMN_IDS = ['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'actions'];
+  const DEFAULT_VISIBLE_COLUMN_IDS = ['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'notionStatus', 'loadingStv', 'storeKeeperInfo', 'actions'];
+  // Notion Status, Dispatch Directory and StoreKeeper Info are shown by default. A browser that already saved a column choice from before gets them
+  // added once (after that its own choice is respected, including hiding them again).
+  const NEW_DEFAULT_COLUMN_IDS = ['notionStatus', 'loadingStv', 'storeKeeperInfo'];
   // Column visibility/order are real preferences, not working context for one sitting — saved to
   // localStorage (not sessionStorage) so choosing which columns to see survives closing the
   // browser/logging out, and only changes again when the user actually touches it here.
@@ -218,7 +221,13 @@ export default function ProformaSlips() {
     try {
       const raw = localStorage.getItem("proformaSlips:visibleColumnIds");
       const parsed = raw ? JSON.parse(raw) : null;
-      return Array.isArray(parsed) ? new Set(parsed) : new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+      if (!Array.isArray(parsed)) return new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+      const ids = new Set<string>(parsed);
+      if (localStorage.getItem("proformaSlips:statusColumnsDefault") !== "1") {
+        NEW_DEFAULT_COLUMN_IDS.forEach((id) => ids.add(id));
+        localStorage.setItem("proformaSlips:statusColumnsDefault", "1");
+      }
+      return ids;
     } catch {
       return new Set(DEFAULT_VISIBLE_COLUMN_IDS);
     }

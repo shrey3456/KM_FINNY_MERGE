@@ -411,6 +411,12 @@ export const proformaSlips = pgTable("proforma_slips", {
   // slips with this set get their StoreKeeper Info written to Notion (on create, on a handoff, on
   // an admin STV change) — loads started before then are never rewritten there.
   notionStoreKeeperPush: boolean("notion_store_keeper_push").default(false),
+  // Auto Dispatch (server/services/autoDispatch.ts): a load started after it went live becomes Dispatched by itself an hour after it was completed; once it
+  // has gone out it is locked, and only an admin can reopen it (within a few days), finishing it again with "Complete & return".
+  autoDispatch: boolean("auto_dispatch").notNull().default(false),
+  dispatchedAt: timestamp("dispatched_at"),
+  reopenedFromDispatch: boolean("reopened_from_dispatch").notNull().default(false),
+  reopenedFromStatus: text("reopened_from_status"),
   // The Finny Status this slip had when Create Operation moved it to LOADING — put back if the load
   // is deleted from the Loading page. Null for loads started before this was recorded.
   statusBeforeLoading: text("status_before_loading"),

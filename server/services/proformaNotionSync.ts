@@ -12,6 +12,7 @@ import { stateSapOf } from '../lib/productSap';
 import { stateOfPlant } from '../lib/stockV2';
 import { extractText } from '../lib/notionProperties';
 import type { InsertProformaSlip } from '@shared/schema';
+import { dispatchUnlockPatch } from './autoDispatch';
 
 export interface OrderItemData {
   productId: number;
@@ -282,6 +283,10 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
     notionFields.vehicleInfoId = resolved?.id ?? null;
   }
 
+  // Notion moving a load that had gone out back to Ready for Dispatch / Loading lifts its dispatch lock.
+  const unlock = dispatchUnlockPatch(existingSlip as any, orderData.notionStatus);
+  if (unlock) Object.assign(notionFields, unlock);
+
   let slipId: number;
   let created = false;
 
@@ -345,6 +350,34 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
   });
 
   return { created, itemsCreated, totalQuantity: finalTotalQuantity, totalVolume: finalTotalVolume };
+}
+
+// ─── Daily Notion sync (server/services/dailyNotionSync.ts) ───────────────────────────────────────────
+// One order date, read from Notion and written straight away - new slips and changed ones, exactly what "Sync from Notion" > Apply does for that date -
+// but WITHOUT the shared review list (pendingOrders / pendingReport) and its lock, so it can never replace a review someone has open on the Proforma
+// Slips page. It still refuses to start while that screen's own sync is running (and the reverse), so two writers never work on the slips at once.
+let dailySyncing = false;
+export async function syncDateAndApply(date: string): Promise<{ totalOrders: number; created: number; updated: number; unchanged: number; failed: number }> {
+  if (isSyncing || dailySyncing) throw new Error('A sync is already in progress — please wait');
+  dailySyncing = true;
+  try {
+    const orders = await fetchProformaOrdersFromNotion(date, date);
+    let created = 0, updated = 0, unchanged = 0, failed = 0;
+    for (const [, orderData] of Array.from(orders.entries())) {
+      try {
+        const diff = await diffOrder(orderData);
+        if (!diff.isNew && diff.fieldChanges.length === 0 && diff.itemChanges.length === 0) { unchanged++; continue; }
+        const r = await writeOrderToDb(orderData);
+        if (r.created) created++; else updated++;
+      } catch (error) {
+        failed++;
+        console.error(`[Daily Notion Sync] Error applying order ${orderData.orderNumber}:`, error);
+      }
+    }
+    return { totalOrders: orders.size, created, updated, unchanged, failed };
+  } finally {
+    dailySyncing = false;
+  }
 }
 
 // ─── Detect / diff for the "Sync from Notion" review flow ─────────────────────
@@ -466,7 +499,7 @@ export async function detectProformaChanges(
   triggeredBy: string,
   options: { existingOnly?: boolean } = {},
 ): Promise<SyncReport> {
-  if (isSyncing) throw new Error('A sync is already in progress — please wait');
+  if (isSyncing || dailySyncing) throw new Error('A sync is already in progress — please wait');
   isSyncing = true;
   try {
     const ordersMap = await fetchProformaOrdersFromNotion(startDate, endDate);
@@ -512,6 +545,24 @@ export async function detectProformaChanges(
   }
 }
 
+// Every Notion sync of Proforma Slips leaves one line in Activities (Notion sync entries): who ran it (or "System" for the scheduled
+// job), what it looked at, and how many slips it created or changed. Never throws — the sync itself has already happened.
+export async function logProformaSync(
+  details: string,
+  who?: { userCode?: string | null; userName?: string | null },
+): Promise<void> {
+  try {
+    await storage.logActivity({
+      pageName: 'Proforma Slips', action: 'update', entityType: 'notion_sync', entityId: 'proforma-slips',
+      details,
+      userCode: who?.userCode ?? undefined,
+      userName: who?.userName ?? 'System',
+    });
+  } catch (error) {
+    console.error('[Proforma sync] Could not write the Activity log entry:', error instanceof Error ? error.message : error);
+  }
+}
+
 export function getPendingProformaReport(): SyncReport | null {
   return pendingReport;
 }
@@ -522,9 +573,9 @@ export function getPendingProformaReport(): SyncReport | null {
 // as before checkbox selection existed.
 export async function applyPendingProformaChanges(
   selectedOrderNumbers?: string[],
-): Promise<{ slipsCreated: number; slipsUpdated: number; itemsCreated: number }> {
+): Promise<{ slipsCreated: number; slipsUpdated: number; itemsCreated: number; createdOrderNumbers: string[]; updatedOrderNumbers: string[] }> {
   if (!pendingOrders || !pendingReport) throw new Error('No pending changes. Run detection first.');
-  if (isSyncing) throw new Error('A sync is already in progress — please wait');
+  if (isSyncing || dailySyncing) throw new Error('A sync is already in progress — please wait');
 
   isSyncing = true;
   try {
@@ -536,14 +587,16 @@ export async function applyPendingProformaChanges(
     let slipsCreated = 0;
     let slipsUpdated = 0;
     let itemsCreated = 0;
+    const createdOrderNumbers: string[] = [];
+    const updatedOrderNumbers: string[] = [];
     const appliedOrderNumbers = new Set<string>();
 
     for (const [orderNo, orderData] of Array.from(pendingOrders.entries())) {
       if (selection && !selection.has(orderNo)) continue;
       try {
         const result = await writeOrderToDb(orderData);
-        if (result.created) slipsCreated++;
-        else slipsUpdated++;
+        if (result.created) { slipsCreated++; createdOrderNumbers.push(orderNo); }
+        else { slipsUpdated++; updatedOrderNumbers.push(orderNo); }
         itemsCreated += result.itemsCreated;
         appliedOrderNumbers.add(orderNo);
       } catch (error) {
@@ -565,7 +618,7 @@ export async function applyPendingProformaChanges(
       pendingReport = null;
     }
 
-    return { slipsCreated, slipsUpdated, itemsCreated };
+    return { slipsCreated, slipsUpdated, itemsCreated, createdOrderNumbers, updatedOrderNumbers };
   } finally {
     isSyncing = false;
   }
@@ -593,4 +646,67 @@ export async function setAutoApplyEnabled(enabled: boolean, updatedBy: string): 
      ON CONFLICT (id) DO UPDATE SET auto_apply_enabled = EXCLUDED.auto_apply_enabled, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
     [enabled, updatedBy],
   );
+}
+
+
+// ─── Scheduled refresh of the latest day's existing slips (Order DB only) ─────
+// Used by the 5-hour scheduler. Finds the most recent order date that already has slips in
+// Proforma and, for that date only, re-reads the Notion ORDER database (Plant / Finny Status /
+// Proforma Qty) and updates those existing slips. It never touches the dispatch DB, never
+// creates slips, never looks at earlier dates, and does not go through the pending-review state.
+// Pass apply=false (auto-apply toggle off) to only report how many slips would change.
+export async function syncLatestDateFromOrderDb(apply: boolean): Promise<{ date: string | null; checked: number; updated: number }> {
+  const { rows } = await pool.query(`SELECT to_char(MAX(order_date), 'YYYY-MM-DD') AS d FROM proforma_slips`);
+  const date: string | null = rows[0]?.d ?? null;
+  if (!date) return { date: null, checked: 0, updated: 0 };
+
+  const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+  if (!ORDER_DATABASE_ID) throw new Error('ORDER_DATABASE_ID environment variable is not set');
+  const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
+
+  let checked = 0;
+  let updated = 0;
+  let cursor: string | undefined = undefined;
+  let hasMore = true;
+  while (hasMore) {
+    const res: any = await notion.databases.query({
+      database_id: ORDER_DATABASE_ID,
+      page_size: 100,
+      start_cursor: cursor,
+      filter: {
+        and: [
+          { property: 'Ord Date :', date: { on_or_after: date } },
+          { property: 'Ord Date :', date: { on_or_before: date } },
+        ],
+      },
+    });
+    for (const page of res.results) {
+      if (!('properties' in page)) continue;
+      const props = page.properties;
+      const orderNumber = extractText(props['Order No. :']);
+      if (!orderNumber) continue;
+      const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+      if (!slip) continue; // existing slips only
+      checked++;
+      const plant = extractText(props['Stk Plant :']) || slip.plant;
+      const status = extractText(props['Finny Status :']) || null;
+      const qty = props['Proforma Qty :']?.rollup?.number ?? props['For Qty :']?.formula?.number ?? undefined;
+      const changes: Partial<InsertProformaSlip> = {};
+      if (plant && plant !== slip.plant) changes.plant = plant;
+      if (status && status !== slip.notionStatus) {
+        changes.notionStatus = status;
+        const unlock = dispatchUnlockPatch(slip as any, status);
+        if (unlock) Object.assign(changes, unlock);
+      }
+      if (qty !== undefined && qty !== slip.totalQuantity) changes.totalQuantity = qty;
+      if (Object.keys(changes).length > 0) {
+        // apply=false (auto-apply toggle off): only count what would change, write nothing.
+        if (apply) await storage.updateProformaSlip(slip.id, changes);
+        updated++;
+      }
+    }
+    hasMore = res.has_more;
+    cursor = res.next_cursor ?? undefined;
+  }
+  return { date, checked, updated };
 }

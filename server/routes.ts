@@ -8308,6 +8308,54 @@ export async function registerRoutes(app: Express): Promise<Server> {
     console.log('[Notion Vehicle Sync] 24-hour auto sync+apply scheduler registered');
   }
 
+  // Every 5 hours: detect Proforma Slip changes from Notion for TODAY (local date), and apply
+  // them automatically only if an admin has turned on the auto-apply toggle
+  // (proforma_sync_config) — otherwise leave them pending for review, same gating as Product/
+  // Vehicle Master above. Reuses the exact same detect/apply pair the "Sync from Notion" dialog
+  // on the Proforma Slips page calls manually (server/services/proformaNotionSync.ts), so a
+  // scheduled run and a manual one behave identically and share the same pending-review state.
+  if (process.env.NOTION_PAGE_URL && process.env.ORDER_DATABASE_ID) {
+    const { syncLatestDateFromOrderDb, getAutoApplyEnabled: getProformaAutoApplyEnabled, logProformaSync } = await import('./services/proformaNotionSync');
+    const PROFORMA_SYNC_INTERVAL_MS = 5 * 60 * 60 * 1000;
+    // Refreshes only the latest order date's existing slips from the Notion Order DB.
+    const runScheduledProformaSync = async (trigger: string) => {
+      try {
+        // Auto-apply toggle off: nothing is written, the run only reports what would change.
+        const apply = await getProformaAutoApplyEnabled();
+        const r = await syncLatestDateFromOrderDb(apply);
+        console.log(r.date
+          ? `[Proforma Sync] ${r.date}: checked ${r.checked} existing slip(s), ${apply ? `updated ${r.updated}` : `${r.updated} would change — NOT applied (auto-apply is off)`}.`
+          : '[Proforma Sync] No slips yet, nothing to sync.');
+        // One Activities line per run: the scheduled job reads Notion (it never creates slips) — so the log says what it read and what it did.
+        void logProformaSync(
+          r.date
+            ? `Scheduled Notion sync (Proforma Slips, ${trigger}): order date ${r.date} — ${r.checked} existing slip(s) checked, 0 created, ${apply ? `${r.updated} updated` : `${r.updated} would change but nothing was written (auto-apply is off)`}`
+            : `Scheduled Notion sync (Proforma Slips, ${trigger}): no slips yet, nothing to sync`,
+        );
+      } catch (err) {
+        console.error('[Proforma Sync] Scheduled sync failed:', err);
+        void logProformaSync(`Scheduled Notion sync (Proforma Slips, ${trigger}) failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    setInterval(() => runScheduledProformaSync('every 5 hours'), PROFORMA_SYNC_INTERVAL_MS);
+    setTimeout(() => runScheduledProformaSync('after server start'), 20000);
+    console.log('[Proforma Sync] 5-hour auto sync scheduler registered');
+  }
+
+  // Daily Notion sync (Settings > Data Management): once a day at the admin's set time (India time) - Product Master, 5 minutes later tomorrow's Proforma
+  // Slips. One timer when switched on, none when off; separate from the 5-hour scheduler above. See server/services/dailyNotionSync.ts.
+  try {
+    const { startDailyNotionSync } = await import('./services/dailyNotionSync');
+    await startDailyNotionSync();
+  } catch (err) {
+    console.error('[Daily Notion Sync] Could not start:', err);
+  }
+
+  // Auto Dispatch: a load started after this went live becomes Dispatched by itself an hour after it was completed (app and Notion) - see
+  // server/services/autoDispatch.ts. It reads the database every few minutes, so a restart never loses a dispatch.
+  const { startAutoDispatchScheduler } = await import('./services/autoDispatch');
+  startAutoDispatchScheduler();
+
   // Return the HTTP server with WebSocket support
   return httpServer;
 }

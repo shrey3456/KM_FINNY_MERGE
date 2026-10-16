@@ -43,44 +43,6 @@ export function ProformaSlipNotionSync({ onApplySuccess }: ProformaSlipNotionSyn
   const { toast } = useToast();
   const canSync = user?.role === 'admin' || user?.role === 'super-admin';
 
-  // Server-persisted (not per-browser) — also gates the 5-hour scheduled sync job (server/
-  // routes.ts), so everyone sees and controls the same real setting instead of a local-only
-  // preference. Same pattern as Product Master / Vehicle Master's "Auto Apply" toggle.
-  const autoSyncConfigQuery = useQuery({
-    queryKey: ["/api/proforma-notion-sync/auto-apply-config"],
-    queryFn: async (): Promise<{ enabled: boolean }> => {
-      const response = await apiRequest("GET", "/api/proforma-notion-sync/auto-apply-config");
-      return response.json();
-    },
-    staleTime: 60 * 1000,
-    enabled: canSync,
-  });
-  const autoSync = autoSyncConfigQuery.data?.enabled ?? false;
-
-  const toggleAutoSyncMutation = useMutation({
-    mutationFn: async (next: boolean) => {
-      const response = await apiRequest("POST", "/api/proforma-notion-sync/auto-apply-config", { enabled: next });
-      return response.json();
-    },
-    onSuccess: async (data: { enabled: boolean }) => {
-      await queryClient.invalidateQueries({ queryKey: ["/api/proforma-notion-sync/auto-apply-config"] });
-      toast({
-        title: data.enabled ? "Auto Sync enabled" : "Auto Sync disabled",
-        description: data.enabled
-          ? "The 5-hour scheduled sync will now apply changes from Notion automatically. A manual \"Check for Changes\" here still always stops for review."
-          : "The 5-hour scheduled sync will detect changes and leave them pending for review instead of applying them.",
-        className: data.enabled ? "bg-emerald-50 border-emerald-200 text-emerald-900" : undefined,
-      });
-    },
-    onError: (error: any) => {
-      toast({ title: "Could not update Auto Sync", description: error.message, variant: "destructive" });
-    },
-  });
-
-  function toggleAutoSync() {
-    toggleAutoSyncMutation.mutate(!autoSync);
-  }
-
   // Today's LOCAL date. toISOString() is UTC, which in India (UTC+5:30) is still yesterday until
   // 5:30 am — a sync opened early in the morning defaulted to the previous day's orders.
   const [dateRange, setDateRange] = useState({
@@ -207,31 +169,12 @@ export function ProformaSlipNotionSync({ onApplySuccess }: ProformaSlipNotionSyn
           <Search className="h-5 w-5 text-[#001d6e]" />
           <h3 className="text-lg font-semibold text-[#001d6e]">Sync from Notion</h3>
         </div>
-        {/* Auto Sync toggle — server-persisted. Gates ONLY the 5-hour scheduled sync (server/
-            routes.ts); a manual "Check for Changes" below always stops for review regardless. */}
-        <button
-          type="button"
-          onClick={toggleAutoSync}
-          disabled={autoSyncConfigQuery.isLoading || toggleAutoSyncMutation.isPending}
-          title="Controls whether the 5-hour scheduled sync auto-applies changes. A manual check below always stops for review."
-          className={`h-8 flex items-center gap-2 rounded-md border px-3 text-xs font-semibold transition-all disabled:opacity-60 ${
-            autoSync
-              ? "bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700"
-              : "bg-white border-gray-200 text-gray-500 hover:bg-gray-50"
-          }`}
-        >
-          <span className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${autoSync ? "bg-white/30" : "bg-gray-200"}`}>
-            <span className={`absolute h-3 w-3 rounded-full bg-white shadow transition-transform ${autoSync ? "translate-x-3.5" : "translate-x-0.5"}`} />
-          </span>
-          Auto Apply
-        </button>
       </div>
       <p className="text-sm text-gray-500">
         Check whether Notion has new orders or changed data for a date range, review what would
-        change, then apply it — nothing is written until you confirm. A 5-hour background sync
-        also checks today's orders automatically; Auto Apply controls only that background
-        sync — with it off, the background sync's changes are left pending here for review
-        instead of being written immediately. A manual check here always stops for review either way.
+        change, then apply it — nothing is written until you confirm. A separate background sync
+        (every 5 hours) keeps the latest day's slips' Plant, Status and Quantity up to date; whether it
+        writes its changes is set under Settings, Data Management.
       </p>
 
       <div className="grid grid-cols-2 gap-4">

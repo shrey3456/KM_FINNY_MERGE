@@ -61,6 +61,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import DailyNotionSyncCard from '@/components/settings/DailyNotionSyncCard';
+import ProformaAutoSyncCard from '@/components/settings/ProformaAutoSyncCard';
 
 // ─── Opening Stock CSV column auto-detection + manual mapping — same two-step pattern Order
 // Import uses (client/src/pages/OrderImport.tsx: cleanHeader/parseCsvRaw/autoMatch/the mapping
@@ -1128,6 +1130,10 @@ const Settings = () => {
                         Import Opening Stock
                       </Button>
                     </div>
+
+                    <ProformaAutoSyncCard isAdmin={isAdminUser} />
+
+                    <DailyNotionSyncCard isAdmin={isAdminUser} />
 
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>

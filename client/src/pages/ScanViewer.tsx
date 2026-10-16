@@ -102,6 +102,8 @@ type HistoryEvent = {
   pallets: number | null; totalQty: number; isExtra: boolean; stv: string | null;
   scannedByName: string | null; scannedAt: string;
   voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+  isCredit?: boolean | null; isManualCredit?: boolean | null; creditedQty?: number | null;
+  creditedTo?: Array<{ csv: string; orderDate: string | null; qty: number }> | null; creditedFrom?: { csv: string; orderDate: string | null } | null;
   orderName: string; partIndex: number | null;
 };
 
@@ -1212,11 +1214,11 @@ export default function ScanViewer() {
                     </span>
                   </td>
                   <td className="truncate border-r border-gray-100 px-2 py-2 text-[11px]">
-                    <HistoryStatus source="scan" isExtra={ev.isExtra} voided={ev.voided} voidReason={ev.voidReason} />
+                    <HistoryStatus source="scan" isExtra={ev.isExtra} isCredit={ev.isCredit} voided={ev.voided} voidReason={ev.voidReason} creditedQty={ev.creditedQty} creditedTo={ev.creditedTo} creditedFrom={ev.creditedFrom} />
                   </td>
                   {canVoidScan && (
                     <td className="px-2 py-2 text-right">
-                      {!ev.voided && (
+                      {!ev.voided && !ev.isManualCredit && (
                         <Button
                           size="sm" variant="ghost"
                           className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"

@@ -2045,6 +2045,8 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
       WHERE ose.session_id = ANY($1::int[]) AND ose.is_extra = true AND ose.voided IS NOT TRUE
         AND ose.barcode <> 'EMPTY_BOX'
       GROUP BY COALESCE(ose.barcode, ''), ose.product_id
+      -- An Extra that was fully given to an earlier shortfall (Adjust Exchange) has nothing left: it is no longer an Extra anywhere (Overall Scan Ops, Scan Order).
+      HAVING SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0))) > 0
       ORDER BY MAX(ose.scanned_at) DESC
     `, [groupSessionIds]);
     res.json(rows);
@@ -2277,6 +2279,11 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
     // block above, for the split case) never added new stock — it just reassigned boxes an
     // earlier Extra scan already added. Reversing stock for it here would remove those boxes a
     // second time. Instead, give the qty back to the source Extra event so it's available again.
+    // A shortfall closed from Adjust Exchange Extra is final: it moved Purchase between two days, so it has no void.
+    if (event.is_credit && String(event.scanned_by_name ?? '').includes('(Adjust Exchange Extra, from ')) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'A shortfall closed from Adjust Exchange Extra cannot be voided.' });
+    }
     if (event.is_credit && event.credit_source_event_id) {
       const { rows: srcRows } = await client.query(
         `SELECT session_id, barcode, product_id FROM order_scan_events WHERE id = $1 FOR UPDATE`,
@@ -2488,7 +2495,15 @@ router.get('/order-scan/exchange/shortfalls', requirePageAccess('adjust-exchange
     if (barcode) { params.push(barcode); barcodeClause = ` AND LOWER(i.barcode) = LOWER($${params.length})`; }
     // Two products can share a barcode (65 g / 60 g): a shortfall is only for the same product as the Extra.
     const productId = Number(req.query.productId);
-    if (req.query.productId != null && req.query.productId !== '' && Number.isInteger(productId)) { params.push(productId); barcodeClause += ` AND i.product_id = $${params.length}`; }
+    if (req.query.productId != null && req.query.productId !== '' && Number.isInteger(productId)) {
+      params.push(productId);
+      const n = params.length;
+      // The same product - or an older item with no product saved yet, which belongs to this product when the barcode has only one, or its SAP is this product's.
+      barcodeClause += ` AND (i.product_id = $${n} OR (i.product_id IS NULL AND EXISTS (
+          SELECT 1 FROM products pp WHERE pp.id = $${n} AND LOWER(TRIM(pp.barcode)) = LOWER(TRIM(i.barcode))
+            AND ((SELECT COUNT(*) FROM products px WHERE LOWER(TRIM(px.barcode)) = LOWER(TRIM(i.barcode))) = 1
+                 OR (COALESCE(TRIM(i.sap_code), '') <> '' AND TRIM(i.sap_code) IN (COALESCE(pp.gj_sap, ''), COALESCE(pp.mp_sap, ''), COALESCE(pp.up_sap, '')))))))`;
+    }
     const { rows } = await pool.query(
       `WITH adj AS (
          SELECT scan_item_id, COALESCE(SUM(total_qty), 0)::int AS adjust_qty, MIN(id) AS adjust_event_id
@@ -2630,7 +2645,8 @@ router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), 
     );
     const productId = productRows[0]?.id ?? null;
 
-    await v2Purchase(client, { source: 'order', sessionId: extra.session_id, plant: extra.session_plant, barcode: extra.barcode, qty: -qty, productId: extra.product_id ?? null });
+    // The boxes leave the Extra's day as Purchase AND as Extra (they are no longer an Extra there), so that day's Extra Purchase never shows more than its Purchase.
+    await v2Purchase(client, { source: 'order', sessionId: extra.session_id, plant: extra.session_plant, barcode: extra.barcode, qty: -qty, extraQty: -qty, productId: extra.product_id ?? null });
     await v2Purchase(client, { source: 'order', sessionId: target.session_id, plant: target.session_plant, barcode: target.barcode, qty, productId: target.product_id ?? extra.product_id ?? null });
 
     await client.query('COMMIT');

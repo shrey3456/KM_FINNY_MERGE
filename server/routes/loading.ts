@@ -9,11 +9,12 @@ import { availableStock, takeStock, recordSale, giveBack, giveBackOnSlip, type S
 import { resolveLineProduct, stateSapOf } from '../lib/productSap';
 import {
   pushStoreKeeperInfoToNotion, getFinnyStatusOptions, syncOrderToNotion, settleNotionSync, reconcileOrderWithNotion,
-  watchStatusAfterVehicleChange,
+  watchStatusAfterVehicleChange, fetchNotionStatusByOrderNumbers,
   isLaterStageStatus, NOTION_LOADING_STATUS, NOTION_LOADING_COMPLETE_STATUS, type NotionSyncOutcome,
 } from '../services/notionOrderStatusSync';
 import { searchNotionVehicleByNumber } from '../services/notionVehicleSync';
 import { computeLoadDateReport, computeLoadDateActivity } from '../lib/loadDateReport';
+import { isLaterStage, dispatchUnlockPatch, isWithinReopenWindow, REOPEN_WINDOW_DAYS, DISPATCHED_STATUS_LIST, OTHER_LATER_STATUS_LIST, LATER_STAGE_STATUS_LIST, NOTION_DISPATCHED_STATUS } from '../services/autoDispatch';
 
 // Loading — two things happen here:
 //   1. Link a vehicle (from Vehicle Master) onto a Proforma Slip: sets the slip's vehicleNumber,
@@ -693,6 +694,61 @@ router.post('/loading/proforma/:orderNumber/sync-notion', requireLoadingWrite, a
   }
 });
 
+// POST /api/loading/sync-status-from-notion — admin only. Reads the current Notion status of every load in the list and brings OUR
+// stored status in line with it (Notion is the source here; nothing is written to Notion). Plant access is respected. Returns the counts and
+// the first 200 changes.
+let syncingStatusFromNotion = false;
+router.post('/loading/sync-status-from-notion', requireLoadingWrite, async (req: Request, res: Response) => {
+  if (!isAdmin(req)) return res.status(403).json({ message: 'Only an admin can sync statuses from Notion.' });
+  if (syncingStatusFromNotion) return res.status(409).json({ message: 'A status sync is already running — wait for it to finish.' });
+  syncingStatusFromNotion = true;
+  try {
+    const userPlants = getUserPlants(req.user);
+    const params: any[] = [];
+    let plantClause = '';
+    if (userPlants !== null) { params.push(userPlants); plantClause = `WHERE LOWER(ps.plant) = ANY($${params.length})`; }
+    const { rows: slips } = await pool.query(
+      `SELECT DISTINCT ps.id, ps.order_number AS "orderNumber", ps.notion_status AS "status", ps.auto_dispatch AS "autoDispatch", ps.dispatched_at AS "dispatchedAt"
+         FROM loading_records lr
+         JOIN proforma_slips ps ON ps.order_number = lr.order_number
+        ${plantClause}`,
+      params,
+    );
+    const fromNotion = await fetchNotionStatusByOrderNumbers(slips.map((r: any) => r.orderNumber));
+    const changes: { orderNumber: string; from: string | null; to: string }[] = [];
+    let unchanged = 0;
+    let notFound = 0;
+    for (const slip of slips as any[]) {
+      const notionStatus = fromNotion.get(String(slip.orderNumber).trim());
+      if (!notionStatus) { notFound++; continue; }
+      if (String(slip.status ?? '').trim().toUpperCase() === notionStatus.trim().toUpperCase()) { unchanged++; continue; }
+      // A newly-created load that Notion now shows as Dispatched also gets its dispatch time, so it is locked like an auto-dispatched one.
+      const markDispatched = slip.autoDispatch === true && !slip.dispatchedAt && isLaterStage(notionStatus);
+      // ...and a load Notion moves BACK to Ready for Dispatch / Loading gets its dispatch lock lifted, so it can be reopened again.
+      const unlock = dispatchUnlockPatch({ notionStatus: slip.status, dispatchedAt: slip.dispatchedAt }, notionStatus);
+      await pool.query(
+        `UPDATE proforma_slips SET notion_status = $1${markDispatched ? ", dispatched_at = NOW() AT TIME ZONE 'UTC'" : ''}${unlock ? ', dispatched_at = NULL, auto_dispatch = false' : ''} WHERE id = $2`,
+        [notionStatus, slip.id],
+      );
+      changes.push({ orderNumber: slip.orderNumber, from: slip.status ?? null, to: notionStatus });
+    }
+    const { userCode, userName } = actor(req);
+    try {
+      await storage.logActivity({
+        pageName: 'Loading', action: 'update', entityType: 'notion_sync', entityId: 'status-from-notion',
+        details: `Status sync from Notion by ${userName ?? userCode}: ${slips.length} load(s) checked, ${changes.length} updated, ${unchanged} already the same, ${notFound} not found in Notion`,
+        userCode, userName,
+      });
+    } catch { /* the sync itself already happened */ }
+    res.json({ checked: slips.length, updated: changes.length, unchanged, notFound, changes: changes.slice(0, 200) });
+  } catch (error) {
+    console.error('Error syncing statuses from Notion:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to sync statuses from Notion' });
+  } finally {
+    syncingStatusFromNotion = false;
+  }
+});
+
 // POST /api/loading/proforma/:orderNumber/start — "Create Operation" on the Create Load Operation
 // from Proforma dialog. This is what actually starts the load: it flips the slip to LOADING both
 // locally and in Notion. Deliberately NOT done on lookup, so previewing a slip (or cancelling out
@@ -770,6 +826,8 @@ router.post('/loading/proforma/:orderNumber/start', requireLoadingWrite, async (
         // From here on this load's StoreKeeper Info is mirrored to Notion — only loads created
         // from now, never ones started before this existed.
         patch.notionStoreKeeperPush = true;
+        // ...and only loads created from now are dispatched automatically an hour after completion (services/autoDispatch.ts).
+        patch.autoDispatch = true;
       }
       const updated = await storage.updateProformaSlip(slip.id, patch as any);
       if (updated) {
@@ -1440,8 +1498,19 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
     }
     const baseWhere = baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : '';
 
-    const statusCondition = tab === 'loading' ? 'ps.loading_completed_at IS NULL'
-      : tab === 'ready-desp' ? 'ps.loading_completed_at IS NOT NULL'
+    // Every load is in exactly one of four groups. A later stage in Notion's status (Dispatched, Delivered ...) wins over the
+    // completion flag; otherwise a completed load is Ready for Dispatch and an unfinished one is Loading.
+    const sqlList = (list: string[]) => list.map((v) => `'${v.replace(/'/g, "''")}'`).join(', ');
+    const statusUpper = `UPPER(TRIM(COALESCE(ps.notion_status, '')))`;
+    const IS_DISPATCHED = `${statusUpper} IN (${sqlList(DISPATCHED_STATUS_LIST)})`;
+    const IS_OTHER_LATER = `${statusUpper} IN (${sqlList(OTHER_LATER_STATUS_LIST)})`;
+    const IS_LATER = `${statusUpper} IN (${sqlList(LATER_STAGE_STATUS_LIST)})`;
+    const IS_LOADING = `(ps.loading_completed_at IS NULL AND NOT ${IS_LATER})`;
+    const IS_READY = `(ps.loading_completed_at IS NOT NULL AND NOT ${IS_LATER})`;
+    const statusCondition = tab === 'loading' ? IS_LOADING
+      : tab === 'ready-desp' ? IS_READY
+      : tab === 'dispatched' ? IS_DISPATCHED
+      : tab === 'other' ? IS_OTHER_LATER
       : null;
     const listWhere = statusCondition
       ? `${baseWhere ? `${baseWhere} AND` : 'WHERE'} ${statusCondition}`
@@ -1451,7 +1520,7 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
     const limitIdx = params.length - 1;
     const offsetIdx = params.length;
 
-    const [dataRes, totalRes, loadingCountRes, readyDespCountRes] = await Promise.all([
+    const [dataRes, totalRes, loadingCountRes, readyDespCountRes, dispatchedCountRes, otherCountRes] = await Promise.all([
       pool.query(
         `SELECT lr.id, lr.order_number AS "orderNumber", lr.proforma_slip_id AS "proformaSlipId",
                 lr.party_name AS "partyName", lr.plant, lr.vehicle_number AS "vehicleNumber",
@@ -1466,6 +1535,8 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
                 ps.loading_owner_code AS "loadingOwnerCode", ps.loading_owner_name AS "loadingOwnerName",
                 ps.loading_paused_at AS "loadingPausedAt",
                 ps.loading_stv AS "loadingStv",
+                ps.notion_status AS "notionStatus", ps.auto_dispatch AS "autoDispatch", ps.dispatched_at AS "dispatchedAt",
+                ps.reopened_from_dispatch AS "reopenedFromDispatch", ps.reopened_from_status AS "reopenedFromStatus",
                 COALESCE((SELECT SUM(i.quantity) FROM proforma_slip_items i WHERE i.proforma_slip_id = ps.id), 0)::int AS "totalQty",
                 COALESCE((SELECT SUM(e.total_qty) FROM loading_scan_events e WHERE e.order_number = lr.order_number AND e.voided IS NOT TRUE), 0)::int AS "loadedQty",
                 -- When the first box was really scanned. A load row created later than its own work (rows
@@ -1487,7 +1558,7 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
          FROM loading_records lr
          LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number
          ${listWhere}
-         ORDER BY ${tab === 'ready-desp' ? 'ps.loading_completed_at DESC NULLS LAST, ' : ''}lr.created_at DESC
+         ORDER BY ${tab === 'ready-desp' || tab === 'dispatched' || tab === 'other' ? 'ps.loading_completed_at DESC NULLS LAST, ' : ''}lr.created_at DESC
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         params,
       ),
@@ -1496,17 +1567,27 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
         listParams,
       ),
       pool.query(
-        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ps.loading_completed_at IS NULL` : 'WHERE ps.loading_completed_at IS NULL'}`,
+        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ${IS_LOADING}` : `WHERE ${IS_LOADING}`}`,
         listParams,
       ),
       pool.query(
-        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ps.loading_completed_at IS NOT NULL` : 'WHERE ps.loading_completed_at IS NOT NULL'}`,
+        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ${IS_READY}` : `WHERE ${IS_READY}`}`,
+        listParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ${IS_DISPATCHED}` : `WHERE ${IS_DISPATCHED}`}`,
+        listParams,
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM loading_records lr LEFT JOIN proforma_slips ps ON ps.order_number = lr.order_number ${baseWhere ? `${baseWhere} AND ${IS_OTHER_LATER}` : `WHERE ${IS_OTHER_LATER}`}`,
         listParams,
       ),
     ]);
 
     const loadingCount = parseInt(loadingCountRes.rows[0]?.total ?? '0', 10);
     const readyDespCount = parseInt(readyDespCountRes.rows[0]?.total ?? '0', 10);
+    const dispatchedCount = parseInt(dispatchedCountRes.rows[0]?.total ?? '0', 10);
+    const otherCount = parseInt(otherCountRes.rows[0]?.total ?? '0', 10);
 
     res.json({
       records: dataRes.rows,
@@ -1514,9 +1595,11 @@ router.get('/loading/records', requirePageAccess('loading'), async (req: Request
       // Counts for the SLIPS/LOADING/READY≈DESP tiles — scoped to the date/search/plant filter
       // currently applied, but deliberately NOT to the tab itself, since all three tiles need to
       // stay visible (and clickable, to switch tabs) at once.
-      slipsCount: loadingCount + readyDespCount,
+      slipsCount: loadingCount + readyDespCount + dispatchedCount + otherCount,
       loadingCount,
       readyDespCount,
+      dispatchedCount,
+      otherCount,
       limit, offset,
     });
   } catch (error) {
@@ -2074,6 +2157,9 @@ router.post('/loading/proforma/:orderNumber/complete', requireLoadingWrite, asyn
     const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if ((slip as any).reopenedFromDispatch) {
+      return res.status(409).json({ message: 'This load was reopened from Dispatched — an admin finishes it with "Complete & return".' });
+    }
     if (!(await canCompleteLoad(req, slip))) {
       return res.status(403).json({ message: "Only this load's creator, its current owner, or an admin/supervisor can complete it." });
     }
@@ -2120,6 +2206,48 @@ router.post('/loading/proforma/:orderNumber/complete', requireLoadingWrite, asyn
   }
 });
 
+// POST /api/loading/proforma/:orderNumber/complete-and-return — ADMIN only, and only for a load an admin reopened from a later status (Dispatched,
+// Shortage, Delivered ...). Completes it and puts it straight back to the status it was reopened from (app and Notion), without the usual wait.
+// That is the only way such a load is finished.
+router.post('/loading/proforma/:orderNumber/complete-and-return', requireLoadingWrite, async (req: Request, res: Response) => {
+  try {
+    const slip = await storage.getProformaSlipByOrderNumber(req.params.orderNumber);
+    if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
+    if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    if (!isAdmin(req)) return res.status(403).json({ message: 'Only an admin can complete a reopened load.' });
+    if (!(slip as any).reopenedFromDispatch) return res.status(409).json({ message: 'Only a load reopened from a later status can be completed this way.' });
+    if ((slip as any).loadingCompletedAt) return res.status(409).json({ message: 'This load is already complete.' });
+
+    const { userCode, userName } = actor(req);
+    // Back to the status it was reopened from (Dispatched when none was recorded).
+    const returnStatus = String((slip as any).reopenedFromStatus ?? '').trim().toUpperCase() || NOTION_DISPATCHED_STATUS;
+    await storage.updateProformaSlip(slip.id, {
+      loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null,
+      notionStatus: returnStatus, reopenedFromDispatch: false, reopenedFromStatus: null,
+    } as any);
+    // dispatched_at holds UTC wall-clock digits (compared against the UTC clock by Auto Dispatch), like the job writes it.
+    await pool.query(`UPDATE proforma_slips SET dispatched_at = NOW() AT TIME ZONE 'UTC' WHERE id = $1`, [slip.id]);
+    const updated = await storage.getProformaSlipByOrderNumber(slip.orderNumber);
+    if (!updated) return res.status(500).json({ message: 'Failed to complete and dispatch load' });
+
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Loading', action: 'update', entityType: 'proforma_slip', entityId: slip.id,
+        details: `Load for order ${slip.orderNumber} completed by ${userName ?? userCode} and returned to ${returnStatus} (reopened from ${returnStatus})`,
+        userCode, userName,
+      });
+    }
+
+    const rawItems = await storage.getProformaSlipItems(slip.id);
+    const { items, allComplete, loadedVolume } = await withProgress(updated, rawItems);
+    const notionOutcome = await settleNotionSync(syncOrderToNotion(updated.orderNumber, { status: returnStatus }, actor(req)));
+    res.json({ slip: await withRto(updated), items, allComplete, loadedVolume, notion: notionOutcome });
+  } catch (error) {
+    console.error('Error completing and returning load:', error);
+    res.status(500).json({ message: 'Failed to complete the load' });
+  }
+});
+
 // POST /api/loading/proforma/:orderNumber/reopen — undoes Complete (auto or manual), same
 // permission as Complete itself. Purely a status flip: clears loadingCompletedAt/By so the order
 // can be scanned again; nothing else about the load (items already scanned, vehicle) is touched.
@@ -2129,7 +2257,20 @@ router.post('/loading/proforma/:orderNumber/reopen', requireLoadingWrite, requir
     if (!slip) return res.status(404).json({ message: 'No proforma slip found for this order number' });
     if (!canAccessPlant(req, slip.plant)) return res.status(403).json({ message: 'Access denied for this plant' });
     const isCurrentOwner = !!slip.loadingOwnerCode && slip.loadingOwnerCode === (req.user as any)?.userCode;
-    if (!isAdmin(req) && !isSupervisor(req) && !isCurrentOwner) {
+    // A load that has already gone out (Dispatched, Delivered, Unloading, Shortage, Cancelled - or still stamped dispatched) can be reopened by an
+    // ADMIN from any of those statuses, but only while its slip is recent (order date within the last REOPEN_WINDOW_DAYS days). It goes straight
+    // back to Loading and is marked "reopened from <status>": it is then finished only with "Complete & return" (above), back to that status.
+    const wentOut = isLaterStage(slip.notionStatus) || !!(slip as any).dispatchedAt;
+    const adminReopensGoneOut = wentOut && isAdmin(req);
+    if (adminReopensGoneOut) {
+      if (!isWithinReopenWindow((slip as any).orderDate)) {
+        return res.status(409).json({ message: `Only slips from the last ${REOPEN_WINDOW_DAYS} days can be reopened once the load has gone out - this slip is older.` });
+      }
+    } else if (wentOut && (slip as any).autoDispatch === true) {
+      // A load created after Auto Dispatch went live: once it has gone out, only an admin can bring it back. Checked here, on the server, so it holds
+      // for every screen and role.
+      return res.status(403).json({ message: 'Only an admin can reopen a load that has gone out.' });
+    } else if (!isAdmin(req) && !isSupervisor(req) && !isCurrentOwner) {
       return res.status(403).json({ message: 'Only the current owner of this load or an admin can reopen it.' });
     }
 
@@ -2137,13 +2278,14 @@ router.post('/loading/proforma/:orderNumber/reopen', requireLoadingWrite, requir
     const updated = await storage.updateProformaSlip(slip.id, {
       loadingCompletedAt: null, loadingCompletedByCode: null,
       notionStatus: NOTION_LOADING_STATUS,
+      ...(adminReopensGoneOut ? { dispatchedAt: null, reopenedFromDispatch: true, reopenedFromStatus: isLaterStage(slip.notionStatus) ? String(slip.notionStatus).trim().toUpperCase() : NOTION_DISPATCHED_STATUS } : {}),
     } as any);
     if (!updated) return res.status(500).json({ message: 'Failed to reopen load' });
 
     if (userCode) {
       await storage.logActivity({
         pageName: 'Loading', action: 'update', entityType: 'proforma_slip', entityId: slip.id,
-        details: `Load for order ${slip.orderNumber} reopened by ${userName ?? userCode}`,
+        details: `Load for order ${slip.orderNumber} ${adminReopensGoneOut ? `reopened from ${String(slip.notionStatus ?? 'a later stage').trim() || 'a later stage'}` : 'reopened'} by ${userName ?? userCode}`,
         userCode, userName,
       });
     }
