@@ -201,16 +201,16 @@ router.put('/unloading-edit/sessions/:id', requirePageWrite('order-import'), asy
             // Reverse stock credited to the old barcode (on Stock Overview, line by line below).
             // Taken off the old barcode on each scan's own booked day (a scan with none keeps the old rule).
             const { rows: dayRows } = await client.query(
-              `SELECT to_char(booked_day, 'YYYY-MM-DD') AS day, COALESCE(SUM(total_qty), 0)::int AS qty,
+              `SELECT to_char(booked_day, 'YYYY-MM-DD') AS day, product_id AS "productId", COALESCE(SUM(total_qty), 0)::int AS qty,
                       COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra
                  FROM unload_scan_events WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE
-                GROUP BY to_char(booked_day, 'YYYY-MM-DD') ORDER BY 1 NULLS FIRST`,
+                GROUP BY to_char(booked_day, 'YYYY-MM-DD'), product_id ORDER BY 1 NULLS FIRST`,
               [id, oldBarcode],
             );
-            const byDay: Array<{ day: string | null; qty: number; extra: number }> = dayRows.length ? dayRows : [{ day: null, qty: totalQty, extra: extraQty }];
+            const byDay: Array<{ day: string | null; productId?: number | null; qty: number; extra: number }> = dayRows.length ? dayRows : [{ day: null, qty: totalQty, extra: extraQty }];
             for (const d of byDay) {
               await postUnloadMovement(client, {
-                sessionId: id, barcode: oldBarcode, qty: -d.qty, extraQty: -d.extra, type: 'adjust', reason, day: d.day ?? null,
+                sessionId: id, barcode: oldBarcode, productId: d.productId ?? null, qty: -d.qty, extraQty: -d.extra, type: 'adjust', reason, day: d.day ?? null,
               });
             }
 

@@ -9,6 +9,8 @@ import { eq, and, asc, inArray } from 'drizzle-orm';
 
 export type GroupReportEntry = {
   partId: number; sequence: number; csvFileName: string; barcode: string; itemName: string;
+  // The PRODUCT of this line: two products can share a barcode (65 g / 60 g), and each is its own line with its own credits.
+  productId: number | null;
   itemsPerPallet: number;
   expectedQty: number; receivedQty: number; extraQty: number; missingQty: number;
   adjustedTo: { toPartId: number; toCsvFileName: string; qty: number }[];
@@ -34,7 +36,7 @@ export type GroupReport = {
     totalAdjustments: number; finalStockAdded: number;
     netExtraAfterAdjustment: number; netMissingAfterAdjustment: number;
     allComplete: boolean;
-    productWise: Array<{ barcode: string; itemName: string; itemsPerPallet: number; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
+    productWise: Array<{ barcode: string; productId: number | null; itemName: string; itemsPerPallet: number; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
   };
 };
 
@@ -60,67 +62,81 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
   const partIds = parts.map((p) => p.id);
   const importItems = await db.select().from(orderImportItems).where(inArray(orderImportItems.sessionId, partIds));
 
-  // Items-per-pallet per barcode, derived from the CSV rows already loaded above
-  // (quantity ÷ expectedPallets) — so the report can carry a pallet count under each qty
-  // without any product lookup. First non-zero value per barcode wins.
-  const ippByBarcode = new Map<string, number>();
-  for (const item of importItems) {
-    if (!item.barcode || ippByBarcode.has(item.barcode)) continue;
-    const q = item.quantity ?? 0;
-    const ep = item.expectedPallets ?? 0;
-    if (q > 0 && ep > 0) ippByBarcode.set(item.barcode, Math.round(q / ep));
-  }
+  const sequenceByPartId = new Map(parts.map((p, idx) => [p.id, idx]));
 
+  // A line is a barcode + product. Each CSV row finds its product through the scan item seeded from it (order_scan_items.product_id).
   const { rows: scanItemRows } = await pool.query(
-    `SELECT session_id AS "sessionId", barcode, total_scanned_qty AS "totalScannedQty"
+    `SELECT session_id AS "sessionId", order_import_item_id AS "importItemId", barcode, product_id AS "productId", total_scanned_qty AS "totalScannedQty"
      FROM order_scan_items WHERE session_id = ANY($1::int[])`,
     [partIds],
   );
+  const pidByImportItem = new Map<number, number | null>();
+  const productsOfBarcode = new Map<string, Set<number>>();
+  for (const r of scanItemRows as any[]) {
+    if (r.importItemId != null) pidByImportItem.set(r.importItemId, r.productId ?? null);
+    if (r.barcode && r.productId != null) {
+      const k = `${r.sessionId}::${r.barcode}`;
+      if (!productsOfBarcode.has(k)) productsOfBarcode.set(k, new Set());
+      productsOfBarcode.get(k)!.add(r.productId);
+    }
+  }
+  // An entry with no product (an older scan) belongs to the barcode's only product on that part, when there is exactly one.
+  const normPid = (sessionId: number, barcode: string, pid: number | null | undefined): number | null => {
+    if (pid != null) return pid;
+    const set = productsOfBarcode.get(`${sessionId}::${barcode}`);
+    return set && set.size === 1 ? Array.from(set)[0] : null;
+  };
+  const lk = (sessionId: number, barcode: string, pid: number | null) => `${sessionId}::${barcode}::${pid ?? ''}`;
+  const lineOf = (barcode: string, pid: number | null) => `${barcode}::${pid ?? ''}`;
 
-  // Extra (over-order) qty per (partId, barcode) — sourced from order_scan_events, NOT
-  // derived from order_scan_items.total_scanned_qty. The /scan handler caps
-  // total_scanned_qty at expected_qty and logs anything beyond it as a separate
-  // is_extra=true event (see order-scan.ts's split-at-boundary logic), so "received -
-  // expected" can never be positive anymore — it would always compute zero extra here.
+  // Items-per-pallet per line, derived from the CSV rows already loaded above (quantity ÷ expectedPallets) - so the report can carry a pallet count
+  // under each qty without any product lookup. First non-zero value per line wins.
+  const ippByLine = new Map<string, number>();
+  for (const item of importItems) {
+    const k = item.barcode ? lineOf(item.barcode, pidByImportItem.get(item.id) ?? null) : null;
+    if (!k || ippByLine.has(k)) continue;
+    const q = item.quantity ?? 0;
+    const ep = item.expectedPallets ?? 0;
+    if (q > 0 && ep > 0) ippByLine.set(k, Math.round(q / ep));
+  }
+
+  // Extra (over-order) qty per (partId, barcode, product) - sourced from order_scan_events, NOT derived from order_scan_items.total_scanned_qty. The
+  // /scan handler caps total_scanned_qty at expected_qty and logs anything beyond it as a separate is_extra=true event, so "received - expected" can
+  // never be positive anymore - it would always compute zero extra here.
   const { rows: extraEventRows } = await pool.query(
-    `SELECT session_id AS "sessionId", barcode, MAX(item_name) AS "itemName", SUM(total_qty)::int AS "extraQty"
+    `SELECT session_id AS "sessionId", barcode, product_id AS "productId", MAX(item_name) AS "itemName", SUM(total_qty)::int AS "extraQty"
      FROM order_scan_events
      WHERE session_id = ANY($1::int[]) AND is_extra = true AND voided IS NOT TRUE
-     GROUP BY session_id, barcode`,
+     GROUP BY session_id, barcode, product_id`,
     [partIds],
   );
 
-  const sequenceByPartId = new Map(parts.map((p, idx) => [p.id, idx]));
-
-  // Expected qty per (partId, barcode) — summed in case a CSV lists the same barcode twice.
+  // Expected qty per (partId, barcode, product) - summed in case a CSV lists the same product twice.
   const expectedMap = new Map<string, { expectedQty: number; itemName: string }>();
   for (const item of importItems) {
     if (!item.barcode) continue;
-    const key = `${item.sessionId}::${item.barcode}`;
+    const key = lk(item.sessionId, item.barcode, pidByImportItem.get(item.id) ?? null);
     const existing = expectedMap.get(key);
     if (existing) existing.expectedQty += item.quantity ?? 0;
     else expectedMap.set(key, { expectedQty: item.quantity ?? 0, itemName: item.itemName ?? item.barcode });
   }
 
-  // Received (order-portion) qty per (partId, barcode) — from order_scan_items.total_scanned_qty,
-  // which the /scan handler caps at expected_qty (never goes above it — see the split-at-
-  // boundary comment above the extraEventRows query). This is ONLY the order-covering
-  // portion; the extra portion lives entirely in extraMap below.
+  // Received (order-portion) qty per (partId, barcode, product) - from order_scan_items.total_scanned_qty, which the /scan handler caps at expected_qty.
+  // This is ONLY the order-covering portion; the extra portion lives entirely in extraMap below.
   const receivedMap = new Map<string, number>();
   for (const row of scanItemRows as any[]) {
     if (!row.barcode) continue;
-    const key = `${row.sessionId}::${row.barcode}`;
+    const key = lk(row.sessionId, row.barcode, row.productId ?? null);
     receivedMap.set(key, (receivedMap.get(key) ?? 0) + Number(row.totalScannedQty ?? 0));
   }
 
-  // Extra qty per (partId, barcode), from order_scan_events (is_extra=true). Also carries
-  // an item-name fallback for barcodes that were scanned as extra but never appeared in
-  // that part's own CSV at all (so expectedMap has no entry for them).
+  // Extra qty per (partId, barcode, product), from order_scan_events (is_extra=true). Also carries an item-name fallback for products that were
+  // scanned as extra but never appeared in that part's own CSV at all (so expectedMap has no entry for them).
   const extraMap = new Map<string, number>();
   const extraItemNameMap = new Map<string, string>();
   for (const row of extraEventRows as any[]) {
     if (!row.barcode) continue;
-    const key = `${row.sessionId}::${row.barcode}`;
+    const key = lk(row.sessionId, row.barcode, normPid(row.sessionId, row.barcode, row.productId));
     extraMap.set(key, (extraMap.get(key) ?? 0) + Number(row.extraQty ?? 0));
     if (row.itemName) extraItemNameMap.set(key, row.itemName);
   }
@@ -128,29 +144,37 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
   const entriesByBarcode = new Map<string, GroupReportEntry[]>();
 
   for (const part of parts) {
-    const partBarcodes = new Set<string>();
-    importItems.forEach((i) => { if (i.sessionId === part.id && i.barcode) partBarcodes.add(i.barcode); });
-    // A barcode scanned as extra on this part but absent from its own CSV entirely still
-    // needs an entry here (expectedQty 0) so that extra is available to credit a LATER
-    // part that does expect this barcode.
-    extraEventRows.forEach((r: any) => { if (r.sessionId === part.id && r.barcode) partBarcodes.add(r.barcode); });
-    for (const barcode of partBarcodes) {
-      const key = `${part.id}::${barcode}`;
+    const partLines = new Map<string, { barcode: string; pid: number | null }>();
+    importItems.forEach((i) => {
+      if (i.sessionId !== part.id || !i.barcode) return;
+      const pid = pidByImportItem.get(i.id) ?? null;
+      partLines.set(lineOf(i.barcode, pid), { barcode: i.barcode, pid });
+    });
+    // A product scanned as extra on this part but absent from its own CSV entirely still needs an entry here (expectedQty 0) so that extra is
+    // available to credit a LATER part that does expect it.
+    extraEventRows.forEach((r: any) => {
+      if (r.sessionId !== part.id || !r.barcode) return;
+      const pid = normPid(r.sessionId, r.barcode, r.productId);
+      partLines.set(lineOf(r.barcode, pid), { barcode: r.barcode, pid });
+    });
+    for (const { barcode, pid } of partLines.values()) {
+      const key = lk(part.id, barcode, pid);
       const expected = expectedMap.get(key)?.expectedQty ?? 0;
       const itemName = expectedMap.get(key)?.itemName ?? extraItemNameMap.get(key) ?? barcode;
       const received = receivedMap.get(key) ?? 0;
       const extra = extraMap.get(key) ?? 0;
       const entry: GroupReportEntry = {
-        partId: part.id, sequence: sequenceByPartId.get(part.id) ?? 0, csvFileName: part.csvFileName, barcode, itemName,
-        itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
+        partId: part.id, sequence: sequenceByPartId.get(part.id) ?? 0, csvFileName: part.csvFileName, barcode, productId: pid, itemName,
+        itemsPerPallet: ippByLine.get(lineOf(barcode, pid)) ?? 0,
         expectedQty: expected, receivedQty: received + extra,
         extraQty: extra,
         missingQty: Math.max(0, expected - received),
         adjustedTo: [], adjustedFrom: [],
         remainingExtra: 0, remainingMissing: 0,
       };
-      if (!entriesByBarcode.has(barcode)) entriesByBarcode.set(barcode, []);
-      entriesByBarcode.get(barcode)!.push(entry);
+      const lineKey = lineOf(barcode, pid);
+      if (!entriesByBarcode.has(lineKey)) entriesByBarcode.set(lineKey, []);
+      entriesByBarcode.get(lineKey)!.push(entry);
     }
   }
 
@@ -214,10 +238,11 @@ export async function computeGroupReport(groupId: number): Promise<GroupReport |
   });
 
   const productWise = Array.from(entriesByBarcode.entries())
-    .map(([barcode, entries]) => ({
-      barcode,
-      itemName: entries[0]?.itemName ?? barcode,
-      itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
+    .map(([lineKey, entries]) => ({
+      barcode: entries[0].barcode,
+      productId: entries[0].productId,
+      itemName: entries[0]?.itemName ?? entries[0].barcode,
+      itemsPerPallet: ippByLine.get(lineKey) ?? 0,
       totalExpected: entries.reduce((s, e) => s + e.expectedQty, 0),
       totalReceived: entries.reduce((s, e) => s + e.receivedQty, 0),
       totalExtra: entries.reduce((s, e) => s + e.extraQty, 0),
@@ -271,62 +296,85 @@ export async function computePartReport(sessionId: number): Promise<PartReport |
   if (!session) return null;
 
   const importItems = await db.select().from(orderImportItems).where(eq(orderImportItems.sessionId, sessionId));
-  // Items-per-pallet per barcode from the CSV rows (quantity ÷ expectedPallets) — no lookup.
-  const ippByBarcode = new Map<string, number>();
-  for (const item of importItems) {
-    if (!item.barcode || ippByBarcode.has(item.barcode)) continue;
-    const q = item.quantity ?? 0;
-    const ep = item.expectedPallets ?? 0;
-    if (q > 0 && ep > 0) ippByBarcode.set(item.barcode, Math.round(q / ep));
-  }
+  // A line is a barcode + product (two products can share a barcode): each CSV row finds its product through the scan item seeded from it.
   const { rows: scanItemRows } = await pool.query(
-    `SELECT barcode, total_scanned_qty AS "totalScannedQty" FROM order_scan_items WHERE session_id = $1`,
+    `SELECT order_import_item_id AS "importItemId", barcode, product_id AS "productId", total_scanned_qty AS "totalScannedQty" FROM order_scan_items WHERE session_id = $1`,
     [sessionId],
   );
+  const pidByImportItem = new Map<number, number | null>();
+  const soleProduct = new Map<string, Set<number>>();
+  for (const r of scanItemRows as any[]) {
+    if (r.importItemId != null) pidByImportItem.set(r.importItemId, r.productId ?? null);
+    if (r.barcode && r.productId != null) {
+      if (!soleProduct.has(r.barcode)) soleProduct.set(r.barcode, new Set());
+      soleProduct.get(r.barcode)!.add(r.productId);
+    }
+  }
+  const normPid = (barcode: string, pid: number | null | undefined): number | null => {
+    if (pid != null) return pid;
+    const set = soleProduct.get(barcode);
+    return set && set.size === 1 ? Array.from(set)[0] : null;
+  };
+  const lineOf = (barcode: string, pid: number | null) => `${barcode}::${pid ?? ''}`;
+  // Items-per-pallet per line from the CSV rows (quantity / expectedPallets) - no lookup.
+  const ippByLine = new Map<string, number>();
+  for (const item of importItems) {
+    if (!item.barcode) continue;
+    const k = lineOf(item.barcode, pidByImportItem.get(item.id) ?? null);
+    if (ippByLine.has(k)) continue;
+    const q = item.quantity ?? 0;
+    const ep = item.expectedPallets ?? 0;
+    if (q > 0 && ep > 0) ippByLine.set(k, Math.round(q / ep));
+  }
   const receivedMap = new Map<string, number>();
   for (const row of scanItemRows as any[]) {
     if (!row.barcode) continue;
-    receivedMap.set(row.barcode, (receivedMap.get(row.barcode) ?? 0) + Number(row.totalScannedQty ?? 0));
+    const k = lineOf(row.barcode, row.productId ?? null);
+    receivedMap.set(k, (receivedMap.get(k) ?? 0) + Number(row.totalScannedQty ?? 0));
   }
-  // Same reasoning as the group-report path above: total_scanned_qty is capped at
-  // expected_qty, so extra has to come from order_scan_events, not from over-received math.
+  // Same reasoning as the group-report path above: total_scanned_qty is capped at expected_qty, so extra has to come from order_scan_events.
   const { rows: extraEventRows } = await pool.query(
-    `SELECT barcode, MAX(item_name) AS "itemName", SUM(total_qty)::int AS "extraQty"
+    `SELECT barcode, product_id AS "productId", MAX(item_name) AS "itemName", SUM(total_qty)::int AS "extraQty"
      FROM order_scan_events
      WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE
-     GROUP BY barcode`,
+     GROUP BY barcode, product_id`,
     [sessionId],
   );
   const extraMap = new Map<string, number>();
   const extraItemNameMap = new Map<string, string>();
+  const lineInfo = new Map<string, { barcode: string; pid: number | null }>();
   for (const row of extraEventRows as any[]) {
     if (!row.barcode) continue;
-    extraMap.set(row.barcode, (extraMap.get(row.barcode) ?? 0) + Number(row.extraQty ?? 0));
-    if (row.itemName) extraItemNameMap.set(row.barcode, row.itemName);
+    const pid = normPid(row.barcode, row.productId);
+    const k = lineOf(row.barcode, pid);
+    extraMap.set(k, (extraMap.get(k) ?? 0) + Number(row.extraQty ?? 0));
+    if (row.itemName) extraItemNameMap.set(k, row.itemName);
+    lineInfo.set(k, { barcode: row.barcode, pid });
   }
   const expectedMap = new Map<string, { expectedQty: number; itemName: string }>();
   for (const item of importItems) {
     if (!item.barcode) continue;
-    const existing = expectedMap.get(item.barcode);
+    const pid = pidByImportItem.get(item.id) ?? null;
+    const k = lineOf(item.barcode, pid);
+    lineInfo.set(k, { barcode: item.barcode, pid });
+    const existing = expectedMap.get(k);
     if (existing) existing.expectedQty += item.quantity ?? 0;
-    else expectedMap.set(item.barcode, { expectedQty: item.quantity ?? 0, itemName: item.itemName ?? item.barcode });
+    else expectedMap.set(k, { expectedQty: item.quantity ?? 0, itemName: item.itemName ?? item.barcode });
   }
-  // Union of CSV barcodes and extra-only barcodes (scanned but never on this CSV at all).
-  const allBarcodes = new Set<string>([...expectedMap.keys(), ...extraMap.keys()]);
 
-  const items: GroupReportEntry[] = Array.from(allBarcodes).map((barcode) => {
-    const expectedQty = expectedMap.get(barcode)?.expectedQty ?? 0;
-    const itemName = expectedMap.get(barcode)?.itemName ?? extraItemNameMap.get(barcode) ?? barcode;
-    const received = receivedMap.get(barcode) ?? 0;
-    const extraQty = extraMap.get(barcode) ?? 0;
+  const items: GroupReportEntry[] = Array.from(lineInfo.entries()).map(([k, { barcode, pid }]) => {
+    const expectedQty = expectedMap.get(k)?.expectedQty ?? 0;
+    const itemName = expectedMap.get(k)?.itemName ?? extraItemNameMap.get(k) ?? barcode;
+    const received = receivedMap.get(k) ?? 0;
+    const extraQty = extraMap.get(k) ?? 0;
     const missingQty = Math.max(0, expectedQty - received);
     return {
-      partId: session.id, sequence: 0, csvFileName: session.csvFileName, barcode, itemName,
-      itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
+      partId: session.id, sequence: 0, csvFileName: session.csvFileName, barcode, productId: pid, itemName,
+      itemsPerPallet: ippByLine.get(k) ?? 0,
       expectedQty, receivedQty: received + extraQty, extraQty, missingQty,
       adjustedTo: [], adjustedFrom: [], remainingExtra: extraQty, remainingMissing: missingQty,
     };
-  }).sort((a, b) => a.barcode.localeCompare(b.barcode));
+  }).sort((a, b) => a.barcode.localeCompare(b.barcode) || (a.productId ?? 0) - (b.productId ?? 0));
 
   return {
     id: session.id, partIndex: session.partIndex ?? 1, csvFileName: session.csvFileName, plant: session.plant,
@@ -359,11 +407,12 @@ export async function applyLiveScanStock(
   orderQty: number,
   extraQty: number,
   sessionId: number,
+  productId?: number | null,
 ): Promise<void> {
   barcode = barcode.trim();
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
-  await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: totalQty, extraQty });
+  await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: totalQty, extraQty, productId: productId ?? null });
 }
 
 // Reverses applyLiveScanStock - used when an admin voids a mistaken scan. Takes back out of the same day's purchase exactly what the original scan
@@ -375,11 +424,12 @@ export async function reverseLiveScanStock(
   orderQty: number,
   extraQty: number,
   sessionId: number,
+  productId?: number | null,
 ): Promise<void> {
   barcode = barcode.trim();
   const totalQty = orderQty + extraQty;
   if (totalQty <= 0) return;
-  await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: -totalQty, extraQty: -extraQty });
+  await v2Purchase(client, { source: 'order', sessionId, plant, barcode, qty: -totalQty, extraQty: -extraQty, productId: productId ?? null });
 }
 
 // Makes the "already covered by an earlier part" credit REAL instead of a display-only
@@ -422,7 +472,7 @@ export async function reconcileCredits(
   // Un-consumed extra events on the just-completed part, oldest first (FIFO), locked so a
   // concurrent reconciliation run can never hand out the same boxes twice.
   const { rows: extraEvents } = await client.query(
-    `SELECT id, barcode, item_name, total_qty, credited_qty
+    `SELECT id, barcode, product_id, item_name, total_qty, credited_qty
      FROM order_scan_events
      WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE
        AND total_qty > COALESCE(credited_qty, 0)
@@ -440,11 +490,12 @@ export async function reconcileCredits(
       if (remaining <= 0) break;
 
       const { rows: itemRows } = await client.query(
-        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 FOR UPDATE`,
-        [part.id, ev.barcode],
+        // The later part's line for the SAME PRODUCT (two products can share a barcode: an extra of the 65 g never covers a shortfall of the 60 g).
+        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 AND ($3::int IS NULL OR product_id IS NULL OR product_id = $3) ORDER BY id FOR UPDATE`,
+        [part.id, ev.barcode, ev.product_id ?? null],
       );
-      const item = itemRows[0];
-      if (!item) continue; // this later part doesn't expect this barcode at all
+      const item = itemRows.find((r: any) => Number(r.expected_qty ?? 0) - Number(r.total_scanned_qty ?? 0) > 0) ?? itemRows[0];
+      if (!item) continue; // this later part doesn't expect this product at all
       const shortfall = Math.max(0, Number(item.expected_qty ?? 0) - Number(item.total_scanned_qty ?? 0));
       if (shortfall <= 0) continue;
 
@@ -466,9 +517,9 @@ export async function reconcileCredits(
       await client.query(
         `INSERT INTO order_scan_events
            (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-            items_per_pallet, is_extra, scanned_by_name, is_credit, credit_source_event_id)
-         VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6,true,$7)`,
-        [part.id, item.id, ev.barcode, ev.item_name, take, `System (credited from Part ${completedPart.partIndex})`, ev.id],
+            items_per_pallet, is_extra, scanned_by_name, is_credit, credit_source_event_id, product_id)
+         VALUES ($1,$2,$3,$4,0,0,$5,0,false,$6,true,$7,$8)`,
+        [part.id, item.id, ev.barcode, ev.item_name, take, `System (credited from Part ${completedPart.partIndex})`, ev.id, item.product_id ?? ev.product_id ?? null],
       );
 
       await client.query(

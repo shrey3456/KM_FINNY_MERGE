@@ -6,6 +6,7 @@ import { inArray } from 'drizzle-orm';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getPlantStateCode, getPalletSize, resolvePalletSizeOrQty, getUserPlants } from './order-scan';
 import { availableStock, takeStock, recordSale, giveBack, giveBackOnSlip, type StockPull } from '../lib/loadingStock';
+import { resolveLineProduct, stateSapOf } from '../lib/productSap';
 import {
   pushStoreKeeperInfoToNotion, getFinnyStatusOptions, syncOrderToNotion, settleNotionSync, reconcileOrderWithNotion,
   watchStatusAfterVehicleChange,
@@ -417,6 +418,38 @@ async function withRto(slip: any) {
   return { ...slip, rtoNumber: vehicle?.rtoNumber ?? null, vehicleVolume: vehicle?.volume ?? null, suggestedVehicle, loadDate, createdByCode, createdByName };
 }
 
+// Each slip line's PRODUCT (two products can share a barcode: 65 g / 60 g): the one saved on the line, else found from the line's barcode + SAP
+// (matched against the state SAPs). Returns item id -> product id.
+async function slipLineProducts(db: any, items: any[], state: string | null): Promise<Map<number, number | null>> {
+  const out = new Map<number, number | null>();
+  await Promise.all(items.map(async (it) => {
+    if (it.productId != null) { out.set(it.id, Number(it.productId)); return; }
+    const lp = it.barcode ? await resolveLineProduct(db, it.barcode, it.sapCode, state) : null;
+    out.set(it.id, lp?.productId ?? null);
+  }));
+  return out;
+}
+// Which slip line a scan / correction is for: the picked product's line, else the only line left with room, else null with the options (the app asks "Which item?").
+function pickSlipLine(
+  rawItems: any[], lineProd: Map<number, number | null>, barcode: string, chosenProductId: number | null, loadedByProduct: Map<string, number>,
+): { item: any | null; options: Array<{ productId: number | null; itemName: string | null; sapCode: string | null; remaining: number }> | null } {
+  const lines = rawItems.filter((i) => normalize(i.barcode) === normalize(barcode));
+  if (lines.length <= 1) return { item: lines[0] ?? null, options: null };
+  const loadedOf = (i: any) => loadedByProduct.get(String(lineProd.get(i.id) ?? '')) ?? 0;
+  if (chosenProductId != null) return { item: lines.find((i) => lineProd.get(i.id) === chosenProductId) ?? null, options: null };
+  const open = lines.filter((i) => Number(i.quantity ?? 0) - loadedOf(i) > 0);
+  if (open.length === 1) return { item: open[0], options: null };
+  return { item: null, options: lines.map((i) => ({ productId: lineProd.get(i.id) ?? null, itemName: i.itemName, sapCode: i.sapCode, remaining: Math.max(0, Number(i.quantity ?? 0) - loadedOf(i)) })) };
+}
+async function loadedByProductOf(db: any, orderNumber: string, barcode: string): Promise<Map<string, number>> {
+  const { rows } = await db.query(
+    `SELECT product_id AS "productId", COALESCE(SUM(total_qty), 0)::int AS q FROM loading_scan_events
+      WHERE order_number = $1 AND LOWER(TRIM(barcode)) = LOWER($2) AND voided IS NOT TRUE GROUP BY product_id`,
+    [orderNumber, String(barcode).trim()],
+  );
+  return new Map(rows.map((r: any) => [String(r.productId ?? ''), Number(r.q)]));
+}
+
 // Attaches load progress to each proforma item (expected/loaded/remaining/itemsPerPallet,
 // current stock at this plant) and reports whether the whole order is fully loaded — the same
 // shape both the GET (page load) and POST /scan (after each scan) responses return, so the
@@ -425,12 +458,20 @@ async function withProgress(slip: any, items: any[]) {
   const [state, { rows: loadedRows }] = await Promise.all([
     getPlantStateCode(pool, slip.plant ?? ''),
     pool.query(
-      `SELECT barcode, COALESCE(SUM(total_qty), 0)::int AS "loadedQty"
-       FROM loading_scan_events WHERE order_number = $1 AND voided IS NOT TRUE GROUP BY barcode`,
+      `SELECT barcode, product_id AS "productId", COALESCE(SUM(total_qty), 0)::int AS "loadedQty"
+       FROM loading_scan_events WHERE order_number = $1 AND voided IS NOT TRUE GROUP BY barcode, product_id`,
       [slip.orderNumber],
     ),
   ]);
-  const loadedByBarcode = new Map<string, number>(loadedRows.map((r: any) => [normalize(r.barcode), r.loadedQty]));
+  // Loaded per barcode (all products together) and per line (barcode + product): two products sharing a barcode are two lines with their own count.
+  const loadedByBarcode = new Map<string, number>();
+  const loadedByLine = new Map<string, number>();
+  for (const r of loadedRows as any[]) {
+    loadedByBarcode.set(normalize(r.barcode), (loadedByBarcode.get(normalize(r.barcode)) ?? 0) + Number(r.loadedQty));
+    const k = `${normalize(r.barcode)}|${r.productId ?? ''}`;
+    loadedByLine.set(k, (loadedByLine.get(k) ?? 0) + Number(r.loadedQty));
+  }
+  const lineProd = await slipLineProducts(pool, items, state);
 
   // Everything this response needs from Product Master and stock is read in TWO queries up front
   // (it used to be 1 product query + 3 stock queries PER ITEM — ~280 queries for a 70-item order on
@@ -469,26 +510,26 @@ async function withProgress(slip: any, items: any[]) {
     if (matches.length === 1) return matches[0];
     return storage.getProductByBarcode(key, slip.plant);
   };
-  // The product's SAP code for this plant's state (what a stock line carries), from the drizzle product row.
-  const stateSapOf = (p: any): string => {
-    const s = String(state ?? '').toUpperCase();
-    const pick = (v: unknown) => String(v ?? '').trim();
-    return s === 'MP' ? pick(p?.mpSap) : s === 'UP' ? pick(p?.upSap) : s === 'GJ' ? (pick(p?.gjSap) || pick(p?.sapCode)) : pick(p?.sapCode);
-  };
   const stockFor = (barcode: string, product?: any) => {
     const lines = stockLinesByBarcode.get(String(barcode ?? '').trim()) ?? [];
     if (lines.length === 0) return 0;
     if (lines.length === 1) return lines[0].qty;
-    const sap = stateSapOf(product).toLowerCase();
-    const hit = (sap && lines.find((l) => String(l.sapCode ?? '').toLowerCase() === sap))
+    const sap = (stateSapOf(product, state) ?? '').toLowerCase();
+    const hit = (sap ? lines.find((l) => String(l.sapCode ?? '').toLowerCase() === sap) : undefined)
       ?? (product?.name ? lines.find((l) => String(l.itemName).toLowerCase() === String(product.name).toLowerCase()) : undefined);
     return hit ? hit.qty : 0;
   };
 
   const progressItems = await Promise.all(items.map(async (item) => {
-    const product = item.barcode ? await productFor(item.barcode) : undefined;
+    const pid = lineProd.get(item.id) ?? null;
+    // The line's OWN product (pallet size, Sr No, SAP for this state), not the first product with this barcode.
+    const product = (pid != null ? (productsByBarcode.get(String(item.barcode ?? '').trim()) ?? []).find((p: any) => p.id === pid) : undefined)
+      ?? (item.barcode ? await productFor(item.barcode) : undefined);
     const expected = item.quantity ?? 0;
-    const loaded = loadedByBarcode.get(normalize(item.barcode)) ?? 0;
+    const sameBarcodeLines = items.filter((i) => normalize(i.barcode) === normalize(item.barcode)).length;
+    const loaded = sameBarcodeLines > 1
+      ? (loadedByLine.get(`${normalize(item.barcode)}|${pid ?? ''}`) ?? 0)
+      : (loadedByBarcode.get(normalize(item.barcode)) ?? 0);
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     let stockAvailable: number | null = null;
     if (item.barcode) {
@@ -496,8 +537,10 @@ async function withProgress(slip: any, items: any[]) {
       // comes from whatever casing the source used, e.g. "VALSAD"). Never pooled with other plants: this figure and a real scan never disagree.
       stockAvailable = stockFor(item.barcode, product);
     }
+    const stateSap = product ? stateSapOf(product, state) : (item.sapCode ?? null);
     return {
-      ...item, expected, loaded, remaining: Math.max(0, expected - loaded),
+      ...item, productId: pid, sapCode: stateSap, noSapForPlant: !!product && !stateSap,
+      expected, loaded, remaining: Math.max(0, expected - loaded),
       // Extra is simply what is loaded beyond what was expected — always agrees with Loaded and
       // Remaining. (It used to add up the rows flagged Extra, which went wrong after a "−" or a "+"
       // that crossed the expected quantity: the stale Extra rows were never taken back out.) Extra can
@@ -533,7 +576,7 @@ async function withProgress(slip: any, items: any[]) {
     const stockAvailable = stockFor(product.barcode ?? bc, product);
     return {
       id: -product.id, // negative so it can never collide with a real proforma_slip_items.id
-      barcode: product.barcode ?? bc, itemName: product.name ?? bc, sapCode: product.sapCode ?? null,
+      barcode: product.barcode ?? bc, itemName: product.name ?? bc, sapCode: stateSapOf(product, state),
       srNo: product.newSr ?? null, volumeInCuFt: product.volumeInCuFt ?? null,
       quantity: null,
       expected: 0, loaded, remaining: 0, extraQty: loaded, itemsPerPallet,
@@ -1669,8 +1712,21 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
     }
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
-    const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(barcode));
-    const product = await storage.getProductByBarcode(barcode, slip.plant);
+    const scanState = await getPlantStateCode(client, slip.plant ?? '');
+    const lineProd = await slipLineProducts(client, rawItems, scanState);
+    const chosenProductId = req.body?.productId != null && Number.isInteger(Number(req.body.productId)) ? Number(req.body.productId) : null;
+    const picked = pickSlipLine(rawItems, lineProd, barcode, chosenProductId, await loadedByProductOf(client, slip.orderNumber, barcode));
+    if (picked.options) {
+      return res.status(409).json({
+        code: 'CHOOSE_ITEM',
+        message: `Barcode ${barcode} is on more than one item of this order - pick which one this scan is for.`,
+        options: picked.options,
+      });
+    }
+    const matchedItem = picked.item;
+    const lineProductId: number | null = (matchedItem ? lineProd.get((matchedItem as any).id) : null) ?? chosenProductId ?? null;
+    // The chosen line's OWN product (name, pallet size, SAP for this state) - not "the first product with this barcode".
+    const product = lineProductId != null ? await storage.getProduct(lineProductId) : await storage.getProductByBarcode(barcode, slip.plant);
 
     // Not on this slip AND not a known product at all — same refusal Order Scan gives for a
     // barcode it has no record of whatsoever, rather than quietly logging it as an extra. Tagged
@@ -1696,7 +1752,7 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
     // authoritative: two concurrent scans of the same product could both read the same snapshot here and both pass. The real check (takeStock,
     // inside the transaction, against the FOR UPDATE-locked line) is what actually prevents stock from going negative.
     // The slip line's own product decides which stock line this scan draws on (two products sharing a barcode are two lines), at the slip's own plant.
-    const stockProductId = (matchedItem as any)?.productId ?? product?.id ?? null;
+    const stockProductId = lineProductId ?? product?.id ?? null;
     const precheckPooled = await availableStock(client, slip.plant ?? '', barcode, stockProductId);
     if (precheckPooled <= 0) {
       return res.status(409).json({ message: `No stock available to load "${matchedItem?.itemName ?? product?.name ?? barcode}" at ${slip.plant} — current stock is 0.` });
@@ -1732,8 +1788,8 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
       // they're entirely regular.
       const { rows: loadedRows } = await client.query(
         `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
-         WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
-        [slip.orderNumber, barcode],
+         WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3`,
+        [slip.orderNumber, barcode, stockProductId],
       );
       const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
       remainingBefore = matchedItem ? Math.max(0, expected - alreadyLoaded) : 0;
@@ -1781,13 +1837,13 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
         requestIdRecorded = true;
         const { rows: insertedRows } = await client.query(
           `INSERT INTO loading_scan_events
-             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name, client_request_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, stv, scanned_by_code, scanned_by_name, client_request_id, product_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
           [
-            slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
+            slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, product ? stateSapOf(product, scanState) : (matchedItem?.sapCode ?? null),
             itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
             itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-            totalQty, isExtra, slip.plant, stv, userCode ?? null, userName ?? null, idForThisRow,
+            totalQty, isExtra, slip.plant, stv, userCode ?? null, userName ?? null, idForThisRow, stockProductId,
           ],
         );
         return insertedRows[0].id as number;
@@ -1832,7 +1888,7 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
       slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,
       event: {
         barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
-        sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
+        sapCode: product ? stateSapOf(product, scanState) : (matchedItem?.sapCode ?? null),
         totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
         productId: product?.id ?? null,
       },
@@ -1886,10 +1942,17 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
     }
 
     const rawItems = await storage.getProformaSlipItems(slip.id);
-    const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(barcode));
-    const product = await storage.getProductByBarcode(barcode, slip.plant);
-    const expected = matchedItem?.quantity ?? 0;
     const state = await getPlantStateCode(client, slip.plant ?? '');
+    const lineProd = await slipLineProducts(client, rawItems, state);
+    const chosenProductId = req.body?.productId != null && Number.isInteger(Number(req.body.productId)) ? Number(req.body.productId) : null;
+    const picked = pickSlipLine(rawItems, lineProd, barcode, chosenProductId, await loadedByProductOf(client, slip.orderNumber, barcode));
+    if (picked.options) {
+      return res.status(409).json({ code: 'CHOOSE_ITEM', message: `Barcode ${barcode} is on more than one item of this order - pick which one.`, options: picked.options });
+    }
+    const matchedItem = picked.item;
+    const lineProductId: number | null = (matchedItem ? lineProd.get((matchedItem as any).id) : null) ?? chosenProductId ?? null;
+    const product = lineProductId != null ? await storage.getProduct(lineProductId) : await storage.getProductByBarcode(barcode, slip.plant);
+    const expected = matchedItem?.quantity ?? 0;
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
     const { userCode, userName } = actor(req);
 
@@ -1901,7 +1964,7 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
       let positiveDeltaContributions: StockPull[] = [];
       if (delta > 0) {
         try {
-          positiveDeltaContributions = await takeStock(client, slip.plant ?? '', barcode, delta, (matchedItem as any)?.productId ?? product?.id ?? null);
+          positiveDeltaContributions = await takeStock(client, slip.plant ?? '', barcode, delta, lineProductId ?? product?.id ?? null);
         } catch (err: any) {
           throw Object.assign(new Error(err?.message ?? `Cannot add ${delta}.`), { status: err?.status ?? 409 });
         }
@@ -1909,8 +1972,8 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
 
       const { rows: loadedRows } = await client.query(
         `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
-         WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
-        [slip.orderNumber, barcode],
+         WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3`,
+        [slip.orderNumber, barcode, lineProductId ?? product?.id ?? null],
       );
       const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
       newLoadedTotal = alreadyLoaded + delta;
@@ -1931,13 +1994,13 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
       const insertAdjust = async (qtyAbs: number, isExtra: boolean): Promise<number> => {
         const { rows } = await client.query(
           `INSERT INTO loading_scan_events
-             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, plant, stv, scanned_by_code, scanned_by_name)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13) RETURNING id`,
+             (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, plant, stv, scanned_by_code, scanned_by_name, product_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13,$14) RETURNING id`,
           [
-            slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sapCode ?? product?.sapCode ?? null,
+            slip.orderNumber, slip.id, barcode, matchedItem?.itemName ?? product?.name ?? null, product ? stateSapOf(product, state) : (matchedItem?.sapCode ?? null),
             sign * (itemsPerPallet > 0 ? Math.floor(qtyAbs / itemsPerPallet) : 0),
             sign * (itemsPerPallet > 0 ? qtyAbs % itemsPerPallet : qtyAbs),
-            sign * qtyAbs, isExtra, slip.plant, null, userCode ?? null, userName ?? null,
+            sign * qtyAbs, isExtra, slip.plant, null, userCode ?? null, userName ?? null, lineProductId ?? product?.id ?? null,
           ],
         );
         return rows[0].id as number;
@@ -1988,7 +2051,7 @@ router.post('/loading/proforma/:orderNumber/adjust-load', requireLoadingWrite, a
       slip: await withRto(finalSlip), items: progressItems, allComplete, loadedVolume,
       event: {
         barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
-        sapCode: matchedItem?.sapCode ?? product?.sapCode ?? null,
+        sapCode: product ? stateSapOf(product, state) : (matchedItem?.sapCode ?? null),
         totalQty: delta, isExtra: newLoadedTotal > expected, remaining: Math.max(0, expected - newLoadedTotal),
         productId: product?.id ?? null,
       },
@@ -2225,13 +2288,13 @@ router.post('/loading/master/proforma/:orderNumber/reset', requireLoadMasterWrit
 // regular/extra boundary was always inserted as two separate rows (see insertEvent below), never
 // one row with a mixed qty, so this only ever flips a whole row's flag — it never needs to split
 // or merge rows.
-async function reclassifyLoadingEvents(client: any, orderNumber: string, barcode: string, expectedQty: number): Promise<void> {
+async function reclassifyLoadingEvents(client: any, orderNumber: string, barcode: string, expectedQty: number, productId: number | null = null): Promise<void> {
   const { rows } = await client.query(
     `SELECT id, total_qty, is_extra FROM loading_scan_events
-      WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE
+      WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3
       ORDER BY scanned_at ASC, id ASC
       FOR UPDATE`,
-    [orderNumber, barcode],
+    [orderNumber, barcode, productId],
   );
   let regularSoFar = 0;
   for (const row of rows) {
@@ -2300,9 +2363,11 @@ const voidLoadingEvent = async (req: Request, res: Response) => {
     // for the same order+barcode may now belong in the regular slot this freed up.
     const voidedSlip = await storage.getProformaSlipByOrderNumber(event.order_number);
     const voidedItems = voidedSlip ? await storage.getProformaSlipItems(voidedSlip.id) : [];
-    const voidedMatchedItem = voidedItems.find((i: any) => normalize(i.barcode) === normalize(event.barcode));
+    const voidState = await getPlantStateCode(client, event.plant ?? '');
+    const voidLineProd = await slipLineProducts(client, voidedItems, voidState);
+    const voidedMatchedItem = voidedItems.find((i: any) => normalize(i.barcode) === normalize(event.barcode) && (event.product_id == null || voidLineProd.get(i.id) === Number(event.product_id)));
     if (voidedMatchedItem) {
-      await reclassifyLoadingEvents(client, event.order_number, event.barcode, voidedMatchedItem.quantity ?? 0);
+      await reclassifyLoadingEvents(client, event.order_number, event.barcode, voidedMatchedItem.quantity ?? 0, event.product_id ?? null);
     }
 
     await client.query('COMMIT');
@@ -2371,14 +2436,14 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
 
     // Reverse the old qty's stock (Loading REMOVES stock, so reversing adds it back) onto the exact line it came from, then take the new qty
     // from the same product's line at the slip's own plant - the old qty is already back, so this is a clean re-check.
-    const product = await storage.getProductByBarcode(event.barcode, event.plant);
+    const product = event.product_id != null ? await storage.getProduct(event.product_id) : await storage.getProductByBarcode(event.barcode, event.plant);
     const slipItemsForStock = await storage.getProformaSlipItems(slip.id);
     const stockLineItem = slipItemsForStock.find((i) => normalize(i.barcode) === normalize(event.barcode));
     await giveBack(client, event.id);
 
     let newQtyContributions: StockPull[];
     try {
-      newQtyContributions = await takeStock(client, event.plant, event.barcode, newQty, (stockLineItem as any)?.productId ?? product?.id ?? null);
+      newQtyContributions = await takeStock(client, event.plant, event.barcode, newQty, event.product_id ?? (stockLineItem as any)?.productId ?? product?.id ?? null);
     } catch (err: any) {
       await client.query('ROLLBACK');
       return res.status(err?.status ?? 409).json({ message: err?.message ?? `Cannot correct to ${newQty}.` });
@@ -2392,11 +2457,13 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
     // Same regular/extra split /scan itself computes, against expected qty minus whatever's
     // still loaded (now excluding the just-voided old event).
     const rawItems = await storage.getProformaSlipItems(slip.id);
-    const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(event.barcode));
+    const editState = await getPlantStateCode(client, event.plant ?? '');
+    const editLineProd = await slipLineProducts(client, rawItems, editState);
+    const matchedItem = rawItems.find((i) => normalize(i.barcode) === normalize(event.barcode) && (event.product_id == null || editLineProd.get(i.id) === Number(event.product_id)));
     const { rows: loadedRows } = await client.query(
       `SELECT COALESCE(SUM(total_qty), 0)::int AS "loaded" FROM loading_scan_events
-       WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE`,
-      [slip.orderNumber, event.barcode],
+       WHERE order_number = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3`,
+      [slip.orderNumber, event.barcode, event.product_id ?? null],
     );
     const alreadyLoaded = loadedRows[0]?.loaded ?? 0;
     const expected = matchedItem?.quantity ?? 0;
@@ -2411,14 +2478,14 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
         // Keeps the ORIGINAL scan's time — this row stands in for that scan — and records when
         // the correction was made in adjusted_at, so the history shows both.
         `INSERT INTO loading_scan_events
-           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name, scanned_at, adjusted_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13::timestamp, NOW()),NOW()) RETURNING id`,
+           (order_number, proforma_slip_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, scanned_by_code, scanned_by_name, scanned_at, adjusted_at, product_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13::timestamp, NOW()),NOW(),$14) RETURNING id`,
         [
           slip.orderNumber, slip.id, event.barcode, event.item_name, event.sap_code,
           itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
           itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
           totalQty, isExtra, event.plant, event.scanned_by_code, event.scanned_by_name,
-          event.scanned_at,
+          event.scanned_at, event.product_id ?? null,
         ],
       );
       return insertedRows[0].id as number;
@@ -2451,7 +2518,7 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
     // surviving event for the same order+barcode, not just the two rows just inserted, in case a
     // separate pre-existing extra scan should now slide into the room this correction opened up.
     if (matchedItem) {
-      await reclassifyLoadingEvents(client, slip.orderNumber, event.barcode, expected);
+      await reclassifyLoadingEvents(client, slip.orderNumber, event.barcode, expected, event.product_id ?? null);
     }
 
     await client.query('COMMIT');

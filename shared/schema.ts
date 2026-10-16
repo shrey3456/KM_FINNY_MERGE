@@ -671,6 +671,7 @@ export const loadingScanEvents = pgTable("loading_scan_events", {
   voidReason: text("void_reason"),
   // The Stock Overview line this entry took its boxes from, so a void / edit / reset gives them back to exactly that line.
   stockLineId: integer("stock_line_id"),
+  productId: integer("product_id"),
   // A UUID the CLIENT generates once per scan attempt and resends unchanged on every retry of
   // that same attempt — the offline queue's safety net. Without this, a scan queued while
   // offline that actually reached the server but whose response was lost to a flaky connection
@@ -1270,6 +1271,8 @@ export const orderScanItems = pgTable("order_scan_items", {
   barcode: text("barcode"),
   itemName: text("item_name"),
   sapCode: text("sap_code"),
+  // The PRODUCT this line means (two products can share a barcode: 65 g / 60 g), found from barcode + SAP when the file is seeded.
+  productId: integer("product_id"),
   expectedQty: integer("expected_qty").default(0),
   itemsPerPallet: integer("items_per_pallet").default(0), // plant-specific snapshot at activation
   scannedPallets: real("scanned_pallets").default(0),
@@ -1288,6 +1291,8 @@ export const orderScanEvents = pgTable("order_scan_events", {
   scanItemId: integer("scan_item_id")
     .references(() => orderScanItems.id, { onDelete: "set null" }),
   barcode: text("barcode").notNull(),
+  // The product this entry was for (the chosen line's product): void / edit / stock use it.
+  productId: integer("product_id"),
   itemName: text("item_name"),
   pallets: real("pallets").default(0),
   looseQty: integer("loose_qty").default(0),
@@ -1423,6 +1428,8 @@ export const unloadImportItems = pgTable("unload_import_items", {
   barcode: text("barcode"),
   itemName: text("item_name"),
   sapCode: text("sap_code"),
+  // The PRODUCT this line means (see order_scan_items.productId).
+  productId: integer("product_id"),
   quantity: integer("quantity").default(0),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -1433,6 +1440,7 @@ export const unloadScanEvents = pgTable("unload_scan_events", {
     .references(() => unloadImportSessions.id, { onDelete: "cascade" })
     .notNull(),
   barcode: text("barcode").notNull(),
+  productId: integer("product_id"),
   itemName: text("item_name"),
   sapCode: text("sap_code"),
   pallets: real("pallets").default(0),

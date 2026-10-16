@@ -464,6 +464,13 @@ app.use((req, res, next) => {
     await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS booked_day DATE`);
     // A loading entry remembers the Stock Overview line it took its boxes from, so a void / edit / reset gives them back to exactly that line.
     await pool.query(`ALTER TABLE loading_scan_events ADD COLUMN IF NOT EXISTS stock_line_id INTEGER`);
+    // Each CSV / slip line knows its own PRODUCT (two products can share a barcode: 65 g and 60 g), and every scan entry remembers which product it was for,
+    // so progress, stock and corrections are per product, not per barcode.
+    await pool.query(`ALTER TABLE order_scan_items ADD COLUMN IF NOT EXISTS product_id INTEGER`);
+    await pool.query(`ALTER TABLE order_scan_events ADD COLUMN IF NOT EXISTS product_id INTEGER`);
+    await pool.query(`ALTER TABLE unload_import_items ADD COLUMN IF NOT EXISTS product_id INTEGER`);
+    await pool.query(`ALTER TABLE unload_scan_events ADD COLUMN IF NOT EXISTS product_id INTEGER`);
+    await pool.query(`ALTER TABLE loading_scan_events ADD COLUMN IF NOT EXISTS product_id INTEGER`);
     // Stock Overview's tables (see server/lib/stockV2Schema.ts).
     await ensureStockV2Schema(pool);
     // loading_scan_events.is_adjust — marks the Loading Items table's +/- corrections ("Loading

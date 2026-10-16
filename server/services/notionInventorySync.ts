@@ -166,7 +166,7 @@ export const FIELD_LABELS: Record<string, string> = {
   forMpOrderForm: 'For MP Order Form',
   upSr: 'UP Sr', upHsn: 'UP HSN', upSap: 'UP SAP', upRate: 'UP Rate', upIgst: 'UP IGST',
   forUpOrderForm: 'For UP Order Form',
-  hsnCode: 'HSN Code', sapCode: 'SAP Code', newSr: 'New Sr.',
+  hsnCode: 'HSN Code', newSr: 'New Sr.',
   sellingPrice: 'Selling Price',
 };
 
@@ -286,7 +286,7 @@ function mapNotionPageToFields(page: any) {
     upIgst:          firstOf(p, 'UP IGST :'),
     forUpOrderForm:  firstOf(p, 'For UP Order Form :'),
     hsnCode:         gjHsnVal || firstOf(p, 'HSN Code', 'HSN'),
-    sapCode:         gjSapVal || firstOf(p, 'SAP Code', 'SAP'),
+    // No general SAP: the product's SAPs are the three state SAPs only (GJ / MP / UP SAP).
     newSr:           firstOf(p, 'New Sr.'),
     sellingPrice:    gjSaleRate || firstOf(p, 'Selling Price', 'Sale Rate'),
   };
@@ -309,7 +309,7 @@ function buildProductData(fields: ReturnType<typeof mapNotionPageToFields>): Rec
     'mpSr', 'mpHsn', 'mpSap', 'mpJhPur', 'mpMhPur', 'mpMpPurJabalpur', 'mpMpPurKhargone', 'mpWbPur',
     'saleMpJh', 'saleMpMh', 'saleMpMp', 'mpJhIgst', 'mpMhIgst', 'mpMpCgst', 'mpMpSgst', 'mpWbIgst', 'mpWbSale', 'forMpOrderForm',
     'upSr', 'upHsn', 'upSap', 'upRate', 'upIgst', 'forUpOrderForm',
-    'hsnCode', 'sapCode', 'sellingPrice',
+    'hsnCode', 'sellingPrice',
   ];
   for (const key of optional) {
     const val = (fields as any)[key];
@@ -483,7 +483,6 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
       check('upIgst',          fields.upIgst          || null, product.upIgst);
       check('forUpOrderForm',  fields.forUpOrderForm  || null, product.forUpOrderForm);
       check('hsnCode',         fields.hsnCode         || null, product.hsnCode);
-      check('sapCode',         fields.sapCode         || null, product.sapCode);
       check('newSr',           fields.newSr           || null, product.newSr);
       check('sellingPrice',    fields.sellingPrice    || null, product.sellingPrice);
 

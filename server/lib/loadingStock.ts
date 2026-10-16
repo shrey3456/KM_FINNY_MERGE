@@ -86,7 +86,7 @@ export async function giveBack(client: Db, eventId: number): Promise<StockPull[]
   for (const s of sources) {
     // by SAP code when the entry has one, else the plant's only line for the barcode
     const prod = sap
-      ? await client.query(`SELECT id FROM products WHERE barcode = $1 AND (sap_code = $2 OR gj_sap = $2 OR mp_sap = $2 OR up_sap = $2) ORDER BY id LIMIT 1`, [ev.barcode, sap])
+      ? await client.query(`SELECT id FROM products WHERE barcode = $1 AND (gj_sap = $2 OR mp_sap = $2 OR up_sap = $2) ORDER BY id LIMIT 1`, [ev.barcode, sap])
       : { rows: [] as any[] };
     const line = await findLineForProduct(client, s.plant, ev.barcode, prod.rows[0]?.id ?? null, true);
     if (line) await reverse(line.id, s.plant, s.qty, !!ev.is_extra);

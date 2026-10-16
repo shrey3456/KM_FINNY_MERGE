@@ -54,7 +54,7 @@ function fmtDate(dt: string | null | undefined): string {
 }
 
 type ExtraRow = {
-  id: number; sessionId: number; barcode: string; itemName: string | null;
+  id: number; sessionId: number; barcode: string; productId?: number | null; itemName: string | null;
   totalQty: number; creditedQty: number; available: number;
   scannedAt: string; scannedByName: string | null;
   voided: boolean; voidReason: string | null;
@@ -125,7 +125,7 @@ export default function AdjustExchange() {
   const groupedExtras = useMemo<GroupedExtra[]>(() => {
     const map = new Map<string, GroupedExtra>();
     for (const r of extrasQuery.data ?? []) {
-      const key = `${r.plant}::${r.barcode}`;
+      const key = `${r.plant}::${r.barcode}::${r.productId ?? ""}`;
       const g = map.get(key) ?? { key, barcode: r.barcode, itemName: r.itemName, srNo: r.srNo, plant: r.plant, totalQty: 0, totalAvailable: 0, entryCount: 0, anyVoided: false, extraPallets: 0, availablePallets: 0, creditedQty: 0 };
       g.totalQty += r.totalQty;
       g.totalAvailable += r.available;
@@ -166,6 +166,7 @@ export default function AdjustExchange() {
     queryFn: async () => {
       if (!selectedExtra) return [];
       const q = new URLSearchParams({ plant: selectedExtra.plant, beforeDate: selectedExtra.orderDate, barcode: selectedExtra.barcode });
+      if (selectedExtra.productId != null) q.set("productId", String(selectedExtra.productId));
       const res = await apiRequest("GET", `/api/order-scan/exchange/shortfalls?${q}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to load candidates");
       const rows: ShortfallRow[] = await res.json();
@@ -338,7 +339,7 @@ export default function AdjustExchange() {
   // same product once the first is fully claimed).
   const bestEntryFor = (key: string) =>
     (extrasQuery.data ?? [])
-      .filter((e) => `${e.plant}::${e.barcode}` === key && !e.voided && e.available > 0 && e.creditedQty === 0)
+      .filter((e) => `${e.plant}::${e.barcode}::${e.productId ?? ""}` === key && !e.voided && e.available > 0 && e.creditedQty === 0)
       .sort((a, b) => a.scannedAt.localeCompare(b.scannedAt))[0];
 
   const groupColumns: DataTableColumn<GroupedExtra>[] = [
@@ -469,7 +470,7 @@ export default function AdjustExchange() {
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         {visibleGroups.map((g) => {
           const isOpen = expandedGroupKey === g.key;
-          const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}` === g.key);
+          const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}::${e.productId ?? ""}` === g.key);
           const entry = bestEntryFor(g.key);
           return (
             <div key={g.key} className={`overflow-hidden rounded-xl border shadow-sm ${isOpen ? "sm:col-span-2" : ""} ${g.anyVoided ? "border-amber-200 bg-amber-50/20" : "border-gray-200 bg-white"}`}>

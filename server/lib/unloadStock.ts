@@ -1,5 +1,5 @@
 import type { PoolClient, Pool } from 'pg';
-import { v2Purchase, v2Transfer, resolveLine, linkKey, csvSapFor, lockLineStock } from './stockV2';
+import { v2Purchase, v2Transfer, resolveLine, linkKey, lockLineStock } from './stockV2';
 
 // Unloading can name TWO plants for a batch (a whole CSV, chosen once at import and locked):
 //   - the STOCK plant   (unload_import_sessions.plant)          - where the boxes end up and are later loaded from.
@@ -24,15 +24,14 @@ export async function getUnloadPlants(client: Db, sessionId: number): Promise<{ 
 }
 
 // The stock plant's line this batch's barcode lands on (the same line a receive posts to when there is one plant), made when it has none yet.
-export async function unloadStockLine(client: Db, sessionId: number, barcode: string) {
+export async function unloadStockLine(client: Db, sessionId: number, barcode: string, productId?: number | null) {
   const { stockPlant } = await getUnloadPlants(client, sessionId);
-  const sap = await csvSapFor(client, 'unload', sessionId, barcode);
-  return resolveLine(client, 'unload_session', linkKey(sap ? [sessionId, barcode, stockPlant, sap] : [sessionId, barcode, stockPlant]), stockPlant, barcode, sap);
+  return resolveLine(client, 'unload_session', linkKey([sessionId, barcode, stockPlant, productId ?? '']), stockPlant, barcode, null, productId ?? null);
 }
 
 // The boxes now on that line (locked), so a void / correction / rollback can refuse to take back boxes that were already loaded out.
-export async function unloadStockLeft(client: Db, sessionId: number, barcode: string): Promise<number> {
-  const line = await unloadStockLine(client, sessionId, barcode);
+export async function unloadStockLeft(client: Db, sessionId: number, barcode: string, productId?: number | null): Promise<number> {
+  const line = await unloadStockLine(client, sessionId, barcode, productId);
   return line ? lockLineStock(client, line.id) : 0;
 }
 
@@ -53,7 +52,7 @@ export async function postUnloadMovement(client: Db, p: {
   const { stockPlant, purchasePlant } = await getUnloadPlants(client, p.sessionId);
   const sameName = stockPlant.toLowerCase() === purchasePlant.toLowerCase();
   // Purchase at the purchase plant (or the stock plant when there is no other one), on the batch day.
-  await v2Purchase(client, { source: 'unload', sessionId: p.sessionId, plant: purchasePlant, barcode: p.barcode, qty: p.qty, extraQty: p.extraQty ?? 0, day: p.day ?? null });
+  await v2Purchase(client, { source: 'unload', sessionId: p.sessionId, plant: purchasePlant, barcode: p.barcode, qty: p.qty, extraQty: p.extraQty ?? 0, day: p.day ?? null, productId: p.productId ?? null });
   if (sameName || p.qty === 0) return;
-  await v2Transfer(client, { sessionId: p.sessionId, purchasePlant, stockPlant, barcode: p.barcode, qty: p.qty, day: p.day ?? null });
+  await v2Transfer(client, { sessionId: p.sessionId, purchasePlant, stockPlant, barcode: p.barcode, qty: p.qty, day: p.day ?? null, productId: p.productId ?? null });
 }

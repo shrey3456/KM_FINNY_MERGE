@@ -6,6 +6,8 @@ import express, {
 } from "express";
 import { createServer, type Server } from "http";
 import axios from "axios";
+import { stateSapOf, anyStateSap } from "./lib/productSap";
+import { stateOfPlant } from "./lib/stockV2";
 import { storage } from "./storage";
 import { plants, insertPlantSchema } from "@shared/schema"; // Ensure imports exist
 
@@ -43,7 +45,7 @@ import {
   InsertMpOperation,
   InsertMpOperationItem,
 } from "@shared/schema";
-import { db } from "./db";
+import { db, pool } from "./db";
 import { eq, isNotNull } from "drizzle-orm";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
@@ -200,6 +202,15 @@ async function buildProformaSlipsCsv(
   }
 
   return { csv, filename: `proforma-slips-${filenameSuffix}` };
+}
+
+// The SAP a slip item shows: the product's SAP for the slip's plant state (blank when it has none there - no general SAP any more).
+async function slipItemSap(slipId: number | null | undefined, product: any): Promise<string | null> {
+  if (slipId != null) {
+    const { rows } = await pool.query(`SELECT plant FROM proforma_slips WHERE id = $1`, [slipId]);
+    if (rows[0]) return stateSapOf(product, await stateOfPlant(pool, rows[0].plant ?? ""));
+  }
+  return anyStateSap(product);
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -761,7 +772,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // Fallback: try to extract a reasonable integer from common product fields
         if (!perBox && prod) {
-          const candidates = [prod.itemsPerPallet, prod.itemNo, prod.srNo, prod.sapCode, prod.name, prod.description];
+          const candidates = [prod.itemsPerPallet, prod.itemNo, prod.srNo, anyStateSap(prod), prod.name, prod.description];
           for (const c of candidates) {
             if (!c) continue;
             const s = String(c);
@@ -851,7 +862,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         action: scanData.action,
         quantity: historyUnits,
         notes: scanData.notes || "",
-        productSku: scanData.productSku || product.itemNo || product.sapCode || product.barcode || scanData.barcode,
+        productSku: scanData.productSku || product.itemNo || anyStateSap(product) || product.barcode || scanData.barcode,
         scannerName: scanData.scannerName || "Unknown User", // User's display name
         scannerDepartment: scanData.scannerDepartment || "N/A", // User's department
         productName: scanData.productName || product.name,
@@ -1143,7 +1154,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 "Total Volume": proformaSlip?.totalVolume || "",
                 "Vehicle Number":
                   operation.vehicleNumber || proformaSlip?.vehicleNumber || "",
-                "Product ID": product?.sapCode || item.productId || "",
+                "Product ID": (product ? anyStateSap(product) : null) || item.productId || "",
                 "Product SR No": item.srNo || product?.srNo || "",
                 "Product Barcode": item.barcode || product?.barcode || "",
                 "Product Name": item.itemName || product?.name || "",
@@ -3297,7 +3308,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const current = p.itemsPerPallet || 0;
         if (current && current > 1) continue; // already set
 
-        const candidates = [p.itemsPerPallet, p.itemNo, p.srNo, p.sapCode, p.name, p.description];
+        const candidates = [p.itemsPerPallet, p.itemNo, p.srNo, anyStateSap(p), p.name, p.description];
         let found: number | null = null;
         for (const c of candidates) {
           if (!c) continue;
@@ -4627,8 +4638,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!itemData.hsnCode && product.hsnCode) {
             itemData.hsnCode = product.hsnCode;
           }
-          if (!itemData.sapCode && product.sapCode) {
-            itemData.sapCode = product.sapCode;
+          if (!itemData.sapCode) {
+            const sap = await slipItemSap((itemData as any).proformaSlipId, product);
+            if (sap) itemData.sapCode = sap;
           }
           if (!itemData.description && product.description) {
             itemData.description = product.description;
@@ -4711,7 +4723,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           itemData.category = newProduct.category ?? null;
           itemData.volumeInCuFt = newProduct.volumeInCuFt ?? null;
           itemData.hsnCode = newProduct.hsnCode ?? null;
-          itemData.sapCode = newProduct.sapCode ?? null;
+          itemData.sapCode = await slipItemSap(existingItem.proformaSlipId, newProduct);
           itemData.description = newProduct.description ?? null;
           itemData.purchasePrice = newProduct.purchasePrice ?? null;
           itemData.sellingPrice = newProduct.sellingPrice ?? null;

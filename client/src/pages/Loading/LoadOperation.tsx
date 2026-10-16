@@ -108,6 +108,10 @@ function ItemRowThumb({ name, className = "h-10 w-10" }: { name: string | null; 
 }
 
 type ProformaItem = {
+  // The PRODUCT this line means - two products can share a barcode (65 g / 60 g); every scan / correction is sent with it so it counts on this line.
+  productId?: number | null;
+  // The product has no SAP for this plant's state (the SAP shows blank).
+  noSapForPlant?: boolean;
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
   srNo: string | null; volumeInCuFt: string | null;
   quantity: number | null;
@@ -1615,13 +1619,13 @@ export default function LoadOperation() {
   });
   // The picked product is on this order and still has quantity left → Extra isn't allowed yet.
   const extraBlockedBy = extraTarget
-    ? items.find((i) => i.expected > 0 && i.remaining > 0 && normalize(i.barcode) === normalize(extraTarget.barcode)) ?? null
+    ? items.find((i) => i.expected > 0 && i.remaining > 0 && normalize(i.barcode) === normalize(extraTarget.barcode) && (i.productId == null || i.productId === extraTarget.id)) ?? null
     : null;
   // Stock available for the picked product — it may not be on the slip, so no items row has it.
   const extraStockQuery = useQuery<{ stock: number }>({
-    queryKey: ["/api/loading/proforma", slip?.orderNumber, "stock", extraTarget?.barcode],
+    queryKey: ["/api/loading/proforma", slip?.orderNumber, "stock", extraTarget?.barcode, extraTarget?.id],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/stock?barcode=${encodeURIComponent(extraTarget!.barcode)}`);
+      const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/stock?barcode=${encodeURIComponent(extraTarget!.barcode)}&productId=${extraTarget!.id}`);
       if (!res.ok) throw new Error("Failed to fetch stock");
       return res.json();
     },
@@ -1685,7 +1689,7 @@ export default function LoadOperation() {
     mutationFn: async () => {
       if (!extraTarget) throw new Error("Pick an item first");
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`, {
-        barcode: extraTarget.barcode, qty: extraQty, extra: true,
+        barcode: extraTarget.barcode, qty: extraQty, extra: true, productId: extraTarget.id,
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to add extra");
       return res.json() as Promise<ScanResponse>;
@@ -1721,7 +1725,7 @@ export default function LoadOperation() {
       if (!adjustTarget || !slip) throw new Error("Nothing to adjust");
       const delta = adjustTarget.direction === "add" ? adjustQty : -adjustQty;
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip.orderNumber)}/adjust-load`, {
-        barcode: adjustTarget.item.barcode, delta,
+        barcode: adjustTarget.item.barcode, delta, productId: adjustTarget.item.productId ?? null,
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to adjust quantity");
       return res.json() as Promise<ScanResponse>;
@@ -1835,6 +1839,23 @@ export default function LoadOperation() {
   // Pending confirm dialog (opens for anything that isn't a clean full-pallet auto-scan). Never
   // an extra — that goes through its own dedicated Add Extra popup instead (extraDialogOpen).
   const [pending, setPending] = useState<{ barcode: string; item: ProformaItem | null } | null>(null);
+  // A barcode on more than one item of this order (65 g / 60 g): the person picks which one this scan is for.
+  const [multiMatch, setMultiMatch] = useState<{ barcode: string; matches: ProformaItem[] } | null>(null);
+  // A scan terminator (Enter) can still be arriving when the picker opens and would tap its first button: taps in the first moments are ignored.
+  const multiMatchAtRef = useRef(0);
+  // Items whose product has no SAP for this plant's state show a blank SAP - the person is told once per order, so the Product Master can be fixed.
+  const noSapNotifiedRef = useRef("");
+  useEffect(() => {
+    if (!slip?.orderNumber || items.length === 0) return;
+    const missing = items.filter((i) => i.noSapForPlant);
+    if (missing.length === 0 || noSapNotifiedRef.current === slip.orderNumber) return;
+    noSapNotifiedRef.current = slip.orderNumber;
+    toast({
+      title: `No SAP for this plant (${missing.length} item${missing.length === 1 ? "" : "s"})`,
+      description: missing.slice(0, 4).map((i) => i.itemName ?? i.barcode).join(" · ") + (missing.length > 4 ? ` · …and ${missing.length - 4} more` : "") + ` — no ${slip.plant ?? "plant"} SAP in the Product Master.`,
+      variant: "destructive",
+    });
+  }, [slip?.orderNumber, items]);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
 
@@ -1858,7 +1879,7 @@ export default function LoadOperation() {
   }
 
   const scanItemMutation = useMutation({
-    mutationFn: async ({ barcode, qty, extra }: { barcode: string; qty: number; extra?: boolean }): Promise<
+    mutationFn: async ({ barcode, qty, extra, productId }: { barcode: string; qty: number; extra?: boolean; productId?: number | null }): Promise<
       { queued: true } | { queued: false; data: ScanResponse }
     > => {
       // Tries live first; falls back to the offline queue only on a genuine network failure —
@@ -1870,7 +1891,7 @@ export default function LoadOperation() {
       // immediately; the 15s silent poll above (and the real response on a live scan) corrects it.
       const result = await scanOrQueue(
         `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`,
-        { barcode, qty, extra: !!extra },
+        { barcode, qty, extra: !!extra, productId: productId ?? null },
         `${barcode} × ${qty}${extra ? " (extra)" : ""} — Loading #${slip!.orderNumber}`,
       );
       if (result.queued) return { queued: true };
@@ -1884,9 +1905,9 @@ export default function LoadOperation() {
     // importantly, PERSISTS for a queued one, where there is no real response for a while. Mirrors
     // the server's own "loaded" math (withProgress in loading.ts): loaded counts every scan
     // (regular or extra) toward remaining, so this needs no regular/extra guess to be accurate.
-    onMutate: ({ barcode, qty }) => {
+    onMutate: ({ barcode, qty, productId }) => {
       const prevItems = itemsRef.current;
-      const idx = prevItems.findIndex((i) => normalize(i.barcode) === normalize(barcode));
+      const idx = prevItems.findIndex((i) => normalize(i.barcode) === normalize(barcode) && (productId == null || i.productId == null || i.productId === productId));
       if (idx === -1) return { prevItems: null };
       const item = prevItems[idx];
       const loaded = item.loaded + qty;
@@ -2056,9 +2077,9 @@ export default function LoadOperation() {
     }
   }
 
-  async function handleItemBarcode(rawBarcode: string) {
+  async function handleItemBarcode(rawBarcode: string, forcedItem?: ProformaItem) {
     const barcode = rawBarcode.trim();
-    if (!barcode || !slip || locked || scanLockRef.current || pending) return;
+    if (!barcode || !slip || locked || scanLockRef.current || pending || (multiMatch && !forcedItem)) return;
 
     // Shift handoff — the server rejects this too (checkLoadOwnership in /scan), but catching it
     // here avoids opening a confirm dialog for a scan that's just going to bounce anyway.
@@ -2094,7 +2115,18 @@ export default function LoadOperation() {
     }
     lastScanRef.current = { barcode, at: Date.now() };
 
-    const item = itemsRef.current.find((i) => normalize(i.barcode) === normalize(barcode)) ?? null;
+    const sameBarcode = itemsRef.current.filter((i) => normalize(i.barcode) === normalize(barcode));
+    // Two or more items share this barcode: the picker asks which one (unless only one still has room and stock - then it is that one).
+    if (!forcedItem && sameBarcode.length > 1) {
+      const open = sameBarcode.filter((m) => m.remaining > 0 && (m.stockAvailable ?? 0) > 0);
+      if (open.length !== 1) {
+        lastScanRef.current = null;
+        setMultiMatch({ barcode, matches: sameBarcode });
+        multiMatchAtRef.current = Date.now();
+        return;
+      }
+    }
+    const item = forcedItem ?? (sameBarcode.length > 1 ? sameBarcode.find((m) => m.remaining > 0 && (m.stockAvailable ?? 0) > 0) ?? sameBarcode[0] : (sameBarcode[0] ?? null));
 
     // A stock-zero item on THIS slip is stopped right here, before even opening the dialog,
     // since there's nothing to load.
@@ -2138,7 +2170,7 @@ export default function LoadOperation() {
       && item.expected > 0 && ipp >= 1 && item.remaining >= ipp && (item.stockAvailable ?? 0) >= ipp;
     if (canAutoScan) {
       const qty = ipp;
-      scanItemMutation.mutate({ barcode, qty }, {
+      scanItemMutation.mutate({ barcode, qty, productId: item?.productId ?? null }, {
         // Queued (offline) has no event data to show — the mutation's own onSuccess already
         // toasts "Scan saved offline" in that case, so this just skips the feedback popup.
         onSuccess: (result) => {
@@ -4697,6 +4729,40 @@ export default function LoadOperation() {
           — this one never had it, unlike every other scan-confirmation screen in the app. No id
           to look it up by here (ProformaItem carries no productId), so it goes by name, same as
           the box-image-by-name/image-by-name fallback ProductPhoto already supports. */}
+      <Dialog open={!!multiMatch} onOpenChange={(open) => { if (!open) { setMultiMatch(null); scanLockRef.current = false; } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Which item?</DialogTitle>
+            <DialogDescription>
+              Barcode <span className="font-mono font-semibold text-gray-700">{multiMatch?.barcode}</span> is on {multiMatch?.matches.length} items of this order. Tap the one you are loading.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {multiMatch?.matches.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-white p-3 text-left hover:border-[#001d6e] hover:bg-blue-50/40"
+                onClick={() => {
+                  if (Date.now() - multiMatchAtRef.current < 450) return;
+                  const chosen = m;
+                  const barcode = multiMatch!.barcode;
+                  setMultiMatch(null);
+                  lastScanRef.current = null;
+                  void handleItemBarcode(barcode, chosen);
+                }}
+              >
+                <span>
+                  <span className="block font-medium text-gray-900">{m.itemName ?? m.barcode}</span>
+                  <span className="block text-xs text-gray-500">{m.sapCode ? `SAP ${m.sapCode}` : "No SAP for this plant"} · stock {m.stockAvailable ?? 0}</span>
+                </span>
+                <span className="text-sm tabular-nums text-gray-600">{m.loaded} / {m.expected}{m.remaining > 0 ? ` · ${m.remaining} left` : " · done"}</span>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
         <DialogContent className="overflow-x-hidden overflow-y-auto p-0 sm:max-w-3xl">
           <div className="flex flex-col sm:flex-row">
@@ -4809,7 +4875,7 @@ export default function LoadOperation() {
                   }
                   onClick={() => {
                     if (!pending) return;
-                    scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty }, {
+                    scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty, productId: pending.item?.productId ?? null }, {
                       onSuccess: () => setPending(null),
                     });
                   }}

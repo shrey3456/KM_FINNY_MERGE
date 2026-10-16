@@ -11,18 +11,18 @@ import { giveBack } from './loadingStock';
 export async function reverseOrderSessions(client: PoolClient, sessionIds: number[]): Promise<{ lines: number; qty: number }> {
   if (!sessionIds.length) return { lines: 0, qty: 0 };
   const { rows } = await client.query(
-    `SELECT e.session_id, s.plant, MAX(TRIM(e.barcode)) AS barcode, SUM(e.total_qty)::int AS qty,
+    `SELECT e.session_id, s.plant, MAX(TRIM(e.barcode)) AS barcode, e.product_id, SUM(e.total_qty)::int AS qty,
             COALESCE(SUM(e.total_qty) FILTER (WHERE e.is_extra), 0)::int AS extra
        FROM order_scan_events e JOIN order_import_sessions s ON s.id = e.session_id
       WHERE e.session_id = ANY($1::int[]) AND e.voided IS NOT TRUE AND e.is_credit IS NOT TRUE
         AND e.barcode IS NOT NULL AND e.barcode <> 'EMPTY_BOX'
-      GROUP BY e.session_id, s.plant, LOWER(TRIM(e.barcode))
+      GROUP BY e.session_id, s.plant, LOWER(TRIM(e.barcode)), e.product_id
      HAVING SUM(e.total_qty) <> 0`,
     [sessionIds],
   );
   let qty = 0;
   for (const r of rows) {
-    await v2Purchase(client, { source: 'order', sessionId: r.session_id, plant: r.plant, barcode: r.barcode, qty: -Number(r.qty), extraQty: -Number(r.extra) });
+    await v2Purchase(client, { source: 'order', sessionId: r.session_id, plant: r.plant, barcode: r.barcode, qty: -Number(r.qty), extraQty: -Number(r.extra), productId: r.product_id ?? null });
     qty += Number(r.qty);
   }
   return { lines: rows.length, qty };
@@ -32,18 +32,18 @@ export async function reverseOrderSessions(client: PoolClient, sessionIds: numbe
 export async function reverseUnloadSessions(client: PoolClient, sessionIds: number[]): Promise<{ lines: number; qty: number }> {
   if (!sessionIds.length) return { lines: 0, qty: 0 };
   const { rows } = await client.query(
-    `SELECT session_id, MAX(TRIM(barcode)) AS barcode, to_char(booked_day, 'YYYY-MM-DD') AS day, SUM(total_qty)::int AS qty,
+    `SELECT session_id, MAX(TRIM(barcode)) AS barcode, product_id, to_char(booked_day, 'YYYY-MM-DD') AS day, SUM(total_qty)::int AS qty,
             COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra
        FROM unload_scan_events
       WHERE session_id = ANY($1::int[]) AND voided IS NOT TRUE AND barcode IS NOT NULL
-      GROUP BY session_id, LOWER(TRIM(barcode)), to_char(booked_day, 'YYYY-MM-DD')
+      GROUP BY session_id, LOWER(TRIM(barcode)), product_id, to_char(booked_day, 'YYYY-MM-DD')
      HAVING SUM(total_qty) <> 0`,
     [sessionIds],
   );
   let qty = 0;
   for (const r of rows) {
     await postUnloadMovement(client, {
-      sessionId: r.session_id, barcode: r.barcode, qty: -Number(r.qty), extraQty: -Number(r.extra), type: 'adjust',
+      sessionId: r.session_id, barcode: r.barcode, productId: r.product_id ?? null, qty: -Number(r.qty), extraQty: -Number(r.extra), type: 'adjust',
       reason: 'Operations data removed (Settings)', day: r.day ?? null,
     });
     qty += Number(r.qty);

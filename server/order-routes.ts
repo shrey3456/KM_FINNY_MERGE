@@ -157,7 +157,8 @@ function buildProductLookup(productRows: Array<typeof products.$inferSelect>) {
   const byBarcode = new Map<string, typeof products.$inferSelect>();
 
   productRows.forEach((product) => {
-    if (product.sapCode) bySap.set(product.sapCode.trim(), product);
+    // The product's SAPs are the three state SAPs (no general SAP).
+    for (const sap of [product.gjSap, product.mpSap, product.upSap]) if (sap && String(sap).trim()) bySap.set(String(sap).trim(), product);
     byName.set(product.name.trim().toLowerCase(), product);
     if (product.barcode) byBarcode.set(product.barcode.trim().toLowerCase(), product);
   });

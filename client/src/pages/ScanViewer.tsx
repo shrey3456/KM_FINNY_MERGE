@@ -492,7 +492,8 @@ export default function ScanViewer() {
     const groups = new Map<string, MvMergedItem>();
     mvQuery.data.files.forEach((f) => {
       f.items.forEach((item) => {
-        const key = item.barcode?.trim().toLowerCase()
+        // Two products can share a barcode (65 g / 60 g): each is its own Master View row.
+        const key = (item.barcode ? `${item.barcode.trim().toLowerCase()}|${(item as any).productId ?? ""}` : "")
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {

@@ -31,6 +31,8 @@ export type StockV2Line = {
 const LINE_COLS = `id, plant, state, barcode, item_name AS "itemName", sap_code AS "sapCode",
   sap_is_fallback AS "sapIsFallback", sr_no AS "srNo", brand, category, stock_qty AS "stockQty"`;
 
+import { stateSapOf, pickBySap, productsForBarcode } from './productSap';
+
 let plantStateCache: { at: number; map: Map<string, string | null> } | null = null;
 
 export async function stateOfPlant(db: Db, plant: string): Promise<string | null> {
@@ -42,70 +44,35 @@ export async function stateOfPlant(db: Db, plant: string): Promise<string | null
   return plantStateCache.map.get(plant.trim().toLowerCase()) ?? null;
 }
 
-// The state's own columns on the product, falling back to the generic ones. sapIsFallback is true when the
-// state has no SAP of its own and the generic code is used instead.
-function detailsFromProduct(p: any, state: string | null) {
+// The state's own columns on the product. The SAP is the product's SAP for the plant's state ONLY (no general SAP): a product with none for that state
+// has a blank SAP on its line there. sapIsFallback is kept (always false) for the pages that still carry the field.
+export function detailsFromProduct(p: any, state: string | null) {
   const s = (state || '').toUpperCase();
   const pick = (a: any, b: any) => (a && String(a).trim() ? String(a).trim() : (b && String(b).trim() ? String(b).trim() : null));
-  const stateSap = s === 'MP' ? p.mp_sap : s === 'UP' ? p.up_sap : s === 'GJ' ? p.gj_sap : null;
   const stateSr = s === 'MP' ? p.mp_sr : s === 'UP' ? p.up_sr : s === 'GJ' ? p.gj_sr : null;
   const stateHsn = s === 'MP' ? p.mp_hsn : s === 'UP' ? p.up_hsn : s === 'GJ' ? p.gj_hsn : null;
-  const ownSap = stateSap && String(stateSap).trim() ? String(stateSap).trim() : null;
   return {
-    sapCode: ownSap ?? pick(null, p.sap_code),
-    sapIsFallback: !ownSap && !!pick(null, p.sap_code),
+    sapCode: stateSapOf(p, state),
+    sapIsFallback: false,
     srNo: pick(p.new_sr, stateSr), // the Product Master's New Sr. first (what every other page shows)
     hsn: pick(stateHsn, p.hsn_code),
     pallet: s === 'MP' ? p.mp_plt : s === 'GJ' ? p.gj_plt : null,
   };
 }
 
-// A barcode can be shared by more than one Product Master row (e.g. 35 gm and 37 gm packs of the same item), told
-// apart only by SAP code. One row -> that row, whatever the SAP. Several rows -> the one whose SAP equals the CSV /
-// slip row's SAP: the plant state's own SAP (gj_sap / mp_sap / up_sap) first, then the generic sap_code, then any
-// state's. With no SAP given, or none matching, it falls back to the lowest id (the old behaviour) and says so.
+// A barcode can be shared by more than one Product Master row (e.g. 65 gm and 60 gm packs of the same item), told apart only by SAP code. One row ->
+// that row. Several -> the one whose SAP equals the line's SAP (the plant state's own SAP first, then any state's); with none given or none matching,
+// the one that has a SAP for the plant's state, else the lowest id - and it says so.
 const norm = (v: any) => String(v ?? '').trim().toLowerCase();
 
 export async function pickProduct(db: Db, barcode: string, sapCode: string | null | undefined, state: string | null): Promise<any | null> {
-  const r = await db.query(`SELECT * FROM products WHERE barcode = $1 ORDER BY id`, [barcode]);
-  if (r.rows.length <= 1) return r.rows[0] ?? null;
-  const sap = norm(sapCode);
-  if (sap) {
-    const s = (state || '').toUpperCase();
-    const stateCol = s === 'MP' ? 'mp_sap' : s === 'UP' ? 'up_sap' : s === 'GJ' ? 'gj_sap' : null;
-    const hit =
-      (stateCol && r.rows.find((x: any) => norm(x[stateCol]) === sap)) ||
-      r.rows.find((x: any) => norm(x.sap_code) === sap) ||
-      r.rows.find((x: any) => ['gj_sap', 'mp_sap', 'up_sap'].some((c) => norm(x[c]) === sap));
-    if (hit) return hit;
+  const rows = await productsForBarcode(db, barcode);
+  const p = pickBySap(rows, sapCode, state);
+  if (rows.length > 1 && (!sapCode || !rows.some((r) => norm(stateSapOf(r, state)) === norm(sapCode)))) {
+    console.warn(`[Stock] barcode ${barcode} matches ${rows.length} products and SAP "${sapCode ?? ''}" is not one of this state's - using "${p?.name}"`);
   }
-  console.warn(`[StockV2] barcode ${barcode} matches ${r.rows.length} products and SAP "${sapCode ?? ''}" picked none — using the first`);
-  return r.rows[0];
+  return p;
 }
-
-// The SAP a CSV / unloading batch / slip row carries for a barcode — only worth knowing when the barcode is shared
-// by several products, so it returns null otherwise (leaving single-product barcodes and their links untouched).
-async function ambiguousSap(db: Db, barcode: string, lookup: () => Promise<string | null>): Promise<string | null> {
-  const c = await db.query(`SELECT COUNT(*)::int AS n FROM products WHERE barcode = $1`, [String(barcode ?? '').trim()]);
-  if ((c.rows[0]?.n ?? 0) <= 1) return null;
-  return (await lookup()) || null;
-}
-
-export const csvSapFor = (db: Db, source: 'order' | 'unload', sessionId: number, barcode: string) =>
-  ambiguousSap(db, barcode, async () => {
-    const bc = String(barcode).trim();
-    if (source === 'unload') {
-      const r = await db.query(`SELECT sap_code FROM unload_import_items WHERE session_id = $1 AND LOWER(TRIM(barcode)) = LOWER($2) AND COALESCE(sap_code,'') <> '' LIMIT 1`, [sessionId, bc]);
-      return r.rows[0]?.sap_code ?? null;
-    }
-    const r = await db.query(
-      `SELECT sap_code FROM order_scan_items WHERE session_id = $1 AND LOWER(TRIM(barcode)) = LOWER($2) AND COALESCE(sap_code,'') <> '' LIMIT 1`,
-      [sessionId, bc],
-    );
-    if (r.rows[0]?.sap_code) return r.rows[0].sap_code;
-    const r2 = await db.query(`SELECT sap_code FROM order_import_items WHERE session_id = $1 AND LOWER(TRIM(barcode)) = LOWER($2) AND COALESCE(sap_code,'') <> '' LIMIT 1`, [sessionId, bc]);
-    return r2.rows[0]?.sap_code ?? null;
-  });
 
 // Finds the plant's stock line for a barcode, making it from the Product Master when there is none yet.
 // Returns null when the barcode is not in the Product Master (the caller decides whether that blocks).
@@ -217,13 +184,13 @@ export async function setLink(db: Db, kind: LinkKind, refKey: string, lineId: nu
 
 // The link for a barcode at a plant: the stored one, or — first time — find/create the line from the
 // Product Master and store it. Null when the barcode isn't in the Product Master.
-export async function resolveLine(db: Db, kind: LinkKind, refKey: string, plant: string, barcode: string, sapCode?: string | null): Promise<StockV2Line | null> {
+export async function resolveLine(db: Db, kind: LinkKind, refKey: string, plant: string, barcode: string, sapCode?: string | null, productId?: number | null): Promise<StockV2Line | null> {
   const link = await getLink(db, kind, refKey);
   if (link) {
     const r = await db.query(`SELECT ${LINE_COLS} FROM stock_v2_lines WHERE id = $1`, [link.lineId]);
     if (r.rows[0]) return r.rows[0];
   }
-  const line = await findOrCreateLine(db, plant, barcode, sapCode);
+  const line = await findOrCreateLine(db, plant, barcode, sapCode, productId ?? null);
   if (line) await setLink(db, kind, refKey, line.id);
   return line;
 }
@@ -245,13 +212,12 @@ export async function sessionDay(db: Db, source: 'order' | 'unload', sessionId: 
 // from the CSV's link — made the first time the barcode is seen on that CSV — so later scans don't search.
 export async function v2Purchase(
   client: Db,
-  p: { source: 'order' | 'unload'; sessionId: number; plant: string; barcode: string; qty: number; extraQty?: number; day?: string | null },
+  p: { source: 'order' | 'unload'; sessionId: number; plant: string; barcode: string; qty: number; extraQty?: number; day?: string | null; productId?: number | null },
 ): Promise<void> {
   {
     const db = client;
     if (!p.qty && !p.extraQty) return;
-    const sap = await csvSapFor(db, p.source, p.sessionId, p.barcode);
-    const line = await resolveLine(db, p.source === 'unload' ? 'unload_session' : 'order_session', linkKey(sap ? [p.sessionId, p.barcode, p.plant, sap] : [p.sessionId, p.barcode, p.plant]), p.plant, p.barcode, sap);
+    const line = await resolveLine(db, p.source === 'unload' ? 'unload_session' : 'order_session', linkKey([p.sessionId, p.barcode, p.plant, p.productId ?? '']), p.plant, p.barcode, null, p.productId ?? null);
     if (!line) return;
     // An unloading scan carries its own booked day (the day it was scanned); anything without one is dated by the CSV's order date.
     await postPurchase(db, line.id, p.day || await sessionDay(db, p.source, p.sessionId), p.qty, p.extraQty ?? 0);
@@ -259,29 +225,27 @@ export async function v2Purchase(
 }
 
 // The plant's stock line for a barcode on a receiving CSV (the line v2Purchase posts to), made when it has none yet.
-export async function orderLine(db: Db, sessionId: number, plant: string, barcode: string): Promise<StockV2Line | null> {
-  const sap = await csvSapFor(db, 'order', sessionId, barcode);
-  return resolveLine(db, 'order_session', linkKey(sap ? [sessionId, barcode, plant, sap] : [sessionId, barcode, plant]), plant, barcode, sap);
+export async function orderLine(db: Db, sessionId: number, plant: string, barcode: string, productId?: number | null): Promise<StockV2Line | null> {
+  return resolveLine(db, 'order_session', linkKey([sessionId, barcode, plant, productId ?? '']), plant, barcode, null, productId ?? null);
 }
 
 // The boxes now on that line (locked) - so a void / correction can refuse to take back boxes that were already loaded out.
-export async function orderStockLeft(db: Db, sessionId: number, plant: string, barcode: string): Promise<number> {
-  const line = await orderLine(db, sessionId, plant, barcode);
+export async function orderStockLeft(db: Db, sessionId: number, plant: string, barcode: string, productId?: number | null): Promise<number> {
+  const line = await orderLine(db, sessionId, plant, barcode, productId);
   return line ? lockLineStock(db, line.id) : 0;
 }
 
 // A transfer between a purchase plant and a stock plant (two-plant Unloading); signed like the purchase.
 export async function v2Transfer(
   client: Db,
-  p: { sessionId: number; purchasePlant: string; stockPlant: string; barcode: string; qty: number; day?: string | null },
+  p: { sessionId: number; purchasePlant: string; stockPlant: string; barcode: string; qty: number; day?: string | null; productId?: number | null },
 ): Promise<void> {
   {
     const db = client;
     if (!p.qty) return;
     const day = p.day || await sessionDay(db, 'unload', p.sessionId);
-    const sap = await csvSapFor(db, 'unload', p.sessionId, p.barcode);
-    const from = await findOrCreateLine(db, p.purchasePlant, p.barcode, sap);
-    const to = await findOrCreateLine(db, p.stockPlant, p.barcode, sap);
+    const from = await findOrCreateLine(db, p.purchasePlant, p.barcode, null, p.productId ?? null);
+    const to = await findOrCreateLine(db, p.stockPlant, p.barcode, null, p.productId ?? null);
     if (!from || !to) return;
     await bumpDay(db, from.id, day, { transferOut: p.qty });
     await bumpDay(db, to.id, day, { transferIn: p.qty });

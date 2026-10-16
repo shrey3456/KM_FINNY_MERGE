@@ -7,12 +7,11 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { LayoutList, CalendarDays, Boxes, History, ShoppingCart, RotateCw, Loader2, Scale, Plus, Search, ChevronLeft, ChevronDown, FileDown, Trash2, MoreVertical } from "lucide-react";
+import { LayoutList, CalendarDays, Boxes, History, ShoppingCart, RotateCw, Loader2, Scale, Plus, Search, ChevronLeft, ChevronDown, FileDown, Trash2 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { scanTypeLabel } from "./Scanning/ScanHistory";
-import ExchangeProductDialog from "@/components/modals/ExchangeProductDialog";
 import { Input } from "@/components/ui/input";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
@@ -306,8 +305,8 @@ export default function StockOverview() {
       total: (rs) => num(sumOf(rs, (r) => r.closingStock)),
       cellClassName: "font-semibold", render: (r) => withPallets(r, (x) => x.closingStock, <span className={`tabular-nums ${r.closingStock < 0 ? "text-amber-600" : ""}`}>{num(r.closingStock)}</span>),
     },
-    ...(isAdmin ? [{ id: "actions", header: "", hideable: false, width: 52, fixedWidth: true, align: "center", preventRowClick: true, totalable: false, render: (r: Row) => (r.id != null || r.parts?.length ? <LineActions row={r} /> : null) } as DataTableColumn<Row>] : []),
     { id: "stock", header: "Stock", width: 88, align: "center", sortable: true, accessor: (r) => r.stock, total: (rs) => num(sumOf(rs, (r) => r.stock)), cellClassName: "font-semibold text-[#001d6e]", render: (r) => withPallets(r, (x) => x.stock, <span className="tabular-nums">{num(r.stock)}</span>) },
+    ...(isAdmin ? [{ id: "actions", header: "Action", hideable: false, width: 78, fixedWidth: true, align: "center", preventRowClick: true, totalable: false, render: (r: Row) => (r.id != null || r.parts?.length ? <LineActions row={r} /> : null) } as DataTableColumn<Row>] : []),
   ];
 
   // The same column look as the Stock Overview: ruled cells, ruled navy header cells, a funnel on every column that can be filtered.
@@ -544,59 +543,37 @@ export default function StockOverview() {
   );
 }
 
-// The admin actions on ONE stock line (one item at one plant; on a combined row the plant is picked first): Adjust (add / remove / set), Clear (Stock to 0, the book keeps its history) and
-// Delete history (forget the line's days and corrections). Each is its own dialog; the server checks admin and the plant again.
+// The admin action on ONE stock line (one item at one plant; on a combined row the plant is picked in the dialog): Adjust stock (add / remove / set).
+// The server checks admin and the plant again.
 function LineActions({ row: top }: { row: Row }) {
   const { toast } = useToast();
-  // A combined row (all plants / a state) folds several plants: the action is about one of them, picked in the dialog.
   const parts = (top.parts && top.parts.length ? top.parts : [top]).filter((p) => p.id != null);
   const [pick, setPick] = useState(0);
   const row = parts[Math.min(pick, parts.length - 1)] ?? top;
-  const [dialog, setDialog] = useState<null | "adjust" | "clear" | "delete">(null);
-  const [exchange, setExchange] = useState(false);
+  const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<"add" | "remove" | "set">("add");
   const [qty, setQty] = useState("");
   const [reason, setReason] = useState("");
-  const [typed, setTyped] = useState("");
   const q = Math.round(Number(qty));
   const valid = Number.isFinite(q) && q >= 0 && (mode === "set" || q > 0);
   const next = !valid ? null : mode === "add" ? row.stock + q : mode === "remove" ? row.stock - q : q;
-  const close = () => { setDialog(null); setQty(""); setReason(""); setTyped(""); setMode("add"); };
+  const close = () => { setOpen(false); setQty(""); setReason(""); setMode("add"); };
   const refresh = () => queryClient.invalidateQueries({ predicate: (qq) => String(qq.queryKey[0] ?? "").startsWith("/api/stock-v2") || String(qq.queryKey[0] ?? "").startsWith("/api/scan-sessions") });
   const run = useMutation({
-    mutationFn: () => {
-      if (dialog === "adjust") return apiRequest("POST", `/api/stock-v2/line/${row.id}/adjust`, { mode, qty: q, expectedCurrentQty: row.stock, reason: reason.trim() || undefined }, false, true);
-      if (dialog === "clear") return apiRequest("POST", `/api/stock-v2/line/${row.id}/clear`, {}, false, true);
-      return apiRequest("DELETE", `/api/stock-v2/line/${row.id}`, undefined, false, true);
-    },
+    mutationFn: () => apiRequest("POST", `/api/stock-v2/line/${row.id}/adjust`, { mode, qty: q, expectedCurrentQty: row.stock, reason: reason.trim() || undefined }, false, true),
     onSuccess: () => {
-      toast({ title: dialog === "adjust" ? "Stock adjusted" : dialog === "clear" ? "Stock cleared" : "History deleted", description: `${row.itemName} at ${row.plant}` });
+      toast({ title: "Stock adjusted", description: `${row.itemName} at ${row.plant}` });
       refresh(); close();
     },
     onError: (e: any) => { toast({ title: "Could not do that", description: e?.message ?? "Try again", variant: "destructive" }); refresh(); },
   });
-  const title = dialog === "adjust" ? "Adjust stock" : dialog === "clear" ? "Clear stock" : "Delete stock history";
   return (
     <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button type="button" variant="ghost" size="icon" className="h-7 w-7" title="Stock actions"><MoreVertical className="h-4 w-4" /></Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-44">
-          <DropdownMenuItem onSelect={() => setDialog("adjust")}>Adjust stock…</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => setExchange(true)} disabled={row.stock <= 0}>Exchange to another product…</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => setDialog("clear")} disabled={row.stock === 0}>Clear stock…</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => setDialog("delete")} className="text-red-600 focus:text-red-600">Delete history…</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <ExchangeProductDialog
-        source={exchange ? { barcode: row.barcode, itemName: row.itemName, plant: row.plant, availableStock: row.stock, itemsPerPallet: row.palletSize } : null}
-        onClose={() => setExchange(false)}
-      />
-      <Dialog open={dialog !== null} onOpenChange={(o) => { if (!o) close(); }}>
+      <Button type="button" variant="ghost" size="icon" className="h-7 w-7" title="Adjust stock" onClick={() => setOpen(true)}><Scale className="h-4 w-4" /></Button>
+      <Dialog open={open} onOpenChange={(o) => { if (!o) close(); }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>{title}</DialogTitle>
+            <DialogTitle>Adjust stock</DialogTitle>
             <DialogDescription>{row.itemName} · {row.barcode} · {row.plant} · Stock now <b>{num(row.stock)}</b></DialogDescription>
           </DialogHeader>
           {parts.length > 1 && (
@@ -604,33 +581,20 @@ function LineActions({ row: top }: { row: Row }) {
               {parts.map((p, i) => <button key={p.id} type="button" onClick={() => setPick(i)} className={tabCls(i === pick)}>{p.plant} · {num(p.stock)}</button>)}
             </div>
           )}
-          {dialog === "adjust" && (
-            <div className="space-y-3">
-              <div className="flex gap-1.5">
-                {([["add", "Add"], ["remove", "Remove"], ["set", "Set to"]] as const).map(([k, l]) => (
-                  <button key={k} type="button" onClick={() => setMode(k)} className={tabCls(mode === k)}>{l}</button>
-                ))}
-              </div>
-              <Input type="number" min={0} inputMode="numeric" placeholder={mode === "set" ? "New stock" : "Boxes"} value={qty} onChange={(e) => setQty(e.target.value)} />
-              <Input placeholder="Reason (optional)" value={reason} onChange={(e) => setReason(e.target.value)} />
-              {next != null && <p className={`text-sm ${next < 0 ? "text-red-600" : "text-gray-600"}`}>{next < 0 ? `Only ${num(row.stock)} in stock — can't remove ${num(q)}.` : `Stock ${num(row.stock)} → ${num(next)} (${signed(next - row.stock)})`}</p>}
+          <div className="space-y-3">
+            <div className="flex gap-1.5">
+              {([["add", "Add"], ["remove", "Remove"], ["set", "Set to"]] as const).map(([k, l]) => (
+                <button key={k} type="button" onClick={() => setMode(k)} className={tabCls(mode === k)}>{l}</button>
+              ))}
             </div>
-          )}
-          {dialog === "clear" && <p className="text-sm text-gray-600">Takes the Stock of this item at {row.plant} from {num(row.stock)} to 0. It is recorded as a correction (Adjust {signed(-row.stock)}); the purchases and sales stay in the book.</p>}
-          {dialog === "delete" && (
-            <div className="space-y-2">
-              <p className="text-sm text-gray-600">Forgets every day and correction of this item at {row.plant} and sets its Stock to 0. Scan entries (Order Scan, Unloading, Loading) are not touched. Type the barcode to confirm.</p>
-              <Input placeholder={row.barcode} value={typed} onChange={(e) => setTyped(e.target.value)} />
-            </div>
-          )}
+            <Input type="number" min={0} inputMode="numeric" placeholder={mode === "set" ? "New stock" : "Boxes"} value={qty} onChange={(e) => setQty(e.target.value)} />
+            <Input placeholder="Reason (optional)" value={reason} onChange={(e) => setReason(e.target.value)} />
+            {next != null && <p className={`text-sm ${next < 0 ? "text-red-600" : "text-gray-600"}`}>{next < 0 ? `Only ${num(row.stock)} in stock — can't remove ${num(q)}.` : `Stock ${num(row.stock)} → ${num(next)} (${signed(next - row.stock)})`}</p>}
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={close}>Cancel</Button>
-            <Button
-              className={dialog === "delete" ? "bg-red-600 hover:bg-red-700" : "bg-[#001d6e] hover:bg-[#001552]"}
-              disabled={run.isPending || (dialog === "adjust" && (!valid || (next ?? 0) < 0)) || (dialog === "delete" && typed.trim().toLowerCase() !== row.barcode.toLowerCase())}
-              onClick={() => run.mutate()}
-            >
-              {run.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : dialog === "adjust" ? "Save" : dialog === "clear" ? "Clear stock" : "Delete"}
+            <Button className="bg-[#001d6e] hover:bg-[#001552]" disabled={run.isPending || !valid || (next ?? 0) < 0} onClick={() => run.mutate()}>
+              {run.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>

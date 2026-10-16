@@ -13,7 +13,7 @@ import {
   insertScanSessionExtraSchema,
   insertScanSessionPalletScanSchema,
 } from '@shared/schema';
-import { eq, desc, inArray, count, asc } from 'drizzle-orm';
+import { eq, desc, inArray, count, asc, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { requirePageWrite } from '../lib/pageAccess';
 import { getUserPlants } from './order-scan';
@@ -344,7 +344,8 @@ router.get('/:id/stock-report', async (req: Request, res: Response) => {
         category: products.category,
         itemsPerPallet: products.itemsPerPallet,
         volumeInCuFt: products.volumeInCuFt,
-        productSapCode: products.sapCode,
+        // No general SAP: the product's own state SAPs.
+        productSapCode: sql<string | null>`COALESCE(${products.gjSap}, ${products.mpSap}, ${products.upSap})`,
         productItemNo: products.itemNo,
       })
       .from(scanSessionItems)
@@ -596,7 +597,7 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             -- aggregation below falls back to this barcode's own total quantity.
             CASE WHEN UPPER(pl_old.state) = 'GJ' THEN NULLIF(COALESCE(p.gj_plt, p_bc.gj_plt), 0)
                  WHEN UPPER(pl_old.state) = 'MP' THEN NULLIF(COALESCE(p.mp_plt, p_bc.mp_plt), 0) END AS ipp,
-            COALESCE(p.sap_code,  p_bc.sap_code)                           AS sap_code,
+            COALESCE(p.gj_sap, p.mp_sap, p.up_sap, p_bc.gj_sap, p_bc.mp_sap, p_bc.up_sap) AS sap_code,
             COALESCE(p.hsn_code,  p_bc.hsn_code)                           AS hsn_code,
             COALESCE(p.category,  p_bc.category)                           AS category,
             COALESCE(p.brand,     p_bc.brand)                              AS brand
@@ -619,9 +620,10 @@ router.get('/reports/extras', async (_req: Request, res: Response) => {
             CASE WHEN UPPER(pl_new.state) = 'GJ' THEN NULLIF(p.gj_plt, 0)
                  WHEN UPPER(pl_new.state) = 'MP' THEN NULLIF(p.mp_plt, 0) END AS ipp,
             CASE
-              WHEN UPPER(pl_new.state) = 'GJ' THEN COALESCE(p.gj_sap, p.sap_code)
-              WHEN UPPER(pl_new.state) = 'MP' THEN COALESCE(p.mp_sap, p.sap_code)
-              ELSE p.sap_code
+              WHEN UPPER(pl_new.state) = 'GJ' THEN p.gj_sap
+              WHEN UPPER(pl_new.state) = 'MP' THEN p.mp_sap
+              WHEN UPPER(pl_new.state) = 'UP' THEN p.up_sap
+              ELSE NULL
             END                                                     AS sap_code,
             p.hsn_code                                              AS hsn_code,
             p.category                                              AS category,

@@ -8,6 +8,8 @@
 import { Client } from '@notionhq/client';
 import { storage } from '../storage';
 import { pool } from '../db';
+import { stateSapOf } from '../lib/productSap';
+import { stateOfPlant } from '../lib/stockV2';
 import { extractText } from '../lib/notionProperties';
 import type { InsertProformaSlip } from '@shared/schema';
 
@@ -304,6 +306,7 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
   let itemsCreated = 0;
   let totalQuantity = 0;
   let totalVolume = 0;
+  const slipState = await stateOfPlant(pool, orderData.plant ?? '');
   for (const [, itemData] of Array.from(orderData.items.entries())) {
     const product = await storage.getProduct(itemData.productId);
     if (product) {
@@ -318,7 +321,8 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
         category: product.category || '',
         volumeInCuFt: product.volumeInCuFt || '',
         hsnCode: product.hsnCode || '',
-        sapCode: product.sapCode || '',
+        // The product's SAP for THIS plant's state; blank when it has none there (the Loading page tells the user).
+        sapCode: stateSapOf(product, slipState) ?? '',
         description: product.description || '',
         purchasePrice: product.purchasePrice || '',
         sellingPrice: product.sellingPrice || '',

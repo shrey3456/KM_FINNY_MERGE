@@ -41,37 +41,39 @@ export async function remapDeletedUnloadSessionEvents(
   );
   if (!lockRows[0] || lockRows[0].remappedToSessionId != null) return summary;
 
+  // Lines are matched by barcode AND product (two products can share a barcode: 65 g / 60 g).
   const { rows: newItems } = await client.query(
-    `SELECT barcode, quantity FROM unload_import_items WHERE session_id = $1`,
+    `SELECT barcode, product_id AS "productId", quantity FROM unload_import_items WHERE session_id = $1`,
     [newSessionId],
   );
-  const newExpectedByBarcode = new Map<string, number>();
+  const newExpectedByLine = new Map<string, number>();
+  const lineKeyOf = (barcode: string, productId: number | null) => `${barcode}|${productId ?? ''}`;
   for (const it of newItems) {
     if (!it.barcode) continue;
-    newExpectedByBarcode.set(it.barcode, (newExpectedByBarcode.get(it.barcode) ?? 0) + Number(it.quantity ?? 0));
+    newExpectedByLine.set(lineKeyOf(it.barcode, it.productId ?? null), (newExpectedByLine.get(lineKeyOf(it.barcode, it.productId ?? null)) ?? 0) + Number(it.quantity ?? 0));
   }
 
   const { rows: barcodeGroups } = await client.query(
-    `SELECT barcode, SUM(total_qty)::int AS "physicalQty"
+    `SELECT barcode, product_id AS "productId", SUM(total_qty)::int AS "physicalQty"
      FROM unload_scan_events WHERE session_id = $1 AND voided IS NOT TRUE AND barcode IS NOT NULL
-     GROUP BY barcode`,
+     GROUP BY barcode, product_id`,
     [deletedSessionId],
   );
 
   for (const grp of barcodeGroups) {
     const physicalQty = Number(grp.physicalQty ?? 0);
     if (physicalQty <= 0) continue;
-    const newExpectedQty = newExpectedByBarcode.get(grp.barcode) ?? 0;
+    const newExpectedQty = newExpectedByLine.get(lineKeyOf(grp.barcode, grp.productId ?? null)) ?? 0;
     const newOrderQty = Math.min(physicalQty, newExpectedQty);
 
     const { rows: eventRows } = await client.query(
       `SELECT id, total_qty, is_extra FROM unload_scan_events
-       WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE ORDER BY id ASC`,
-      [deletedSessionId, grp.barcode],
+       WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3 ORDER BY id ASC`,
+      [deletedSessionId, grp.barcode, grp.productId ?? null],
     );
     await client.query(
-      `UPDATE unload_scan_events SET session_id = $1 WHERE session_id = $2 AND barcode = $3 AND voided IS NOT TRUE`,
-      [newSessionId, deletedSessionId, grp.barcode],
+      `UPDATE unload_scan_events SET session_id = $1 WHERE session_id = $2 AND barcode = $3 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $4`,
+      [newSessionId, deletedSessionId, grp.barcode, grp.productId ?? null],
     );
 
     // Same itemsPerPallet for every row of this barcode — pull it from a product lookup rather
@@ -132,8 +134,8 @@ export async function resplitUnloadEventsExtraFlag(
       );
       await client.query(
         `INSERT INTO unload_scan_events
-           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at)
-         SELECT session_id, barcode, item_name, sap_code, $2, $3, $4, true, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at
+           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at, product_id)
+         SELECT session_id, barcode, item_name, sap_code, $2, $3, $4, true, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at, product_id
          FROM unload_scan_events WHERE id = $1`,
         [ev.id, extraSplit.pallets, extraSplit.looseQty, extraPortion],
       );

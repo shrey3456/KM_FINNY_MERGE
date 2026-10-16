@@ -274,66 +274,6 @@ router.post('/stock-v2/line/:id/adjust', requireAdminRole, async (req: Request, 
   } finally { client.release(); }
 });
 
-// POST /api/stock-v2/line/:id/clear — admin: takes this line's Stock to 0 with a 'clear' correction (the book keeps its history).
-router.post('/stock-v2/line/:id/clear', requireAdminRole, async (req: Request, res: Response) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid line' });
-  const { userCode, userName } = actorOf(req);
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const got: any = await lockedLine(client, req, id);
-    if (got.error) { await client.query('ROLLBACK'); return res.status(got.error.status).json({ message: got.error.message }); }
-    const { line } = got;
-    const current = await lockLineStock(client, id);
-    await postAdjust(client, id, todayIst(), -current, { kind: 'clear', source: 'clear', origin: 'page', reason: 'Clear Stock (Stock page)', userCode: userCode ?? null });
-    await client.query('COMMIT');
-    if (userCode && current !== 0) {
-      await storage.logActivity({
-        pageName: 'Stock Overview', action: 'update', entityType: 'stock_v2_line', entityId: String(id),
-        details: `Cleared ${line.itemName} (${line.barcode}) at ${line.plant} by ${userName ?? userCode}: ${current} -> 0.`, userCode, userName,
-      });
-    }
-    res.json({ success: true, previousQty: current, newQty: 0 });
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    console.error('[Stock] clear failed:', e);
-    res.status(500).json({ message: 'Failed to clear stock' });
-  } finally { client.release(); }
-});
-
-// DELETE /api/stock-v2/line/:id — admin: forgets the line completely - its days, its corrections and its links - and zeroes it. Scan entries
-// (Order Scan, Unloading, Loading) are NOT touched; their own void / reset flows own them. The line is made again, empty, the next time the item moves.
-router.delete('/stock-v2/line/:id', requireAdminRole, async (req: Request, res: Response) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid line' });
-  const { userCode, userName } = actorOf(req);
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const got: any = await lockedLine(client, req, id);
-    if (got.error) { await client.query('ROLLBACK'); return res.status(got.error.status).json({ message: got.error.message }); }
-    const { line } = got;
-    const days = await client.query(`DELETE FROM stock_v2_daily WHERE line_id = $1`, [id]);
-    const ledger = await client.query(`DELETE FROM stock_v2_ledger WHERE line_id = $1`, [id]);
-    await client.query(`DELETE FROM stock_v2_links WHERE line_id = $1`, [id]);
-    await client.query(`UPDATE stock_v2_lines SET stock_qty = 0, updated_at = now() WHERE id = $1`, [id]);
-    await client.query('COMMIT');
-    if (userCode) {
-      await storage.logActivity({
-        pageName: 'Stock Overview', action: 'delete', entityType: 'stock_v2_line', entityId: String(id),
-        details: `Deleted the stock history of ${line.itemName} (${line.barcode}) at ${line.plant} by ${userName ?? userCode} — ${days.rowCount ?? 0} day row(s) and ${ledger.rowCount ?? 0} correction(s) removed; Stock was ${line.stockQty}.`,
-        userCode, userName,
-      });
-    }
-    res.json({ success: true, daysRemoved: days.rowCount ?? 0, correctionsRemoved: ledger.rowCount ?? 0 });
-  } catch (e) {
-    await client.query('ROLLBACK').catch(() => {});
-    console.error('[Stock] delete line failed:', e);
-    res.status(500).json({ message: 'Failed to delete this item' });
-  } finally { client.release(); }
-});
-
 // ── Opening stock: only at a fresh start ──
 // Normally closed. Start fresh clears Stock Overview and opens a window dated D; entries set each line's
 // opening figure (re-entering an item replaces it); Lock closes the window until the next fresh start.

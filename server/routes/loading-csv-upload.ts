@@ -112,9 +112,9 @@ function similarity(a: string, b: string): number {
 type ProductRow = { id: number; barcode: string; name: string; sap_code: string | null; gj_sap: string | null; mp_sap: string | null };
 
 // SAP lookup for one plant state: GJ plants read the GJ SAP column, others the MP column.
-// sap_code is the fallback for both, as the order import already does.
+// There is no general SAP any more: only the state's own SAP column.
 function buildSapMap(products: ProductRow[], state: string | null): Map<string, ProductRow[]> {
-  const cols = state === 'GJ' ? ['gj_sap', 'sap_code'] : ['mp_sap', 'sap_code'];
+  const cols = state === 'GJ' ? ['gj_sap'] : state === 'UP' ? ['up_sap'] : ['mp_sap'];
   const map = new Map<string, ProductRow[]>();
   for (const p of products) {
     for (const col of cols) {

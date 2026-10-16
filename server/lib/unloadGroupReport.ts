@@ -15,6 +15,8 @@ import { getPlantStateCode, resolvePalletSizeOrQty } from '../routes/order-scan'
 
 export type UnloadGroupReportEntry = {
   partId: number; sequence: number; csvFileName: string; barcode: string; itemName: string;
+  // The PRODUCT of this line: two products can share a barcode (65 g / 60 g), and each is its own line with its own credits.
+  productId: number | null;
   itemsPerPallet: number;
   expectedQty: number; receivedQty: number; extraQty: number; missingQty: number;
   adjustedTo: { toPartId: number; toCsvFileName: string; qty: number }[];
@@ -40,7 +42,7 @@ export type UnloadGroupReport = {
     totalAdjustments: number; finalStockAdded: number;
     netExtraAfterAdjustment: number; netMissingAfterAdjustment: number;
     allComplete: boolean;
-    productWise: Array<{ barcode: string; itemName: string; itemsPerPallet: number; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
+    productWise: Array<{ barcode: string; productId: number | null; itemName: string; itemsPerPallet: number; totalExpected: number; totalReceived: number; totalExtra: number; totalMissing: number; totalAdjusted: number }>;
   };
 };
 
@@ -58,27 +60,42 @@ export async function computeUnloadGroupReport(groupId: number): Promise<UnloadG
 
   const partIds = parts.map((p: any) => p.id);
   const { rows: importItems } = await pool.query(
-    `SELECT session_id AS "sessionId", barcode, item_name AS "itemName", sap_code AS "sapCode", quantity
+    `SELECT session_id AS "sessionId", barcode, product_id AS "productId", item_name AS "itemName", sap_code AS "sapCode", quantity
      FROM unload_import_items WHERE session_id = ANY($1::int[])`,
     [partIds],
   );
 
-  // Received (order-portion) per (partId, barcode) — regular scans AND credit rows (both
-  // is_extra=false; see unload_scan_events' isCredit comment in shared/schema.ts), same source
-  // withProgress sums for the live item table.
+  // A line is a barcode + product. An entry with no product (an older scan) belongs to the barcode's only product on that part, when there is exactly one.
+  const productsOfBarcode = new Map<string, Set<number>>();
+  for (const i of importItems as any[]) {
+    if (!i.barcode || i.productId == null) continue;
+    const k = `${i.sessionId}::${i.barcode}`;
+    if (!productsOfBarcode.has(k)) productsOfBarcode.set(k, new Set());
+    productsOfBarcode.get(k)!.add(i.productId);
+  }
+  const normPid = (sessionId: number, barcode: string, pid: number | null | undefined): number | null => {
+    if (pid != null) return pid;
+    const set = productsOfBarcode.get(`${sessionId}::${barcode}`);
+    return set && set.size === 1 ? Array.from(set)[0] : null;
+  };
+  const lk = (sessionId: number, barcode: string, pid: number | null) => `${sessionId}::${barcode}::${pid ?? ''}`;
+  const lineOf = (barcode: string, pid: number | null) => `${barcode}::${pid ?? ''}`;
+
+  // Received (order-portion) per (partId, barcode, product) - regular scans AND credit rows (both is_extra=false; see unload_scan_events' isCredit
+  // comment in shared/schema.ts), same source withProgress sums for the live item table.
   const { rows: receivedRows } = await pool.query(
-    `SELECT session_id AS "sessionId", barcode, COALESCE(SUM(total_qty), 0)::int AS "receivedQty"
+    `SELECT session_id AS "sessionId", barcode, product_id AS "productId", COALESCE(SUM(total_qty), 0)::int AS "receivedQty"
      FROM unload_scan_events
      WHERE session_id = ANY($1::int[]) AND is_extra = false AND voided IS NOT TRUE
-     GROUP BY session_id, barcode`,
+     GROUP BY session_id, barcode, product_id`,
     [partIds],
   );
-  // Extra (over-order) per (partId, barcode).
+  // Extra (over-order) per (partId, barcode, product).
   const { rows: extraRows } = await pool.query(
-    `SELECT session_id AS "sessionId", barcode, MAX(item_name) AS "itemName", COALESCE(SUM(total_qty), 0)::int AS "extraQty"
+    `SELECT session_id AS "sessionId", barcode, product_id AS "productId", MAX(item_name) AS "itemName", COALESCE(SUM(total_qty), 0)::int AS "extraQty"
      FROM unload_scan_events
      WHERE session_id = ANY($1::int[]) AND is_extra = true AND voided IS NOT TRUE
-     GROUP BY session_id, barcode`,
+     GROUP BY session_id, barcode, product_id`,
     [partIds],
   );
 
@@ -87,9 +104,9 @@ export async function computeUnloadGroupReport(groupId: number): Promise<UnloadG
   const state = await getPlantStateCode(pool, plant ?? '');
 
   const expectedMap = new Map<string, { expectedQty: number; itemName: string; sapCode: string | null; barcode: string }>();
-  for (const item of importItems) {
+  for (const item of importItems as any[]) {
     if (!item.barcode) continue;
-    const key = `${item.sessionId}::${item.barcode}`;
+    const key = lk(item.sessionId, item.barcode, item.productId ?? null);
     const existing = expectedMap.get(key);
     if (existing) existing.expectedQty += item.quantity ?? 0;
     else expectedMap.set(key, { expectedQty: item.quantity ?? 0, itemName: item.itemName ?? item.barcode, sapCode: item.sapCode ?? null, barcode: item.barcode });
@@ -97,14 +114,15 @@ export async function computeUnloadGroupReport(groupId: number): Promise<UnloadG
   const receivedMap = new Map<string, number>();
   for (const row of receivedRows as any[]) {
     if (!row.barcode) continue;
-    receivedMap.set(`${row.sessionId}::${row.barcode}`, row.receivedQty);
+    const key = lk(row.sessionId, row.barcode, normPid(row.sessionId, row.barcode, row.productId));
+    receivedMap.set(key, (receivedMap.get(key) ?? 0) + row.receivedQty);
   }
   const extraMap = new Map<string, number>();
   const extraItemNameMap = new Map<string, string>();
   for (const row of extraRows as any[]) {
     if (!row.barcode) continue;
-    const key = `${row.sessionId}::${row.barcode}`;
-    extraMap.set(key, row.extraQty);
+    const key = lk(row.sessionId, row.barcode, normPid(row.sessionId, row.barcode, row.productId));
+    extraMap.set(key, (extraMap.get(key) ?? 0) + row.extraQty);
     if (row.itemName) extraItemNameMap.set(key, row.itemName);
   }
 
@@ -112,38 +130,44 @@ export async function computeUnloadGroupReport(groupId: number): Promise<UnloadG
   // GJ/MP-PLT lookup, falling back to that barcode's own expected qty as a single pallet) — a
   // real per-product lookup, not derived from any CSV column (unload_import_items has none).
   // Cached by barcode: pallet size is a per-product/state fact, doesn't vary by part.
-  const ippByBarcode = new Map<string, number>();
-  async function ippFor(barcode: string, fallbackQty: number): Promise<number> {
-    if (ippByBarcode.has(barcode)) return ippByBarcode.get(barcode)!;
-    const product = await storage.getProductByBarcode(barcode, plant);
+  const ippByLine = new Map<string, number>();
+  async function ippFor(barcode: string, pid: number | null, fallbackQty: number): Promise<number> {
+    const k = lineOf(barcode, pid);
+    if (ippByLine.has(k)) return ippByLine.get(k)!;
+    const product = pid != null ? await storage.getProduct(pid) : await storage.getProductByBarcode(barcode, plant);
     const ipp = resolvePalletSizeOrQty(product ?? null, state, fallbackQty);
-    ippByBarcode.set(barcode, ipp);
+    ippByLine.set(k, ipp);
     return ipp;
   }
 
   const entriesByBarcode = new Map<string, UnloadGroupReportEntry[]>();
 
   for (const part of parts) {
-    const partBarcodes = new Set<string>();
-    importItems.forEach((i: any) => { if (i.sessionId === part.id && i.barcode) partBarcodes.add(i.barcode); });
-    extraRows.forEach((r: any) => { if (r.sessionId === part.id && r.barcode) partBarcodes.add(r.barcode); });
-    for (const barcode of partBarcodes) {
-      const key = `${part.id}::${barcode}`;
+    const partLines = new Map<string, { barcode: string; pid: number | null }>();
+    (importItems as any[]).forEach((i) => { if (i.sessionId === part.id && i.barcode) partLines.set(lineOf(i.barcode, i.productId ?? null), { barcode: i.barcode, pid: i.productId ?? null }); });
+    extraRows.forEach((r: any) => {
+      if (r.sessionId !== part.id || !r.barcode) return;
+      const pid = normPid(r.sessionId, r.barcode, r.productId);
+      partLines.set(lineOf(r.barcode, pid), { barcode: r.barcode, pid });
+    });
+    for (const { barcode, pid } of partLines.values()) {
+      const key = lk(part.id, barcode, pid);
       const expected = expectedMap.get(key)?.expectedQty ?? 0;
       const itemName = expectedMap.get(key)?.itemName ?? extraItemNameMap.get(key) ?? barcode;
       const received = receivedMap.get(key) ?? 0;
       const extra = extraMap.get(key) ?? 0;
       const entry: UnloadGroupReportEntry = {
-        partId: part.id, sequence: sequenceByPartId.get(part.id) ?? 0, csvFileName: part.csvFileName, barcode, itemName,
-        itemsPerPallet: await ippFor(barcode, expected),
+        partId: part.id, sequence: sequenceByPartId.get(part.id) ?? 0, csvFileName: part.csvFileName, barcode, productId: pid, itemName,
+        itemsPerPallet: await ippFor(barcode, pid, expected),
         expectedQty: expected, receivedQty: received,
         extraQty: extra,
         missingQty: Math.max(0, expected - received),
         adjustedTo: [], adjustedFrom: [],
         remainingExtra: 0, remainingMissing: 0,
       };
-      if (!entriesByBarcode.has(barcode)) entriesByBarcode.set(barcode, []);
-      entriesByBarcode.get(barcode)!.push(entry);
+      const lineKey = lineOf(barcode, pid);
+      if (!entriesByBarcode.has(lineKey)) entriesByBarcode.set(lineKey, []);
+      entriesByBarcode.get(lineKey)!.push(entry);
     }
   }
 
@@ -199,10 +223,11 @@ export async function computeUnloadGroupReport(groupId: number): Promise<UnloadG
   });
 
   const productWise = Array.from(entriesByBarcode.entries())
-    .map(([barcode, entries]) => ({
-      barcode,
-      itemName: entries[0]?.itemName ?? barcode,
-      itemsPerPallet: ippByBarcode.get(barcode) ?? 0,
+    .map(([lineKey, entries]) => ({
+      barcode: entries[0].barcode,
+      productId: entries[0].productId,
+      itemName: entries[0]?.itemName ?? entries[0].barcode,
+      itemsPerPallet: ippByLine.get(lineKey) ?? 0,
       totalExpected: entries.reduce((s, e) => s + e.expectedQty, 0),
       totalReceived: entries.reduce((s, e) => s + e.receivedQty, 0),
       totalExtra: entries.reduce((s, e) => s + e.extraQty, 0),

@@ -245,13 +245,16 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
         // instead of against this item. The stock reversal/reapply below stays its own,
         // separately-guarded (`totalQty > 0`) step — nothing to reverse when nothing was scanned.
         if (barcodeChanged && oldBarcode && barcode) {
+          // Only THIS line's entries move (two products can share a barcode: the other product's scans stay where they are).
+          const { rows: lineRows } = await client.query(`SELECT product_id FROM order_scan_items WHERE order_import_item_id = $1 LIMIT 1`, [item.id]);
+          const lineProductId: number | null = lineRows[0]?.product_id ?? null;
           const { rows: scannedRows } = await client.query(
             `SELECT
                COALESCE(SUM(total_qty) FILTER (WHERE NOT is_extra), 0)::int AS "orderQty",
                COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS "extraQty"
              FROM order_scan_events
-             WHERE session_id = $1 AND barcode IS NOT NULL AND LOWER(barcode) = LOWER($2) AND voided IS NOT TRUE`,
-            [id, oldBarcode],
+             WHERE session_id = $1 AND barcode IS NOT NULL AND LOWER(barcode) = LOWER($2) AND voided IS NOT TRUE AND ($3::int IS NULL OR product_id IS NULL OR product_id = $3)`,
+            [id, oldBarcode, lineProductId],
           );
           const orderQty = scannedRows[0]?.orderQty ?? 0;
           const extraQty = scannedRows[0]?.extraQty ?? 0;
@@ -269,7 +272,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
             const reason = `Barcode correction (order-import edit): ${oldBarcode} -> ${barcode}`;
 
             // Reverse stock credited to the old barcode, then apply it to the corrected one (both on Stock Overview).
-            await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode: oldBarcode, qty: -totalQty, extraQty: -extraQty });
+            await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode: oldBarcode, qty: -totalQty, extraQty: -extraQty, productId: lineProductId });
 
             await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode, qty: totalQty, extraQty });
           }
@@ -282,8 +285,8 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
             [barcode, item.id, id, oldBarcode],
           );
           await client.query(
-            `UPDATE order_scan_events SET barcode = $1 WHERE session_id = $2 AND LOWER(barcode) = LOWER($3)`,
-            [barcode, id, oldBarcode],
+            `UPDATE order_scan_events SET barcode = $1 WHERE session_id = $2 AND LOWER(barcode) = LOWER($3) AND ($4::int IS NULL OR product_id IS NULL OR product_id = $4)`,
+            [barcode, id, oldBarcode, lineProductId],
           );
         }
 

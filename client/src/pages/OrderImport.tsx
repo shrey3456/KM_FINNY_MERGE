@@ -635,10 +635,21 @@ export default function OrderImport() {
     qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
   };
 
+  // A product with no SAP for the plant's state shows a BLANK SAP on the file's line - the person is told which items, so the Product Master can be fixed.
+  const showNoSapNotice = (warnings: string[] | undefined) => {
+    if (!warnings || warnings.length === 0) return;
+    toast({
+      title: `No SAP for this plant (${warnings.length} item${warnings.length === 1 ? "" : "s"})`,
+      description: warnings.slice(0, 4).join(" · ") + (warnings.length > 4 ? ` · …and ${warnings.length - 4} more` : ""),
+      variant: "destructive",
+    });
+  };
+
   const importMutation = useMutation({
     mutationFn: async (payload: { plant: string; csvFileName: string; items: object[] }) =>
       (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
     onSuccess: (data) => {
+      showNoSapNotice(data?.sapWarnings);
       setShowMappingDialog(false);
       setCsvData(null);
       setSelectedFiles([]);
@@ -1335,6 +1346,7 @@ export default function OrderImport() {
         title: "Imported",
         description: `${unloadCsvData.name} — ${data.vehicles.length} vehicle(s): ${data.vehicles.map((v: any) => `${v.vehicleNumber} (${v.rowCount})${v.replacesSessionId ? " · replaced" : ""}`).join(", ")}`,
       });
+      showNoSapNotice(data?.sapWarnings);
       qc.invalidateQueries({ queryKey: ["/api/unloading/csv-history"] });
       setShowUnloadMappingDialog(false);
       setUnloadCsvData(null);

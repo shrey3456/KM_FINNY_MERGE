@@ -60,6 +60,8 @@ type SessionListItem = {
   canActivate: boolean;
 };
 type SessionItem = {
+  // The PRODUCT this line means - two products can share a barcode (65 g / 60 g); a scan is sent with it so it counts on this line.
+  productId?: number | null;
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null; quantity: number;
   expected: number; scanned: number; remaining: number; itemsPerPallet: number; isComplete: boolean;
   // Product Master's Sr. No (products.new_sr) — what the item lists show instead of 1, 2, 3.
@@ -680,7 +682,7 @@ export default function Unloading() {
   };
 
   const scanMutation = useMutation({
-    mutationFn: async ({ barcode, qty, stv }: { barcode: string; qty: number; stv?: string | null }) => {
+    mutationFn: async ({ barcode, qty, stv, productId }: { barcode: string; qty: number; stv?: string | null; productId?: number | null }) => {
       // Tries live first; falls back to the offline queue only on a genuine network failure —
       // see client/src/lib/offlineQueue.ts. A queued scan has no server response yet (the
       // regular/extra split is decided server-side, under a lock, so it can't be guessed
@@ -690,7 +692,7 @@ export default function Unloading() {
       // activeSessionQuery's refetchInterval above) corrects it once the real data is back.
       const result = await scanOrQueue(
         `/api/unloading/sessions/${activeSessionId}/scan`,
-        { barcode, qty, stv: stv ?? null },
+        { barcode, qty, stv: stv ?? null, productId: productId ?? null },
         `${barcode} × ${qty} — Unloading session #${activeSessionId}`,
       );
       if (result.queued) return { queued: true as const };
@@ -698,7 +700,7 @@ export default function Unloading() {
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Scan failed");
       return { queued: false as const, data: await res.json() };
     },
-    onMutate: ({ barcode, qty }) => {
+    onMutate: ({ barcode, qty, productId }) => {
       const item = scanItemRef.current;
       if (item) {
         const s = itemScanSeqRef.current;
@@ -707,7 +709,7 @@ export default function Unloading() {
       }
       const key = ["/api/unloading/sessions", activeSessionId] as const;
       const prevData = queryClient.getQueryData<{ session: SessionDetail; items: SessionItem[]; allComplete: boolean; offBatchExtraQty?: number; offBatchExtraPallets?: number }>(key);
-      const idx = prevData?.items.findIndex((i) => normalize(i.barcode) === normalize(barcode)) ?? -1;
+      const idx = prevData?.items.findIndex((i) => normalize(i.barcode) === normalize(barcode) && (productId == null || i.productId == null || i.productId === productId)) ?? -1;
       if (!prevData || idx === -1) return { prevData };
       const target = prevData.items[idx];
       const scanned = target.scanned + qty;
@@ -815,6 +817,10 @@ export default function Unloading() {
   // real identity and default the qty to a full pallet, same as Order Scan's own
   // inventoryProduct for an unmatched scan, instead of a bare barcode defaulting to 1.
   const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null } | null>(null);
+  // A barcode on more than one item of this vehicle (65 g / 60 g): the person picks which one this scan is for.
+  const [multiMatch, setMultiMatch] = useState<{ barcode: string; matches: SessionItem[] } | null>(null);
+  // A scan terminator (Enter) can still be arriving when the picker opens and would tap its first button: taps in the first moments are ignored.
+  const multiMatchAtRef = useRef(0);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
   // Tracks WHICH resolved name last failed to load, not a plain boolean — a boolean reset by a
@@ -884,9 +890,9 @@ export default function Unloading() {
     }
   }
 
-  async function handleItemBarcode(rawBarcode: string) {
+  async function handleItemBarcode(rawBarcode: string, forcedItem?: SessionItem) {
     const barcode = rawBarcode.trim();
-    if (!barcode || !detail || locked || scanLockRef.current || pending) return;
+    if (!barcode || !detail || locked || scanLockRef.current || pending || (multiMatch && !forcedItem)) return;
 
     if (stvs.length > 0 && !selectedStv) {
       toast({ title: "Select a Dispatch Directory before scanning", description: "Pick one from the Dispatch Directory selector above, then continue scanning.", variant: "destructive" });
@@ -898,7 +904,18 @@ export default function Unloading() {
     if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) return;
     lastScanRef.current = { barcode, at: Date.now() };
 
-    const item = detail.items.find((i) => normalize(i.barcode) === nb) ?? null;
+    const matches = detail.items.filter((i) => normalize(i.barcode) === nb);
+    // Two or more items share this barcode: the picker asks which one (unless only one still has room - then it is that one).
+    if (!forcedItem && matches.length > 1) {
+      const open = matches.filter((m) => m.remaining > 0);
+      if (open.length !== 1) {
+        lastScanRef.current = null;
+        setMultiMatch({ barcode, matches });
+        multiMatchAtRef.current = Date.now();
+        return;
+      }
+    }
+    const item = forcedItem ?? (matches.length > 1 ? matches.find((m) => m.remaining > 0) ?? matches[0] : (matches[0] ?? null));
     scanLockRef.current = true;
     scanItemRef.current = item;
 
@@ -936,7 +953,7 @@ export default function Unloading() {
     const canAutoScan = autoScanEnabled && !!item && (item.realPackSize ?? 0) > 0
       && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
-      scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null }, {
+      scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null, productId: item?.productId ?? null }, {
         // Queued (offline) has no event data to show — the mutation's own onSuccess already
         // toasts "Scan saved offline" in that case, so this just skips the feedback popup.
         onSuccess: (result) => {
@@ -2374,6 +2391,40 @@ export default function Unloading() {
       </div>
 
       {/* Confirm dialog — anything not a clean full-pallet auto-scan. */}
+      <Dialog open={!!multiMatch} onOpenChange={(open) => { if (!open) { setMultiMatch(null); scanLockRef.current = false; } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Which item?</DialogTitle>
+            <DialogDescription>
+              Barcode <span className="font-mono font-semibold text-gray-700">{multiMatch?.barcode}</span> is on {multiMatch?.matches.length} items of this vehicle. Tap the one you are unloading.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {multiMatch?.matches.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-white p-3 text-left hover:border-[#001d6e] hover:bg-blue-50/40"
+                onClick={() => {
+                  if (Date.now() - multiMatchAtRef.current < 450) return;
+                  const chosen = m;
+                  const barcode = multiMatch!.barcode;
+                  setMultiMatch(null);
+                  lastScanRef.current = null;
+                  void handleItemBarcode(barcode, chosen);
+                }}
+              >
+                <span>
+                  <span className="block font-medium text-gray-900">{m.itemName ?? m.barcode}</span>
+                  <span className="block text-xs text-gray-500">{m.sapCode ? `SAP ${m.sapCode}` : "No SAP for this plant"}</span>
+                </span>
+                <span className="text-sm tabular-nums text-gray-600">{m.scanned} / {m.expected}{m.remaining > 0 ? ` · ${m.remaining} left` : " · done"}</span>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
         <DialogContent
           className={`overflow-y-auto rounded-2xl p-0 ${
@@ -2517,7 +2568,7 @@ export default function Unloading() {
                       if (e.key === "Enter") {
                         e.preventDefault();
                         if (pending && dialogQty > 0 && !scanMutation.isPending) {
-                          scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null }, { onSuccess: () => setPending(null) });
+                          scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, productId: pending.item?.productId ?? pending.product?.id ?? null }, { onSuccess: () => setPending(null) });
                         }
                       }
                     }}
@@ -2573,7 +2624,7 @@ export default function Unloading() {
                         if (e.key === "Enter") {
                           e.preventDefault();
                           if (pending && dialogQty > 0 && !scanMutation.isPending) {
-                            scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null }, { onSuccess: () => setPending(null) });
+                            scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, productId: pending.item?.productId ?? pending.product?.id ?? null }, { onSuccess: () => setPending(null) });
                           }
                         }
                       }}
@@ -2606,7 +2657,7 @@ export default function Unloading() {
               disabled={dialogQty <= 0 || scanMutation.isPending}
               onClick={() => {
                 if (!pending) return;
-                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null }, { onSuccess: () => setPending(null) });
+                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, productId: pending.item?.productId ?? pending.product?.id ?? null }, { onSuccess: () => setPending(null) });
               }}
             >
               {scanMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}

@@ -12,6 +12,7 @@ import { eq, and, or, desc, asc, gte, sql, inArray } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 import { broadcastOrderImportUpdate, addWsAdminClient, removeWsAdminClient } from '../lib/importEvents';
 import { v2Purchase, orderStockLeft } from '../lib/stockV2';
+import { resolveLineProduct, stateSapOf } from '../lib/productSap';
 import { computeGroupReport, resolveGroupId, applyLiveScanStock, reverseLiveScanStock, reconcileCredits } from '../lib/orderGroupReport';
 import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
 import { sessionMiddleware } from '../auth';
@@ -360,39 +361,25 @@ async function seedSessionItemsWithClient(client: any, id: number, plant: string
   if (importItems.length === 0) return;
 
   const state = await getPlantStateCode(client, plant);
-  const barcodes = importItems.map((i: any) => i.barcode).filter(Boolean);
-  // Normalized (trim + lowercase) on both sides, same as every other product lookup in this
-  // app — an exact match here would silently miss a product whenever the two barcodes differ
-  // only by case or incidental whitespace (a CSV cell padded from an Excel export, etc.).
-  const normKey = (b: string) => b.trim().toLowerCase();
-  // storage.getProductByBarcode (not a raw bulk query) — a barcode can legitimately match more
-  // than one Product Master row (a plant-specific pack, or a combined "VAL & IND" label
-  // covering more than one plant's state at once); passing this session's plant through makes
-  // it prefer the row that actually applies here, instead of a plain bulk SELECT where whichever
-  // row comes back last for a shared barcode silently wins regardless of plant/state.
-  const uniqueBarcodes = Array.from(new Set(barcodes.map(normKey)))
-    .map((key) => barcodes.find((b: string) => normKey(b) === key)!);
-  const productMap = new Map<string, any>();
-  await Promise.all(uniqueBarcodes.map(async (barcode) => {
-    const prod = await storage.getProductByBarcode(barcode, plant);
-    if (prod) productMap.set(normKey(barcode), prod);
-  }));
+  // Each line finds ITS OWN product (barcode + SAP, matched against the state SAPs), so two lines with one barcode (65 g / 60 g) stay two items. The
+  // SAP shown is the product's SAP for this plant's state - blank when it has none there.
+  const lineProducts = await Promise.all(importItems.map((i: any) => (i.barcode ? resolveLineProduct(client, i.barcode, i.sap_code, state) : Promise.resolve(null))));
 
   const vals: any[] = [];
   const placeholders: string[] = [];
   let pi = 1;
-  for (const item of importItems) {
-    const prod = item.barcode ? productMap.get(normKey(item.barcode)) : null;
-    const prodObj = prod ? { gjPlt: prod.gjPlt, mpPlt: prod.mpPlt } : null;
+  importItems.forEach((item: any, idx: number) => {
+    const lp = lineProducts[idx];
+    const prodObj = lp?.row ? { gjPlt: lp.row.gj_plt, mpPlt: lp.row.mp_plt } : null;
     const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
-    vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
-    placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
-    pi += 7;
-  }
+    vals.push(id, item.id, item.barcode, item.item_name, lp?.productId ? lp.sap : item.sap_code, item.quantity ?? 0, palletSize, lp?.productId ?? null);
+    placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6},$${pi+7})`);
+    pi += 8;
+  });
 
   await client.query(
     `INSERT INTO order_scan_items
-       (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+       (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet, product_id)
      VALUES ${placeholders.join(',')}`,
     vals,
   );
@@ -1049,34 +1036,23 @@ router.post('/order-scan/sessions/:id/activate', requirePageWrite('order-import'
 
     if (importItems.length > 0) {
       const state = await getPlantStateCode(client, session.plant);
-      const barcodes: string[] = importItems.map((i: any) => i.barcode).filter(Boolean);
-      // storage.getProductByBarcode (not a raw bulk query) — a barcode can legitimately match
-      // more than one Product Master row (a plant-specific pack, or a combined "VAL & IND"
-      // label covering more than one plant's state at once); passing this session's plant
-      // through makes it prefer the row that actually applies here, instead of a plain bulk
-      // SELECT where whichever row comes back last for a shared barcode silently wins.
-      const uniqueBarcodes = Array.from(new Set(barcodes));
-      const productMap = new Map<string, any>();
-      await Promise.all(uniqueBarcodes.map(async (barcode) => {
-        const prod = await storage.getProductByBarcode(barcode, session.plant);
-        if (prod) productMap.set(barcode, prod);
-      }));
+      const lineProducts = await Promise.all(importItems.map((i: any) => (i.barcode ? resolveLineProduct(client, i.barcode, i.sap_code, state) : Promise.resolve(null))));
 
       const vals: any[] = [];
       const placeholders: string[] = [];
       let pi = 1;
-      for (const item of importItems) {
-        const prod = item.barcode ? productMap.get(item.barcode) : null;
-        const prodObj = prod ? { gjPlt: prod.gjPlt, mpPlt: prod.mpPlt } : null;
+      importItems.forEach((item: any, idx: number) => {
+        const lp = lineProducts[idx];
+        const prodObj = lp?.row ? { gjPlt: lp.row.gj_plt, mpPlt: lp.row.mp_plt } : null;
         const palletSize = resolvePalletSizeOrQty(prodObj, state, item.quantity ?? 0);
-        vals.push(id, item.id, item.barcode, item.item_name, item.sap_code, item.quantity ?? 0, palletSize);
-        placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6})`);
-        pi += 7;
-      }
+        vals.push(id, item.id, item.barcode, item.item_name, lp?.productId ? lp.sap : item.sap_code, item.quantity ?? 0, palletSize, lp?.productId ?? null);
+        placeholders.push(`($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6},$${pi+7})`);
+        pi += 8;
+      });
 
       await client.query(
         `INSERT INTO order_scan_items
-           (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
+           (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet, product_id)
          VALUES ${placeholders.join(',')}`,
         vals,
       );
@@ -1385,7 +1361,7 @@ router.post('/order-scan/sessions/:id/adjust-remaining', requirePageWrite('scan-
         adjustedAt: now,
       });
       if (session.plant && item.barcode) {
-        await applyLiveScanStock(client, session.plant, item.barcode, r.orderQty, r.extraQty, id);
+        await applyLiveScanStock(client, session.plant, item.barcode, r.orderQty, r.extraQty, id, item.product_id ?? null);
       }
       adjustedCount += 1;
       adjustedQty += remaining;
@@ -1435,7 +1411,7 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
       const plant = sessionRow?.plant ?? '';
       const state = await getPlantStateCode(pool, plant);
       const prodRows = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, name, plant, items_per_pallet, pallets, gj_plt, mp_plt
+        `SELECT id, LOWER(barcode) AS barcode, name, plant, items_per_pallet, pallets, gj_plt, mp_plt
          FROM products WHERE LOWER(barcode) = ANY($1) ORDER BY id`,
         [barcodes],
       );
@@ -1471,7 +1447,9 @@ router.get('/order-scan/sessions/:id/items', async (req: Request, res: Response)
         productMap.set(barcode, picked);
       }
       for (const item of items as any[]) {
-        const p = item.barcode ? productMap.get(item.barcode.toLowerCase()) : null;
+        // The line's OWN product (65 g / 60 g share a barcode), else the usual pick for the barcode.
+        const p = (item.productId != null ? (prodRows.rows as any[]).find((r) => r.id === item.productId) : null)
+          ?? (item.barcode ? productMap.get(item.barcode.toLowerCase()) : null);
         if (!p) continue;
         item.itemsPerPallet = resolvePalletSizeOrQty({ gjPlt: p.gj_plt, mpPlt: p.mp_plt }, state, item.expectedQty ?? 0);
         // The item's real, defined GJ/MP PLT pack size — 0 when not configured — as opposed to
@@ -1512,6 +1490,7 @@ router.get('/order-scan/sessions/:id/group-credits', async (req: Request, res: R
       .filter((item) => item.adjustedFrom.length > 0)
       .map((item) => ({
         barcode: item.barcode,
+        productId: item.productId,
         itemName: item.itemName,
         creditedQty: item.adjustedFrom.reduce((s, a) => s + a.qty, 0),
         sources: item.adjustedFrom.map((a) => ({ fromCsvFileName: a.fromCsvFileName, qty: a.qty })),
@@ -1576,10 +1555,13 @@ async function writeScanEvents(
     // Offline-queue duplicate-safety UUID — see loading.ts's identical guard for the full
     // rationale. Recorded on only the FIRST of the (up to two) rows this attempt produces.
     clientRequestId?: string | null;
+    // The product this scan was for (the chosen line's product) - stored on every entry so void / edit / stock use the right product.
+    productId?: number | null;
   },
 ): Promise<{ events: any[]; updatedItem: any; orderQty: number; extraQty: number }> {
   const { sessionId, scanItem, totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName, forceAllExtra } = params;
   const isAdjust = params.isAdjust === true;
+  const productId = params.productId ?? scanItem?.product_id ?? null;
   const clientRequestId = params.clientRequestId ?? null;
   const scannedAt = params.scannedAt ?? null;   // null → the column default (now)
   const adjustedAt = params.adjustedAt ?? null;
@@ -1604,12 +1586,12 @@ async function writeScanEvents(
       `INSERT INTO order_scan_events
          (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
           items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name,
-          scanned_at, adjusted_at, client_request_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),$15,$16)
+          scanned_at, adjusted_at, client_request_id, product_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),$15,$16,$17)
        RETURNING *`,
       [sessionId, scanItem.id, barcode, resolvedItemName,
        part.pallets, part.looseQty, orderQty, itemsPerPallet, false, isAdjust,
-       stv ?? null, userCode, userName, scannedAt, adjustedAt, clientRequestId],
+       stv ?? null, userCode, userName, scannedAt, adjustedAt, clientRequestId, productId],
     );
     requestIdRecorded = true;
     events.push(orderEventResult.rows[0]);
@@ -1639,12 +1621,12 @@ async function writeScanEvents(
     const extraEventResult = await client.query(
       `INSERT INTO order_scan_events
          (session_id, scan_item_id, barcode, item_name, pallets, loose_qty, total_qty,
-          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name, client_request_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          items_per_pallet, is_extra, is_adjust, stv, scanned_by_code, scanned_by_name, client_request_id, product_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING *`,
       [sessionId, scanItem?.id ?? null, barcode, resolvedItemName,
        part.pallets, part.looseQty, extraQty, itemsPerPallet, true, isAdjust,
-       stv ?? null, userCode, userName, requestIdRecorded ? null : clientRequestId],
+       stv ?? null, userCode, userName, requestIdRecorded ? null : clientRequestId, productId],
     );
     events.push(extraEventResult.rows[0]);
 
@@ -1684,6 +1666,8 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
   const { barcode: rawBarcode, qty, pallets = 1, looseQty = 0, stv = null } = req.body as {
     barcode: string; qty?: number; pallets?: number; looseQty?: number; isExtra?: boolean; stv?: string | null;
   };
+  // Which line (product) the person picked when the barcode is on more than one line of the file (65 g / 60 g). Absent = the server decides, and asks when it cannot.
+  const chosenProductId = Number.isInteger(Number((req.body as any)?.productId)) && (req.body as any)?.productId != null ? Number((req.body as any).productId) : null;
   // Trimmed at the boundary — a barcode-gun double-fire or a camera decode can prefix/suffix
   // stray whitespace, and product_plant_stock keys on the literal string (unique on
   // barcode+plant), so an untrimmed value doesn't just fail to match a product; it creates a
@@ -1749,14 +1733,48 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // Lock this barcode's row (if any) in every part, always in the same ascending
     // partIndex order, so concurrent scans acquire locks in a consistent order and never
     // deadlock against each other.
-    const itemRowsBySession = new Map<number, any | null>();
+    const lineRowsBySession = new Map<number, any[]>();
     for (const s of sessions) {
       const { rows } = await client.query(
-        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 FOR UPDATE`,
+        `SELECT * FROM order_scan_items WHERE session_id = $1 AND barcode = $2 ORDER BY id FOR UPDATE`,
         [s.id, barcode],
       );
-      itemRowsBySession.set(s.id, rows[0] ?? null);
+      lineRowsBySession.set(s.id, rows);
     }
+    // One barcode can be several lines of a file (two products, 65 g / 60 g). The scan belongs to ONE of them: the product the person picked, else the only
+    // line that still has room, else - when the choice is real - the server answers 409 CHOOSE_ITEM with the options and the app asks "Which item?".
+    const remainingOf = (r: any) => Number(r.expected_qty ?? 0) - Number(r.total_scanned_qty ?? 0);
+    const allLines = Array.from(lineRowsBySession.values()).flat();
+    const lineKeyOf = (r: any) => String(r.product_id ?? `item-${r.order_import_item_id ?? r.id}`);
+    let pickKey: string | null = null;
+    if (chosenProductId != null) {
+      pickKey = String(chosenProductId);
+    } else {
+      const distinct = new Map<string, any>();
+      for (const r of allLines) if (!distinct.has(lineKeyOf(r))) distinct.set(lineKeyOf(r), r);
+      if (distinct.size > 1) {
+        const open = Array.from(distinct.keys()).filter((k) => allLines.some((r) => lineKeyOf(r) === k && remainingOf(r) > 0));
+        if (open.length === 1) pickKey = open[0];
+        else {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            code: 'CHOOSE_ITEM',
+            message: `Barcode ${barcode} is on more than one item of this order - pick which one this scan is for.`,
+            options: Array.from(distinct.values()).map((r: any) => ({
+              productId: r.product_id ?? null, itemName: r.item_name, sapCode: r.sap_code,
+              remaining: allLines.filter((x) => lineKeyOf(x) === lineKeyOf(r)).reduce((a, x) => a + Math.max(0, remainingOf(x)), 0),
+            })),
+          });
+        }
+      }
+    }
+    const itemRowsBySession = new Map<number, any | null>();
+    for (const s of sessions) {
+      const rows = lineRowsBySession.get(s.id) ?? [];
+      const mine = pickKey == null ? rows : rows.filter((r) => lineKeyOf(r) === pickKey);
+      itemRowsBySession.set(s.id, mine.find((r) => remainingOf(r) > 0) ?? mine[0] ?? null);
+    }
+
 
     // "Front" = earliest part (by partIndex) that still has an item not yet fully scanned.
     // Once every item in a part is complete, the front moves to the next part automatically
@@ -1796,7 +1814,14 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // covering more than one plant's state at once); passing the plant through makes it prefer
     // the row that actually applies here instead of whichever one the query happens to return
     // first, which is what silently kept picking a row with no gj/mp PLT set otherwise.
-    const resolvedProduct = await storage.getProductByBarcode(barcode, anchorSession.plant);
+    // The chosen line's OWN product (name, pallet size, SAP for this state) - not "the first product with this barcode".
+    const scanProductId: number | null = anchorItem?.product_id ?? chosenProductId ?? null;
+    let resolvedProduct: any = null;
+    if (scanProductId != null) {
+      const { rows: lp } = await client.query(`SELECT * FROM products WHERE id = $1`, [scanProductId]);
+      if (lp[0]) resolvedProduct = { id: lp[0].id, name: lp[0].name, barcode: lp[0].barcode, gjPlt: lp[0].gj_plt, mpPlt: lp[0].mp_plt };
+    }
+    if (!resolvedProduct) resolvedProduct = await storage.getProductByBarcode(barcode, anchorSession.plant);
     if (resolvedProduct) {
       resolvedItemName = resolvedItemName ?? resolvedProduct.name ?? null;
       const state = await getPlantStateCode(client, anchorSession.plant ?? '');
@@ -1824,7 +1849,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     const userCode = (req.user as any)?.userCode ?? null;
     const userName  = (req.user as any)?.name ?? null;
 
-    const baseParams = { totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName };
+    const baseParams = { totalQty, itemsPerPallet, barcode, resolvedItemName, stv, userCode, userName, productId: scanProductId ?? resolvedProduct?.id ?? null };
     const events: Array<any & { __sessionId: number }> = [];
     let updatedItem: any = null;
     let stockOrderQty = 0;
@@ -1867,7 +1892,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
     // Live stock — applied exactly once per physical scan, from the real order/extra split
     // above, never once per bookkeeping event. This is what keeps the dual-logging rule from
     // ever double-counting real inventory.
-    await applyLiveScanStock(client, anchorSession.plant, barcode, stockOrderQty, stockExtraQty, stockLedgerSessionId);
+    await applyLiveScanStock(client, anchorSession.plant, barcode, stockOrderQty, stockExtraQty, stockLedgerSessionId, baseParams.productId);
 
     // Derived auto-completion — gated by the plant's "Auto Complete" setting (Plant
     // Settings page). OFF (default): skip entirely, every part stays manual-only. ON: any
@@ -2156,10 +2181,11 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
               `SELECT id, total_qty, credited_qty
                FROM order_scan_events
                WHERE session_id = $1 AND barcode = $2 AND is_extra = true AND voided IS NOT TRUE
+                 AND ($3::int IS NULL OR product_id IS NULL OR product_id = $3)
                  AND total_qty > COALESCE(credited_qty, 0)
                ORDER BY scanned_at ASC, id ASC
                FOR UPDATE`,
-              [event.session_id, event.barcode],
+              [event.session_id, event.barcode, event.product_id ?? null],
             );
             for (const ex of extraEvents) {
               if (shortfall <= 0) break;
@@ -2198,7 +2224,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
 
               if (plant) {
                 // Stock stays; only the Extra figure of the purchase shrinks - those boxes now count toward this order.
-                await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: -take });
+                await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: -take, productId: event.product_id ?? null });
               }
 
               const backfillResult = await client.query(
@@ -2237,7 +2263,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       );
       if (plant && event.barcode) {
         const qty = Number(event.total_qty ?? 0);
-        await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: qty });
+        await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: event.barcode, qty: 0, extraQty: qty, productId: event.product_id ?? null });
       }
       await client.query('COMMIT');
       return res.json({ event: unflipResult.rows[0], updatedItem });
@@ -2249,7 +2275,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
     // second time. Instead, give the qty back to the source Extra event so it's available again.
     if (event.is_credit && event.credit_source_event_id) {
       const { rows: srcRows } = await client.query(
-        `SELECT session_id, barcode FROM order_scan_events WHERE id = $1 FOR UPDATE`,
+        `SELECT session_id, barcode, product_id FROM order_scan_events WHERE id = $1 FOR UPDATE`,
         [event.credit_source_event_id],
       );
       const src = srcRows[0];
@@ -2265,14 +2291,14 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
       // (same session_id on both sides is what tells these two apart).
       if (src && plant && Number(src.session_id) === Number(event.session_id)) {
         const qty = Number(event.total_qty ?? 0);
-        await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: src.barcode, qty: 0, extraQty: qty });
+        await v2Purchase(client, { source: 'order', sessionId: event.session_id, plant, barcode: src.barcode, qty: 0, extraQty: qty, productId: src.product_id ?? null });
       }
     } else if (plant && event.barcode) {
       const qty = Number(event.total_qty ?? 0);
       // reverseLiveScanStock itself clamps at 0 (GREATEST) as a last-resort backstop, but that
       // clamp is silent — it would let this void quietly under-reverse instead of telling the
       // caller these boxes are already used elsewhere. Reject up front instead.
-      const currentStock = await orderStockLeft(client, event.session_id, plant, event.barcode);
+      const currentStock = await orderStockLeft(client, event.session_id, plant, event.barcode, event.product_id ?? null);
       if (currentStock < qty) {
         await client.query('ROLLBACK');
         return res.status(409).json({
@@ -2284,6 +2310,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
         event.is_extra ? 0 : qty,
         event.is_extra ? qty : 0,
         event.session_id,
+        event.product_id ?? null,
       );
     }
 
@@ -2339,7 +2366,7 @@ router.post('/order-scan/events/:id/void', requireVoidAccess, async (req: Reques
           }
         }
         // The boxes are the old product's again — put them back on its stock (in stock + Extra).
-        await applyLiveScanStock(client, plant, src.barcode, 0, qty, event.session_id);
+        await applyLiveScanStock(client, plant, src.barcode, 0, qty, event.session_id, src.product_id ?? null);
       }
     }
 
@@ -2403,7 +2430,7 @@ router.get('/order-scan/exchange/extras', requirePageAccess('adjust-exchange'), 
       plantClause = ` AND LOWER(s.plant) = $${params.length}`;
     }
     const { rows } = await pool.query(
-      `SELECT e.id, e.session_id AS "sessionId", e.barcode, e.item_name AS "itemName",
+      `SELECT e.id, e.session_id AS "sessionId", e.barcode, e.product_id AS "productId", e.item_name AS "itemName",
               e.total_qty AS "totalQty", COALESCE(e.credited_qty, 0) AS "creditedQty",
               e.scanned_at AS "scannedAt", e.scanned_by_name AS "scannedByName",
               COALESCE(e.voided, false) AS voided, e.void_reason AS "voidReason",
@@ -2450,6 +2477,9 @@ router.get('/order-scan/exchange/shortfalls', requirePageAccess('adjust-exchange
     const params: unknown[] = [plant, beforeDate];
     let barcodeClause = '';
     if (barcode) { params.push(barcode); barcodeClause = ` AND LOWER(i.barcode) = LOWER($${params.length})`; }
+    // Two products can share a barcode (65 g / 60 g): a shortfall is only for the same product as the Extra.
+    const productId = Number(req.query.productId);
+    if (req.query.productId != null && req.query.productId !== '' && Number.isInteger(productId)) { params.push(productId); barcodeClause += ` AND i.product_id = $${params.length}`; }
     const { rows } = await pool.query(
       `WITH adj AS (
          SELECT scan_item_id, COALESCE(SUM(total_qty), 0)::int AS adjust_qty, MIN(id) AS adjust_event_id
@@ -2457,7 +2487,7 @@ router.get('/order-scan/exchange/shortfalls', requirePageAccess('adjust-exchange
           WHERE is_adjust = true AND NOT COALESCE(voided, false)
           GROUP BY scan_item_id
        )
-       SELECT i.id AS "itemId", i.session_id AS "sessionId", i.barcode, i.item_name AS "itemName",
+       SELECT i.id AS "itemId", i.session_id AS "sessionId", i.barcode, i.product_id AS "productId", i.item_name AS "itemName",
               i.expected_qty AS "expectedQty", i.total_scanned_qty AS "totalScannedQty",
               s.plant, s.csv_file_name AS "csvFileName", s.order_date AS "orderDate",
               COALESCE(adj.adjust_qty, 0) AS "reopenQty", adj.adjust_event_id AS "reopenEventId",
@@ -2521,7 +2551,8 @@ router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), 
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'The Extra and the shortfall must be at the same plant.' });
     }
-    if (String(target.barcode ?? '').toLowerCase() !== String(extra.barcode ?? '').toLowerCase()) {
+    if (String(target.barcode ?? '').toLowerCase() !== String(extra.barcode ?? '').toLowerCase()
+        || (target.product_id != null && extra.product_id != null && Number(target.product_id) !== Number(extra.product_id))) {
       await client.query('ROLLBACK');
       return res.status(400).json({ message: 'The Extra and the shortfall must be the same product.' });
     }
@@ -2590,8 +2621,8 @@ router.post('/order-scan/exchange/credit', requirePageWrite('adjust-exchange'), 
     );
     const productId = productRows[0]?.id ?? null;
 
-    await v2Purchase(client, { source: 'order', sessionId: extra.session_id, plant: extra.session_plant, barcode: extra.barcode, qty: -qty });
-    await v2Purchase(client, { source: 'order', sessionId: target.session_id, plant: target.session_plant, barcode: target.barcode, qty });
+    await v2Purchase(client, { source: 'order', sessionId: extra.session_id, plant: extra.session_plant, barcode: extra.barcode, qty: -qty, productId: extra.product_id ?? null });
+    await v2Purchase(client, { source: 'order', sessionId: target.session_id, plant: target.session_plant, barcode: target.barcode, qty, productId: target.product_id ?? extra.product_id ?? null });
 
     await client.query('COMMIT');
     broadcastOrderImportUpdate();
@@ -2736,13 +2767,13 @@ router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite
     // Opportunistic link: if this barcode is ALSO genuinely expected on this same order, tie the
     // new entry to that row so its own shortfall can be credited afterwards. Not required otherwise.
     const { rows: sameOrderItemRows } = await client.query(
-      `SELECT id FROM order_scan_items WHERE session_id = $1 AND LOWER(barcode) = LOWER($2) FOR UPDATE`,
-      [event.session_id, newBarcodeExact],
+      `SELECT id FROM order_scan_items WHERE session_id = $1 AND LOWER(barcode) = LOWER($2) AND ($3::int IS NULL OR product_id IS NULL OR product_id = $3) ORDER BY id FOR UPDATE`,
+      [event.session_id, newBarcodeExact, newProduct.id ?? null],
     );
     const newScanItemId = sameOrderItemRows[0]?.id ?? null;
 
     // The boxes must still be in stock to move — the same rule voiding a scan has.
-    const currentStock = await orderStockLeft(client, event.session_id, event.plant, event.barcode);
+    const currentStock = await orderStockLeft(client, event.session_id, event.plant, event.barcode, event.product_id ?? null);
     if (currentStock < qty) {
       await client.query('ROLLBACK');
       return res.status(409).json({
@@ -2750,8 +2781,9 @@ router.post('/order-scan/exchange/events/:id/reassign-product', requirePageWrite
       });
     }
 
-    await reverseLiveScanStock(client, event.plant, event.barcode, 0, qty, event.session_id);
-    await applyLiveScanStock(client, event.plant, newBarcodeExact, 0, qty, event.session_id);
+    await reverseLiveScanStock(client, event.plant, event.barcode, 0, qty, event.session_id, event.product_id ?? null);
+    // The boxes become the NEW product's (the one the person picked), on its own line.
+    await applyLiveScanStock(client, event.plant, newBarcodeExact, 0, qty, event.session_id, newProduct.id ?? null);
 
     const userCode = (req.user as any)?.userCode ?? null;
     const userName = (req.user as any)?.name ?? null;
@@ -2894,14 +2926,14 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
     if (plant && event.barcode) {
       // Same guard as void — reject up front rather than let reverseLiveScanStock's own
       // GREATEST(0, ...) backstop silently under-reverse it.
-      const currentStock = await orderStockLeft(client, event.session_id, plant, event.barcode);
+      const currentStock = await orderStockLeft(client, event.session_id, plant, event.barcode, event.product_id ?? null);
       if (currentStock < oldQty) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           message: `Can't correct this — only ${currentStock} of these boxes are still in stock (${oldQty} were received here); the rest are already used elsewhere.`,
         });
       }
-      await reverseLiveScanStock(client, plant, event.barcode, event.is_extra ? 0 : oldQty, event.is_extra ? oldQty : 0, event.session_id);
+      await reverseLiveScanStock(client, plant, event.barcode, event.is_extra ? 0 : oldQty, event.is_extra ? oldQty : 0, event.session_id, event.product_id ?? null);
     }
 
     // Un-book the old qty from order_scan_items (a plain Extra event was never added there to
@@ -2959,7 +2991,7 @@ router.put('/order-scan/events/:id', requireVoidAccess, async (req: Request, res
     });
 
     if (plant) {
-      await applyLiveScanStock(client, plant, event.barcode, r.orderQty, r.extraQty, event.session_id);
+      await applyLiveScanStock(client, plant, event.barcode, r.orderQty, r.extraQty, event.session_id, event.product_id ?? null);
     }
 
     await client.query('COMMIT');
