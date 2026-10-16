@@ -5,7 +5,7 @@ import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/p
 import { getPlantStateCode, resolvePalletSizeOrQty, getPalletSize, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
-import { resolveLineProduct, noSapMessage } from '../lib/productSap';
+import { resolveLineProduct, noSapMessage, noSapWarningsForItems } from '../lib/productSap';
 import { postUnloadMovement, scanDay, unloadStockLeft } from '../lib/unloadStock';
 import {
   computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId,
@@ -220,6 +220,17 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
     const missingBarcode = items.findIndex((it) => !it.barcode || !String(it.barcode).trim());
     if (missingBarcode !== -1) {
       return res.status(400).json({ message: `Row ${missingBarcode + 1} is missing a barcode.` });
+    }
+
+    // Items whose product has no SAP for this plant's state would show a blank SAP: ask the person to confirm BEFORE anything is imported.
+    if (req.body?.confirmNoSap !== true) {
+      const noSap = await noSapWarningsForItems(pool, plant, items);
+      if (noSap.length > 0) {
+        return res.status(409).json({
+          code: 'NO_SAP_CONFIRM', warnings: noSap,
+          message: `${noSap.length} item(s) have no SAP for ${plant} in the Product Master. Confirm to import anyway.`,
+        });
+      }
     }
 
     const { userCode, userName } = actor(req);
@@ -1138,7 +1149,8 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     const { items: progressItems, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id: session.id, plant: session.plant });
 
     let finalStatus = session.scan_status;
-    if (allComplete && session.scan_status !== 'completed') {
+    // A reopened session is not completed again by a scan - only the Complete button does that.
+    if (allComplete && session.scan_status !== 'completed' && !session.auto_complete_suppressed) {
       await pool.query(
         `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW() WHERE id = $2`,
         [userCode ?? null, id],
@@ -1208,7 +1220,7 @@ router.post('/unloading/sessions/:id/complete', requirePageWrite('unloading'), a
 
     const { userCode, userName } = actor(req);
     await pool.query(
-      `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW() WHERE id = $2`,
+      `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW(), auto_complete_suppressed = false WHERE id = $2`,
       [userCode ?? null, id],
     );
     if (session.group_id) {
@@ -1253,7 +1265,7 @@ router.post('/unloading/sessions/:id/reopen', requireUnloadingVoidAccess, async 
 
     const { userCode, userName } = actor(req);
     await pool.query(
-      `UPDATE unload_import_sessions SET scan_status = 'active', scan_completed_by_code = NULL, scan_completed_at = NULL WHERE id = $1`,
+      `UPDATE unload_import_sessions SET scan_status = 'active', scan_completed_by_code = NULL, scan_completed_at = NULL, auto_complete_suppressed = true WHERE id = $1`,
       [id],
     );
     // If reopening pulled this part back into play while a later part in the same group had

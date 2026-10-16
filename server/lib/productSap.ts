@@ -77,3 +77,25 @@ export async function resolveLineProduct(db: Db, barcode: string, lineSap: strin
 
 export const noSapMessage = (itemName: string | null | undefined, barcode: string, plant: string | null | undefined, state: string | null | undefined) =>
   `No SAP for this plant: ${itemName || barcode} (${barcode}) has no ${stateCodeOf(state) ?? 'state'} SAP in the Product Master${plant ? `, so ${plant} shows it blank` : ''}.`;
+
+// Before a CSV is imported: which of its lines are a known product that has NO SAP for the plant's state (they would show a blank SAP). The person is asked to
+// confirm the import when this is not empty. One message per product.
+export async function noSapWarningsForItems(
+  db: Db, plant: string, items: Array<{ barcode?: string | null; itemName?: string | null; sapCode?: string | null }>,
+): Promise<string[]> {
+  const { rows } = await db.query(`SELECT state FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1`, [plant]);
+  const state: string | null = rows[0]?.state ?? null;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const it of items) {
+    const barcode = String(it.barcode ?? '').trim();
+    if (!barcode) continue;
+    const lp = await resolveLineProduct(db, barcode, it.sapCode ?? null, state);
+    if (!lp.productId || !lp.noSapForPlant) continue;
+    const key = `${barcode.toLowerCase()}|${lp.productId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(noSapMessage(it.itemName || lp.name, barcode, plant, state));
+  }
+  return out;
+}

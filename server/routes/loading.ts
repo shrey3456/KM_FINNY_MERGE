@@ -1894,10 +1894,6 @@ router.post('/loading/proforma/:orderNumber/scan', requireLoadingWrite, async (r
       },
     });
 
-    // Best-effort, after the response — only when this scan is what just auto-completed it.
-    if (allComplete && (finalSlip as any).loadingCompletedAt && !(slip as any).loadingCompletedAt) {
-      void syncOrderToNotion(slip.orderNumber, { status: NOTION_LOADING_COMPLETE_STATUS }, actor(req));
-    }
   } catch (error: any) {
     // A rejection raised from inside the locked transaction above (stock/extra checks re-run
     // against the FOR UPDATE-locked row) carries its own intended status — an expected business
@@ -2523,12 +2519,10 @@ router.put('/loading/events/:id', requireLoadingVoidAccess, async (req: Request,
 
     await client.query('COMMIT');
 
-    // Same completion-flip-in-either-direction reasoning as the void handler above, just checked
-    // both ways since an edit can push an order past complete OR pull it back short of complete.
+    // An edit never completes a load - only the Complete button does. It can still pull a completed load back to open when the edit leaves it short
+    // (same as the void handler above).
     const { allComplete } = await withProgress(slip, rawItems);
-    if (allComplete && !(slip as any).loadingCompletedAt) {
-      await storage.updateProformaSlip(slip.id, { loadingCompletedAt: new Date(), loadingCompletedByCode: userCode ?? null } as any);
-    } else if (!allComplete && (slip as any).loadingCompletedAt) {
+    if (!allComplete && (slip as any).loadingCompletedAt) {
       await storage.updateProformaSlip(slip.id, { loadingCompletedAt: null, loadingCompletedByCode: null } as any);
     }
 

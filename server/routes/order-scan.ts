@@ -571,7 +571,7 @@ export async function sweepStaleCompletions(groupId: number, plant: string, user
 
     const { rowCount } = await pool.query(
       `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW(), scan_completed_by_code = 'system'
-       WHERE id = $1 AND scan_status <> 'completed'`,
+       WHERE id = $1 AND scan_status <> 'completed' AND auto_complete_suppressed = false`,
       [s.id],
     );
     if (!rowCount) continue;
@@ -1125,7 +1125,7 @@ router.post('/order-scan/sessions/:id/complete', requireCompleteAccess, async (r
     // (credits, auto-activate, broadcast) correctly no-ops instead of double-processing.
     const { rows: completedRows } = await pool.query(
       `UPDATE order_import_sessions
-       SET scan_status = 'completed', scan_completed_at = $1, scan_completed_by_code = $3
+       SET scan_status = 'completed', scan_completed_at = $1, scan_completed_by_code = $3, auto_complete_suppressed = false
        WHERE id = $2 AND scan_status <> 'completed'
        RETURNING id, plant, receiving_session_id AS "receivingSessionId", csv_file_name AS "csvFileName", part_index AS "partIndex"`,
       [new Date(), id, (req.user as any)?.userCode ?? null],
@@ -1267,7 +1267,7 @@ router.post('/order-scan/sessions/:id/reopen', requirePageWrite('order-import'),
     }
 
     await client.query(
-      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL, scan_completed_by_code = NULL WHERE id = $1`,
+      `UPDATE order_import_sessions SET scan_status = 'active', scan_completed_at = NULL, scan_completed_by_code = NULL, auto_complete_suppressed = true WHERE id = $1`,
       [id],
     );
 
@@ -1923,7 +1923,7 @@ router.post('/order-scan/sessions/:id/scan', requirePageWrite('scan-order'), asy
         if ((remainRows[0]?.remaining ?? 1) === 0) {
           const { rowCount } = await client.query(
             `UPDATE order_import_sessions SET scan_status = 'completed', scan_completed_at = NOW(), scan_completed_by_code = $2
-             WHERE id = $1 AND scan_status <> 'completed'`,
+             WHERE id = $1 AND scan_status <> 'completed' AND auto_complete_suppressed = false`,
             [sid, userCode],
           );
           if (rowCount) newlyCompleted.push(sid);

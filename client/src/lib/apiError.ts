@@ -54,3 +54,15 @@ export function matchExtraNotAllowedError(error: unknown): string | null {
   if (!message.startsWith(EXTRA_NOT_ALLOWED_PREFIX)) return null;
   return message.slice(EXTRA_NOT_ALLOWED_PREFIX.length).trim();
 }
+
+// The server asks for a confirmation before importing a CSV whose products have no SAP for the plant's state (409, code NO_SAP_CONFIRM, with the list of
+// items). Returns that list, or null for any other error.
+export function matchNoSapConfirm(error: unknown): string[] | null {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  const idx = raw.indexOf(": ");
+  if (idx === -1) return null;
+  try {
+    const parsed = JSON.parse(raw.slice(idx + 2));
+    return parsed?.code === 'NO_SAP_CONFIRM' && Array.isArray(parsed.warnings) ? parsed.warnings : null;
+  } catch { return null; }
+}

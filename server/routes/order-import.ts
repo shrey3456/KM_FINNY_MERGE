@@ -8,6 +8,7 @@ import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getUse
 import { computeGroupReport, resolveGroupId, computePartReport, reconcileCredits } from '../lib/orderGroupReport';
 import { remapDeletedSessionScans } from '../lib/orderScanRemap';
 import { storage } from '../storage';
+import { noSapWarningsForItems } from '../lib/productSap';
 
 export { broadcastOrderImportUpdate };
 
@@ -256,6 +257,16 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     // Master View scopes by. An import without one can't be placed in a group at all.
     if (!normOrderDate) {
       return res.status(400).json({ message: 'Order Date is required — it determines which CSVs merge together as parts of one order.' });
+    }
+    // Items whose product has no SAP for this plant's state would show a blank SAP: ask the person to confirm BEFORE anything is imported.
+    if (req.body?.confirmNoSap !== true) {
+      const noSap = await noSapWarningsForItems(pool, plant, items);
+      if (noSap.length > 0) {
+        return res.status(409).json({
+          code: 'NO_SAP_CONFIRM', warnings: noSap,
+          message: `${noSap.length} item(s) have no SAP for ${plant} in the Product Master. Confirm to import anyway.`,
+        });
+      }
     }
     // ── Delete-with-rollback replacement: reclaim a deleted session's slot ─────────────────
     // If a CSV was deleted for this exact (plant, orderDate) slot and no replacement has

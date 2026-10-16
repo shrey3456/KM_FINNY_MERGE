@@ -1203,6 +1203,8 @@ export const orderImportSessions = pgTable("order_import_sessions", {
   // (Auto Complete), or 'system' when it closed with no person involved. Null for parts completed
   // before this was recorded.
   scanCompletedByCode: text("scan_completed_by_code"),
+  // Set when a completed session is REOPENED: Auto Complete then leaves it open until someone presses Complete (which clears it).
+  autoCompleteSuppressed: boolean("auto_complete_suppressed").notNull().default(false),
   // FIFO grouping is automatic by (plant + order date): every CSV uploaded for the same
   // plant and order date shares one receivingSessionId (the group's Part 1 uses its own id
   // as the group id) and gets the next partIndex. orderDate is the "Order Date" chosen at
@@ -1402,6 +1404,8 @@ export const unloadImportSessions = pgTable("unload_import_sessions", {
   scanActivatedByCode: text("scan_activated_by_code").references(() => users.userCode),
   scanActivatedAt: timestamp("scan_activated_at"),
   scanCompletedByCode: text("scan_completed_by_code").references(() => users.userCode),
+  // Set when a completed session is REOPENED: it then stays open until someone presses Complete (which clears it), instead of completing again as soon as everything is scanned.
+  autoCompleteSuppressed: boolean("auto_complete_suppressed").notNull().default(false),
   scanCompletedAt: timestamp("scan_completed_at"),
   // Soft-delete + delete-with-rollback replacement flow — same convention as
   // orderImportSessions (see its comment): a "replace" delete keeps scan history in place

@@ -72,6 +72,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { matchNoSapConfirm } from "@/lib/apiError";
 import type { OrderImportSession, OrderImportItem } from "@shared/schema";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
@@ -635,21 +636,14 @@ export default function OrderImport() {
     qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
   };
 
-  // A product with no SAP for the plant's state shows a BLANK SAP on the file's line - the person is told which items, so the Product Master can be fixed.
-  const showNoSapNotice = (warnings: string[] | undefined) => {
-    if (!warnings || warnings.length === 0) return;
-    toast({
-      title: `No SAP for this plant (${warnings.length} item${warnings.length === 1 ? "" : "s"})`,
-      description: warnings.slice(0, 4).join(" · ") + (warnings.length > 4 ? ` · …and ${warnings.length - 4} more` : ""),
-      variant: "destructive",
-    });
-  };
+  // A product with no SAP for the plant's state would show a BLANK SAP: the server asks BEFORE importing (409 NO_SAP_CONFIRM) and this dialog
+  // lists those items; "Import anyway" sends the same file again with the confirmation.
+  const [noSapConfirm, setNoSapConfirm] = useState<{ warnings: string[]; proceed: () => void } | null>(null);
 
   const importMutation = useMutation({
-    mutationFn: async (payload: { plant: string; csvFileName: string; items: object[] }) =>
+    mutationFn: async (payload: { plant: string; csvFileName: string; items: object[]; confirmNoSap?: boolean }) =>
       (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
     onSuccess: (data) => {
-      showNoSapNotice(data?.sapWarnings);
       setShowMappingDialog(false);
       setCsvData(null);
       setSelectedFiles([]);
@@ -697,8 +691,11 @@ export default function OrderImport() {
 
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
-    onError: (err: any) =>
-      toast({ title: "Import failed", description: err.message, variant: "destructive" }),
+    onError: (err: any, variables) => {
+      const noSap = matchNoSapConfirm(err);
+      if (noSap) { setNoSapConfirm({ warnings: noSap, proceed: () => importMutation.mutate({ ...variables, confirmNoSap: true }) }); return; }
+      toast({ title: "Import failed", description: err.message, variant: "destructive" });
+    },
     onSettled: () => refetchAllSessionQueries(),
   });
 
@@ -1317,7 +1314,7 @@ export default function OrderImport() {
     handleUnloadFileChosen(unloadImportFile);
   }
 
-  async function handleConfirmUnloadImport() {
+  async function handleConfirmUnloadImport(confirmNoSap = false) {
     if (!unloadCsvData) return;
     const get = (row: Record<string, string>, key: UnloadTargetKey) => {
       const col = unloadMapping[key];
@@ -1339,19 +1336,20 @@ export default function OrderImport() {
     try {
       const data = await apiRequest("POST", "/api/unloading/import", {
         plant: unloadImportPlant, purchasePlant: unloadPurchasePlant || null,
-        orderDate: unloadImportDate, csvFileName: unloadCsvData.name, items,
+        orderDate: unloadImportDate, csvFileName: unloadCsvData.name, items, ...(confirmNoSap ? { confirmNoSap: true } : {}),
       }, false, true);
 
       toast({
         title: "Imported",
         description: `${unloadCsvData.name} — ${data.vehicles.length} vehicle(s): ${data.vehicles.map((v: any) => `${v.vehicleNumber} (${v.rowCount})${v.replacesSessionId ? " · replaced" : ""}`).join(", ")}`,
       });
-      showNoSapNotice(data?.sapWarnings);
       qc.invalidateQueries({ queryKey: ["/api/unloading/csv-history"] });
       setShowUnloadMappingDialog(false);
       setUnloadCsvData(null);
       resetUnloadImportForm();
     } catch (error: any) {
+      const noSap = matchNoSapConfirm(error);
+      if (noSap) { setNoSapConfirm({ warnings: noSap, proceed: () => { void handleConfirmUnloadImport(true); } }); return; }
       toast({ title: "Import failed", description: error?.message || "Could not import CSV", variant: "destructive" });
     } finally {
       setIsUnloadImporting(false);
@@ -2963,7 +2961,7 @@ export default function OrderImport() {
               disabled={isUnloadImporting}>
               Cancel
             </Button>
-            <Button onClick={handleConfirmUnloadImport} disabled={isUnloadImporting || !unloadCsvData} className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl">
+            <Button onClick={() => handleConfirmUnloadImport()} disabled={isUnloadImporting || !unloadCsvData} className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl">
               {isUnloadImporting ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>) : (<><Upload className="mr-1.5 h-4 w-4" />Import {unloadCsvData?.rows.length ?? 0} rows</>)}
             </Button>
           </DialogFooter>
@@ -3032,6 +3030,28 @@ export default function OrderImport() {
               onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
               disabled={deactivateMutation.isPending || !canWriteOrderImport}>
               {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── No SAP for this plant — asked BEFORE the CSV is imported ── */}
+      <AlertDialog open={noSapConfirm !== null} onOpenChange={(open) => { if (!open) setNoSapConfirm(null); }}>
+        <AlertDialogContent className="rounded-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>No SAP for this plant ({noSapConfirm?.warnings.length ?? 0} item{(noSapConfirm?.warnings.length ?? 0) === 1 ? "" : "s"})</AlertDialogTitle>
+            <AlertDialogDescription>
+              These items have no SAP for this plant's state in the Product Master, so they will show a blank SAP. Import the file anyway?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+            {noSapConfirm?.warnings.map((w, i) => <li key={i}>{w.replace(/^No SAP for this plant:\s*/, "")}</li>)}
+          </ul>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-[#001d6e] text-white hover:bg-[#001552]"
+              onClick={() => { const p = noSapConfirm?.proceed; setNoSapConfirm(null); p?.(); }}>
+              Import anyway
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
