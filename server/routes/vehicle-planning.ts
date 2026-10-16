@@ -3,7 +3,7 @@ import { Client } from '@notionhq/client';
 import { storage } from '../storage';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
-import { fetchProformaOrdersFromNotion, writeOrderToDb, type OrderData } from '../services/proformaNotionSync';
+import { fetchProformaOrdersFromNotion, writeOrderToDb } from '../services/proformaNotionSync';
 import { syncOrderToNotion, settleNotionSync, watchStatusAfterVehicleChange, type NotionSyncOutcome } from '../services/notionOrderStatusSync';
 import type { VehiclePlanningOrderEntry } from '@shared/schema';
 
@@ -207,7 +207,7 @@ router.post('/vehicle-planning/settings', requirePageWrite('vehicle-planning'), 
 
 // ─── Sync from Notion (manual button + 24h automatic timer) ───────────────
 
-// Narrow date window for a scoped single-order proforma lookup (assign-flow fallback) — wide
+// Narrow date window for fetching ONE order's slip from Notion when the planner asks for it (POST /vehicle-planning/fetch-slip) — wide
 // enough to cover almost any real order without turning into "sync everything".
 function recentWindow(): { startDate: string; endDate: string } {
   const start = new Date();
@@ -218,30 +218,16 @@ function recentWindow(): { startDate: string; endDate: string } {
 }
 
 // Builds one order_history entry for a vehicle's current live order, cross-referencing
-// proforma_slips by order number (linked, never relied on for "which order is current"). If the
-// slip doesn't exist locally yet, falls back to whatever Notion has for that order number — via
-// getNotionOrders, a cache shared across the WHOLE sync run (fetchProformaOrdersFromNotion pulls
-// its entire date window, not one order, so calling it per-vehicle would mean hundreds of
-// redundant full-window Notion fetches instead of at most one).
+// proforma_slips by order number (linked, never relied on for "which order is current"). Vehicle
+// Planning NEVER creates a slip: when the order isn't in our system the entry is kept (so the planner
+// can see that Notion has this vehicle on an order) but flagged `notInSystem`, and the planner chooses
+// whether to fetch that slip (POST /vehicle-planning/fetch-slip).
 async function buildHistoryEntry(
   vehicle: { vehicleNumber: string | null },
   currentOrder: LiveOrder,
   stateByPlant: Map<string, string | null>,
-  getNotionOrders: () => Promise<Map<string, OrderData>>,
 ): Promise<VehiclePlanningOrderEntry> {
-  let slip = await storage.getProformaSlipByOrderNumber(currentOrder.orderNumber);
-  if (!slip) {
-    try {
-      const ordersMap = await getNotionOrders();
-      const orderData = ordersMap.get(currentOrder.orderNumber);
-      if (orderData) {
-        await writeOrderToDb(orderData);
-        slip = await storage.getProformaSlipByOrderNumber(currentOrder.orderNumber);
-      }
-    } catch (err) {
-      console.error(`[Vehicle Planning] Scoped proforma sync failed for order ${currentOrder.orderNumber}:`, err);
-    }
-  }
+  const slip = await storage.getProformaSlipByOrderNumber(currentOrder.orderNumber);
 
   const vehicleMismatch = !!(slip?.vehicleNumber && vehicle.vehicleNumber && slip.vehicleNumber !== vehicle.vehicleNumber);
   const plantState = currentOrder.plant ? stateByPlant.get(currentOrder.plant.trim().toLowerCase()) ?? null : null;
@@ -259,6 +245,7 @@ async function buildHistoryEntry(
     state: plantState,
     vehicleMismatch,
     mismatchProformaVehicleNumber: vehicleMismatch ? slip!.vehicleNumber : null,
+    notInSystem: !slip,
     // Filled in by upsertHistoryEntry, which can see whether this order was already terminal as
     // of an earlier sync — this function builds a fresh snapshot each time, with no memory of that.
     actualCompletedAt: null,
@@ -319,14 +306,14 @@ async function mapWithConcurrency<T>(items: T[], limit: number, task: (item: T) 
 
 let isVehiclePlanningSyncing = false;
 
-// The only function that talks to Notion for Vehicle Planning. Runs for every vehicle currently
-// matching the saved company filter, finds its current order, links it to proforma_slips, and
-// upserts the result into vehicle_planning_state. Called by the manual "Sync from Notion" button
+// The only function that talks to Notion for Vehicle Planning. Runs for every vehicle (from Vehicle Master) currently
+// matching the saved company filter, finds its current order, links it to a proforma slip that is ALREADY in our system
+// (it never creates one), and upserts the result into vehicle_planning_state. Called by the manual "Sync from Notion" button
 // and by the 24h automatic timer in server/index.ts — never by the page-load GET.
-export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number }> {
+export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number }> {
   if (isVehiclePlanningSyncing) {
     console.log('[Vehicle Planning] Sync already in progress, skipping this run');
-    return { syncedVehicles: 0, mismatches: 0 };
+    return { syncedVehicles: 0, mismatches: 0, notInSystem: 0 };
   }
   isVehiclePlanningSyncing = true;
   console.log('[Vehicle Planning] Sync started');
@@ -352,36 +339,24 @@ export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number
     const allPlants = await storage.getAllPlants();
     const stateByPlant = new Map(allPlants.map((p) => [p.name.trim().toLowerCase(), p.state] as const));
 
-    // Fetched at most ONCE for this whole run, the first time some vehicle's order isn't already
-    // in proforma_slips — every other vehicle missing a slip reuses this same resolved (or
-    // REJECTED) promise instead of each triggering its own full date-window pull from Notion. A
-    // failure is deliberately cached too, not retried per vehicle — if Notion is unreachable this
-    // run, retrying for every single vehicle missing a slip just turns one outage into dozens of
-    // doomed network calls; this run simply leaves those entries unlinked and the next sync (in
-    // 24h, or a manual click) tries again fresh.
-    let notionOrdersPromise: Promise<Map<string, OrderData>> | null = null;
-    const getNotionOrders = () => {
-      if (!notionOrdersPromise) {
-        const { startDate, endDate } = recentWindow();
-        notionOrdersPromise = fetchProformaOrdersFromNotion(startDate, endDate);
-      }
-      return notionOrdersPromise;
-    };
-
     let mismatches = 0;
+    let notInSystem = 0;
     for (const v of fleet) {
       const currentOrder = v.notionPageId ? currentOrderByVehicle.get(v.notionPageId) ?? null : null;
       if (!currentOrder) {
         await pool.query(`UPDATE vehicle_planning_state SET last_synced_at = now() WHERE vehicle_id = $1`, [v.id]);
         continue;
       }
-      const entry = await buildHistoryEntry(v, currentOrder, stateByPlant, getNotionOrders);
+      const entry = await buildHistoryEntry(v, currentOrder, stateByPlant);
       if (entry.vehicleMismatch) mismatches++;
+      if (entry.notInSystem) notInSystem++;
       await upsertHistoryEntry(v.id, entry);
     }
+    // Every vehicle has now had its first pass.
+    await pool.query(`UPDATE vehicle_planning_state SET setup_done = true WHERE vehicle_id = ANY($1::int[]) AND setup_done = false`, [fleet.map((v) => v.id)]);
 
-    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${mismatches} mismatch(es)`);
-    return { syncedVehicles: fleet.length, mismatches };
+    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${mismatches} mismatch(es), ${notInSystem} order(s) not in our system`);
+    return { syncedVehicles: fleet.length, mismatches, notInSystem };
   } finally {
     isVehiclePlanningSyncing = false;
   }
@@ -394,6 +369,48 @@ router.post('/vehicle-planning/sync', requirePageWrite('vehicle-planning'), asyn
   } catch (error) {
     console.error('Error running vehicle planning sync:', error);
     res.status(500).json({ message: 'Failed to sync from Notion' });
+  }
+});
+
+// ─── Fetch ONE slip from Notion into our system (planner's choice) ─────────────
+
+// POST /api/vehicle-planning/fetch-slip — body: { orderNumber }. Notion has this order on a vehicle but our system has no slip for it
+// (history entry flagged notInSystem). Only this one order is written, and only when the planner asks.
+router.post('/vehicle-planning/fetch-slip', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const orderNumber = String(req.body?.orderNumber ?? '').trim();
+    if (!orderNumber) return res.status(400).json({ message: 'orderNumber is required' });
+    let slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+    if (!slip) {
+      const { startDate, endDate } = recentWindow();
+      const ordersMap = await fetchProformaOrdersFromNotion(startDate, endDate);
+      const orderData = ordersMap.get(orderNumber);
+      if (!orderData) return res.status(404).json({ message: `Order ${orderNumber} was not found in Notion.` });
+      await writeOrderToDb(orderData);
+      slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+    }
+    if (!slip) return res.status(500).json({ message: 'The slip could not be created.' });
+
+    // Every vehicle history entry for this order is now linked to the slip and no longer flagged.
+    const { rows } = await pool.query(`SELECT vehicle_id AS "vehicleId", order_history AS "orderHistory" FROM vehicle_planning_state`);
+    for (const r of rows as any[]) {
+      const history: VehiclePlanningOrderEntry[] = r.orderHistory ?? [];
+      let changed = false;
+      for (const e of history) {
+        if (e.orderNumber !== orderNumber) continue;
+        e.proformaSlipId = slip.id; e.notInSystem = false; changed = true;
+        if (!e.partyName && slip.partyName) e.partyName = slip.partyName;
+        const veh = await storage.getVehicleInfo(r.vehicleId);
+        if (slip.vehicleNumber && veh?.vehicleNumber && slip.vehicleNumber !== veh.vehicleNumber) {
+          e.vehicleMismatch = true; e.mismatchProformaVehicleNumber = slip.vehicleNumber;
+        }
+      }
+      if (changed) await pool.query(`UPDATE vehicle_planning_state SET order_history = $1 WHERE vehicle_id = $2`, [JSON.stringify(history), r.vehicleId]);
+    }
+    res.json({ slip });
+  } catch (error) {
+    console.error('Error fetching slip for vehicle planning:', error);
+    res.status(500).json({ message: 'Failed to fetch the slip from Notion' });
   }
 });
 
@@ -513,6 +530,7 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
           // "is it free yet" signal; this is just "when did/does this trip end".
           tripCompletesOn: currentOrder.tripCompletesOn,
           vehicleMismatch: currentOrder.vehicleMismatch, mismatchProformaVehicleNumber: currentOrder.mismatchProformaVehicleNumber,
+          notInSystem: !!currentOrder.notInSystem,
         },
         busy, busyUntil, tripDays: currentOrder.tripDays,
         hasHistory: true, lastSyncedAt: state?.lastSyncedAt ?? null,
@@ -561,23 +579,9 @@ router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), as
     const vehicleId = req.body?.vehicleId != null ? Number(req.body.vehicleId) : null;
     if (!orderNumber || !vehicleId) return res.status(400).json({ message: 'orderNumber and vehicleId are required' });
 
-    let slip = await storage.getProformaSlipByOrderNumber(orderNumber);
-    // Not found locally — try a scoped live pull from Notion before giving up, since a brand new
-    // order may not have been synced (manually or by the 24h timer) yet.
-    if (!slip) {
-      try {
-        const { startDate, endDate } = recentWindow();
-        const ordersMap = await fetchProformaOrdersFromNotion(startDate, endDate);
-        const orderData: OrderData | undefined = ordersMap.get(orderNumber);
-        if (orderData) {
-          await writeOrderToDb(orderData);
-          slip = await storage.getProformaSlipByOrderNumber(orderNumber);
-        }
-      } catch (err) {
-        console.error(`[Vehicle Planning] Scoped proforma fetch failed for order ${orderNumber}:`, err);
-      }
-    }
-    if (!slip) return res.status(404).json({ message: `Order ${orderNumber} not found in Notion.` });
+    // Only a slip that is already in our system can be assigned - Vehicle Planning never creates one.
+    const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+    if (!slip) return res.status(404).json({ message: `Order ${orderNumber} is not in our system. Add its slip first, then assign the vehicle.` });
 
     const vehicle = await storage.getVehicleInfo(vehicleId);
     if (!vehicle) return res.status(404).json({ message: 'Vehicle not found' });

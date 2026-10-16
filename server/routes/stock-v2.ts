@@ -4,6 +4,7 @@ import { storage } from '../storage';
 import { requireAdminRole, requirePageAccess } from '../lib/pageAccess';
 import { getUserPlants } from './order-scan';
 import { getOpeningState, startFresh, setOpening, postAdjust, lockLineStock, todayIst } from '../lib/stockV2';
+import { resolveLineProduct } from '../lib/productSap';
 
 // Stock - the report behind the Stock page, the line drill-down, and the admin actions on one line (Adjust, Clear, Delete). Writes from the
 // operations (Order Scan, Unloading, Loading) go through server/lib/stockV2.ts.
@@ -38,7 +39,7 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
     }
 
     const { rows } = await pool.query(
-      `SELECT l.id, l.plant, l.state, l.barcode, l.item_name AS "itemName", l.sap_code AS "sapCode",
+      `SELECT l.id, l.product_id AS "productId", l.plant, l.state, l.barcode, l.item_name AS "itemName", l.sap_code AS "sapCode",
               l.sap_is_fallback AS "sapIsFallback", COALESCE(NULLIF(TRIM(pm.new_sr), ''), l.sr_no) AS "srNo", l.brand, l.category,
               COALESCE(NULLIF(CASE UPPER(COALESCE(l.state,'')) WHEN 'GJ' THEN pm.gj_plt WHEN 'MP' THEN pm.mp_plt END, 0), NULLIF(l.pallet_size, 0)) AS "palletSize",
               l.stock_qty AS "stock",
@@ -93,48 +94,63 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
     const expP: any[] = [];
     const expPC = dateCond('ois.order_date', expP);
     const e1 = await pool.query(
-      `SELECT LOWER(oii.barcode) AS bc, LOWER(oii.plant) AS pl, SUM(oii.quantity)::int AS q
+      `SELECT LOWER(oii.barcode) AS bc, LOWER(oii.plant) AS pl, NULL::int AS pid, oii.sap_code AS sap, SUM(oii.quantity)::int AS q
          FROM order_import_items oii JOIN order_import_sessions ois ON ois.id = oii.session_id
-        WHERE ${expPC} AND ois.is_deleted = false${scope('oii.plant', expP)} GROUP BY 1,2`, expP);
+        WHERE ${expPC} AND ois.is_deleted = false${scope('oii.plant', expP)} GROUP BY 1,2,3,4`, expP);
     const expU: any[] = [];
     const expUC = dateCond('uis.order_date', expU);
     // An unloading CSV is expected at its PURCHASE plant (Baroda), not the plant its stock is added to (Valsad) —
     // the same plant its Purchase is booked at.
     const e2 = await pool.query(
-      `SELECT LOWER(uii.barcode) AS bc, LOWER(COALESCE(NULLIF(TRIM(uis.purchase_plant), ''), uii.plant)) AS pl, SUM(uii.quantity)::int AS q
+      `SELECT LOWER(uii.barcode) AS bc, LOWER(COALESCE(NULLIF(TRIM(uis.purchase_plant), ''), uii.plant)) AS pl, uii.product_id AS pid, uii.sap_code AS sap, SUM(uii.quantity)::int AS q
          FROM unload_import_items uii JOIN unload_import_sessions uis ON uis.id = uii.session_id
-        WHERE ${expUC} AND uis.is_deleted = false${scope("COALESCE(NULLIF(TRIM(uis.purchase_plant), ''), uii.plant)", expU)} GROUP BY 1,2`, expU);
+        WHERE ${expUC} AND uis.is_deleted = false${scope("COALESCE(NULLIF(TRIM(uis.purchase_plant), ''), uii.plant)", expU)} GROUP BY 1,2,3,4`, expU);
     const expS: any[] = [];
     const expSC = dateCond('ps.order_date', expS);
     const e3 = await pool.query(
-      `SELECT LOWER(psi.barcode) AS bc, LOWER(ps.plant) AS pl, SUM(psi.quantity)::int AS q
+      `SELECT LOWER(psi.barcode) AS bc, LOWER(ps.plant) AS pl, NULL::int AS pid, psi.sap_code AS sap, SUM(psi.quantity)::int AS q
          FROM proforma_slip_items psi JOIN proforma_slips ps ON ps.id = psi.proforma_slip_id
-        WHERE ${expSC} AND psi.barcode IS NOT NULL AND ps.plant IS NOT NULL${scope('ps.plant', expS)} GROUP BY 1,2`, expS);
+        WHERE ${expSC} AND psi.barcode IS NOT NULL AND ps.plant IS NOT NULL${scope('ps.plant', expS)} GROUP BY 1,2,3,4`, expS);
+    // Two products can share a barcode (65 g / 60 g): each is its own stock line, so what is expected is counted per PRODUCT. A CSV / slip line finds
+    // its product from its barcode + SAP (matched against the state SAPs) unless the line already carries one.
+    const stateOfPl = new Map<string, string>(plantRows.rows.map((p: any) => [String(p.name).toLowerCase(), String(p.state ?? '').toUpperCase()]));
+    const pidCache = new Map<string, number | null>();
+    const pidOf = async (r: any): Promise<number | null> => {
+      if (r.pid != null) return Number(r.pid);
+      const ck = `${r.bc}|${r.pl}|${r.sap ?? ''}`;
+      if (!pidCache.has(ck)) pidCache.set(ck, (await resolveLineProduct(pool, r.bc, r.sap, stateOfPl.get(r.pl) ?? '')).productId ?? null);
+      return pidCache.get(ck)!;
+    };
     const expPurchase = new Map<string, number>();
     const expSale = new Map<string, number>();
-    const keyOf = (r: any) => `${r.pl}|${r.bc}`;
-    for (const r of [...e1.rows, ...e2.rows]) expPurchase.set(keyOf(r), (expPurchase.get(keyOf(r)) ?? 0) + Number(r.q));
-    for (const r of e3.rows) expSale.set(keyOf(r), (expSale.get(keyOf(r)) ?? 0) + Number(r.q));
+    const keyOf = (r: any, pid: number | null) => `${r.pl}|${r.bc}|${pid ?? ''}`;
+    for (const r of [...e1.rows, ...e2.rows]) { const k = keyOf(r, await pidOf(r)); expPurchase.set(k, (expPurchase.get(k) ?? 0) + Number(r.q)); }
+    for (const r of e3.rows) { const k = keyOf(r, await pidOf(r)); expSale.set(k, (expSale.get(k) ?? 0) + Number(r.q)); }
 
     // A CSV / slip item with no stock line yet (nothing scanned, no stock) still shows, with Stock 0 —
     // its details come from the Product Master.
-    const have = new Set(rows.map((r: any) => `${String(r.plant).toLowerCase()}|${String(r.barcode).toLowerCase()}`));
+    const lineKey = (r: any) => `${String(r.plant).toLowerCase()}|${String(r.barcode).toLowerCase()}|${r.productId ?? ''}`;
+    const have = new Set(rows.map(lineKey));
     const missing = [...new Set([...expPurchase.keys(), ...expSale.keys()])].filter((k) => !have.has(k));
     const extraRows: any[] = [];
     if (missing.length) {
       const bcs = [...new Set(missing.map((k) => k.split('|')[1]))];
       const pr = await pool.query(
-        `SELECT DISTINCT ON (LOWER(barcode)) LOWER(barcode) AS bc, barcode, name, brand, category, new_sr, gj_plt, mp_plt, COALESCE(gj_sap, mp_sap, sap_code) AS sap
-           FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY LOWER(barcode), id`, [bcs]);
-      const byBc = new Map<string, any>(pr.rows.map((r: any) => [r.bc, r]));
+        `SELECT id, LOWER(barcode) AS bc, barcode, name, brand, category, new_sr, gj_plt, mp_plt, gj_sap, mp_sap, up_sap
+           FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`, [bcs]);
+      const byId = new Map<number, any>(pr.rows.map((r: any) => [r.id, r]));
+      const firstByBc = new Map<string, any>();
+      for (const r of pr.rows as any[]) if (!firstByBc.has(r.bc)) firstByBc.set(r.bc, r);
       const nameOf = new Map<string, any>(plantRows.rows.map((p: any) => [String(p.name).toLowerCase(), p]));
       for (const k of missing) {
-        const [pl, bc] = k.split('|');
-        const p = byBc.get(bc);
+        const [pl, bc, pidRaw] = k.split('|');
+        const p = (pidRaw ? byId.get(Number(pidRaw)) : null) ?? firstByBc.get(bc);
         const pt = nameOf.get(pl);
         if (!p || !pt) continue;
+        // The SAP of this product for the plant's state only; blank when it has none there.
+        const stSap = String(pt.state ?? '').toUpperCase() === 'GJ' ? p.gj_sap : String(pt.state ?? '').toUpperCase() === 'MP' ? p.mp_sap : String(pt.state ?? '').toUpperCase() === 'UP' ? p.up_sap : null;
         extraRows.push({
-          id: null, plant: pt.name, state: pt.state, barcode: p.barcode, itemName: p.name, sapCode: p.sap, sapIsFallback: false,
+          id: null, productId: p.id, plant: pt.name, state: pt.state, barcode: p.barcode, itemName: p.name, sapCode: String(stSap ?? '').trim() || null, sapIsFallback: false,
           srNo: p.new_sr, brand: p.brand, category: p.category, palletSize: (String(pt.state ?? '').toUpperCase() === 'GJ' ? p.gj_plt : String(pt.state ?? '').toUpperCase() === 'MP' ? p.mp_plt : null) || null, stock: 0, openingStock: 0, purchaseQty: 0,
           extraPurchaseQty: 0, saleQty: 0, extraSaleQty: 0, transferIn: 0, transferOut: 0, adjustQty: 0,
         });
@@ -144,7 +160,7 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
       .map((r: any) => {
         const pallet = r.palletSize && r.palletSize > 0 ? r.palletSize : 0;
         const closingStock = r.openingStock + r.purchaseQty - r.saleQty + r.adjustQty + r.transferIn - r.transferOut;
-        const k = `${String(r.plant).toLowerCase()}|${String(r.barcode).toLowerCase()}`;
+        const k = lineKey(r);
         return {
           ...r, closingStock, closingPallets: pallet ? Math.round((closingStock / pallet) * 100) / 100 : 0,
           expectedPurchase: expPurchase.get(k) ?? 0, expectedSale: expSale.get(k) ?? 0,

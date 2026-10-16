@@ -2030,6 +2030,7 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
     const { rows } = await pool.query(`
       SELECT
         COALESCE(ose.barcode, '')                                    AS barcode,
+        ose.product_id                                               AS "productId",
         MAX(ose.item_name)                                           AS "itemName",
         SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0)))::int AS "totalQty",
         COUNT(*)::int                                                AS "scanCount",
@@ -2040,7 +2041,7 @@ router.get('/order-scan/sessions/:id/extras', async (req: Request, res: Response
       JOIN order_import_sessions ois ON ois.id = ose.session_id
       WHERE ose.session_id = ANY($1::int[]) AND ose.is_extra = true AND ose.voided IS NOT TRUE
         AND ose.barcode <> 'EMPTY_BOX'
-      GROUP BY COALESCE(ose.barcode, '')
+      GROUP BY COALESCE(ose.barcode, ''), ose.product_id
       ORDER BY MAX(ose.scanned_at) DESC
     `, [groupSessionIds]);
     res.json(rows);

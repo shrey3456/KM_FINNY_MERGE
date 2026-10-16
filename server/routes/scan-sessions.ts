@@ -1546,6 +1546,9 @@ router.get('/reports/stock-movements', async (req: Request, res: Response) => {
     if (!barcode || !plant) {
       return res.status(400).json({ message: 'barcode and plant are required' });
     }
+    const productIdRaw = parseInt(String(req.query.productId ?? ''), 10);
+    // Two products can share a barcode (65 g / 60 g): the history of a stock line is that PRODUCT's entries only.
+    const productId = Number.isFinite(productIdRaw) ? productIdRaw : null;
 
     // Same plant scoping as every other report here: admins see any plant, everyone else is
     // limited to their assigned plant(s).
@@ -1565,9 +1568,10 @@ router.get('/reports/stock-movements', async (req: Request, res: Response) => {
       JOIN order_import_sessions ois ON ois.id = e.session_id
       WHERE LOWER(TRIM(e.barcode)) = LOWER(TRIM($1)) AND LOWER(ois.plant) = LOWER($2)
         AND e.voided IS NOT TRUE AND e.is_credit IS NOT TRUE AND NOT COALESCE(e.hidden_in_history, false)
+        AND ($3::int IS NULL OR e.product_id = $3::int OR (e.product_id IS NULL AND (SELECT COUNT(*) FROM products pp WHERE LOWER(TRIM(pp.barcode)) = LOWER(TRIM($1))) <= 1))
       ORDER BY e.scanned_at DESC
       LIMIT 500
-    `, [barcode, plant]);
+    `, [barcode, plant, productId]);
 
     res.json({ items: rows });
   } catch (error) {
@@ -1592,6 +1596,9 @@ router.get('/reports/unloading-history', async (req: Request, res: Response) => 
     if (!barcode || !plant) {
       return res.status(400).json({ message: 'barcode and plant are required' });
     }
+    const productIdRaw = parseInt(String(req.query.productId ?? ''), 10);
+    // Two products can share a barcode (65 g / 60 g): the history of a stock line is that PRODUCT's entries only.
+    const productId = Number.isFinite(productIdRaw) ? productIdRaw : null;
 
     const allowed = getUserPlants(req.user);
     if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
@@ -1607,9 +1614,10 @@ router.get('/reports/unloading-history', async (req: Request, res: Response) => 
       FROM unload_scan_events e
       LEFT JOIN unload_import_sessions s ON s.id = e.session_id
       WHERE LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = LOWER($2)
+        AND ($3::int IS NULL OR e.product_id = $3::int OR (e.product_id IS NULL AND (SELECT COUNT(*) FROM products pp WHERE LOWER(TRIM(pp.barcode)) = LOWER(TRIM($1))) <= 1))
       ORDER BY e.scanned_at DESC
       LIMIT 500
-    `, [barcode, plant]);
+    `, [barcode, plant, productId]);
 
     res.json({ items: rows });
   } catch (error) {
@@ -1630,6 +1638,9 @@ router.get('/reports/loading-history', async (req: Request, res: Response) => {
     if (!barcode || !plant) {
       return res.status(400).json({ message: 'barcode and plant are required' });
     }
+    const productIdRaw = parseInt(String(req.query.productId ?? ''), 10);
+    // Two products can share a barcode (65 g / 60 g): the history of a stock line is that PRODUCT's entries only.
+    const productId = Number.isFinite(productIdRaw) ? productIdRaw : null;
 
     const allowed = getUserPlants(req.user);
     if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
@@ -1645,9 +1656,10 @@ router.get('/reports/loading-history', async (req: Request, res: Response) => {
       FROM loading_scan_events e
       LEFT JOIN proforma_slips ps ON ps.order_number = e.order_number
       WHERE LOWER(e.barcode) = LOWER($1) AND LOWER(e.plant) = LOWER($2)
+        AND ($3::int IS NULL OR e.product_id = $3::int OR (e.product_id IS NULL AND (SELECT COUNT(*) FROM products pp WHERE LOWER(TRIM(pp.barcode)) = LOWER(TRIM($1))) <= 1))
       ORDER BY e.scanned_at DESC
       LIMIT 500
-    `, [barcode, plant]);
+    `, [barcode, plant, productId]);
 
     res.json({ items: rows });
   } catch (error) {
@@ -1669,6 +1681,9 @@ router.get('/reports/adjust-history', async (req: Request, res: Response) => {
     if (!barcode || !plant) {
       return res.status(400).json({ message: 'barcode and plant are required' });
     }
+    const productIdRaw = parseInt(String(req.query.productId ?? ''), 10);
+    // Two products can share a barcode (65 g / 60 g): the history of a stock line is that PRODUCT's entries only.
+    const productId = Number.isFinite(productIdRaw) ? productIdRaw : null;
 
     const allowed = getUserPlants(req.user);
     if (allowed !== null && !allowed.includes(plant.toLowerCase())) {
@@ -1688,6 +1703,7 @@ router.get('/reports/adjust-history', async (req: Request, res: Response) => {
         FROM stock_v2_ledger sl
         JOIN stock_v2_lines ln ON ln.id = sl.line_id
         WHERE LOWER(TRIM(ln.barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(ln.plant)) = LOWER(TRIM($2))
+          AND ($3::int IS NULL OR ln.product_id = $3::int OR (ln.product_id IS NULL AND (SELECT COUNT(*) FROM products pp WHERE LOWER(TRIM(pp.barcode)) = LOWER(TRIM($1))) <= 1))
 
         UNION ALL
 
@@ -1699,10 +1715,11 @@ router.get('/reports/adjust-history', async (req: Request, res: Response) => {
         FROM loading_scan_events e
         WHERE e.is_adjust = true
           AND LOWER(TRIM(e.barcode)) = LOWER(TRIM($1)) AND LOWER(TRIM(e.plant)) = LOWER(TRIM($2))
+          AND ($3::int IS NULL OR e.product_id = $3::int OR (e.product_id IS NULL AND (SELECT COUNT(*) FROM products pp WHERE LOWER(TRIM(pp.barcode)) = LOWER(TRIM($1))) <= 1))
       ) adjustments
       ORDER BY "at" DESC
       LIMIT 500
-    `, [barcode, plant]);
+    `, [barcode, plant, productId]);
 
     res.json({ items: rows });
   } catch (error) {

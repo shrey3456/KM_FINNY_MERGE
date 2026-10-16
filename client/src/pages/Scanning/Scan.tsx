@@ -106,6 +106,8 @@ type OsScanItem = {
 
 type MvItem = {
   id: number; barcode: string | null; itemName: string | null;
+  // The product of this line (two products can share a barcode: 65 g / 60 g).
+  productId?: number | null;
   sapCode: string | null; quantity: number | null; expectedPallets: number | null;
   scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
   lastScannedAt?: string | null;
@@ -119,6 +121,7 @@ type MvFile = {
 type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
 type MvMergedItem = {
   barcode: string | null; itemName: string | null; sapCode: string | null;
+  productId?: number | null;
   quantity: number; scannedQty: number; extraQty: number; expectedPallets: number | null;
   itemsPerPallet: number;
   _files: string[]; _isExtra: boolean;
@@ -913,7 +916,7 @@ export default function ScanOrderPage() {
   });
   const osGroupSessionIds = osGroupSessionIdsQuery.data?.sessionIds ?? (activeOrderScanSession ? [activeOrderScanSession.id] : []);
 
-  type OsExtraRow = { barcode: string; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null; partIndexes: number[] };
+  type OsExtraRow = { barcode: string; productId?: number | null; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null; partIndexes: number[] };
   const osExtrasQuery = useQuery<OsExtraRow[]>({
     queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"],
     queryFn: () =>
@@ -1943,11 +1946,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // all of them (not just one file), matching what "history of this item in this order" means.
   const mvSessionIds = (mvQuery.data?.files ?? []).map((f) => f.sessionId);
   const mvHistoryQuery = useQuery<{ items: MvHistoryEvent[] }>({
-    queryKey: ["/api/order-import/master-view/item-history", osHistoryItem?.barcode, osGroupSessionIds.join(",")],
+    queryKey: ["/api/order-import/master-view/item-history", osHistoryItem?.barcode, osHistoryItem?.productId ?? null, osGroupSessionIds.join(",")],
     queryFn: () =>
       apiRequest(
         "GET",
-        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(osHistoryItem!.barcode!)}&sessionIds=${osGroupSessionIds.join(",")}`,
+        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(osHistoryItem!.barcode!)}&sessionIds=${osGroupSessionIds.join(",")}${osHistoryItem!.productId != null ? `&productId=${osHistoryItem!.productId}` : ""}`,
       ).then((r) => r.json()),
     enabled: !!osHistoryItem?.barcode && osGroupSessionIds.length > 0,
   });
@@ -1975,7 +1978,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // Stable per-row id for the item-history expansion — barcode is already the merge/dedup key
   // (see allMvItems above), so it's unique on its own; "empty-box" covers the one synthetic
   // row that has barcode: null.
-  const mvRowKey = (item: MvMergedItem) => item.barcode ?? "empty-box";
+  const mvRowKey = (item: MvMergedItem) => (item.barcode ? `${item.barcode}|${item.productId ?? ""}` : "empty-box");
 
   // Inline history panel — same content whether it renders as a DataTable expanded row
   // (desktop) or a plain <tr> below the clicked row (mobile custom table). Reads mvHistoryItem/
@@ -2133,7 +2136,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     mvData.files.forEach((f) => {
       f.items.forEach((item) => {
         // Two products can share a barcode (65 g / 60 g): each is its own Master View row.
-        const key = (item.barcode ? `${item.barcode.trim().toLowerCase()}|${(item as any).productId ?? ""}` : "")
+        const key = (item.barcode ? `${item.barcode.trim().toLowerCase()}|${item.productId ?? ""}` : "")
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
@@ -2142,7 +2145,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           // isn't known until the accumulation loop below finishes, so that fallback is
           // applied in one pass over `merged` further down instead of here.
           g = {
-            barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
+            barcode: item.barcode, productId: item.productId ?? null, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
             itemsPerPallet: resolvePackSizeForPlant(normalize(item.barcode ?? item.itemName ?? ""), mvPlant),
             _files: [], _isExtra: true, _lastScannedAt: null,
@@ -2718,13 +2721,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // line backing them; osRowState's own doneQty (effScanned + extra) still correctly shows
     // the physical qty received via the Extra column.
     const osRealItems = osItemsQuery.data ?? [];
+    // An extra belongs to a CSV row when the barcode AND product match (an older extra with no product matches any row of its barcode).
+    const osMatchedLines = new Set(osRealItems.map((i) => `${normalize(i.barcode ?? "")}|${i.productId ?? ""}`));
     const osMatchedBarcodes = new Set(osRealItems.map((i) => normalize(i.barcode ?? "")));
     const osExtraOnlyItems: OsScanItem[] = (osExtrasQuery.data ?? [])
-      .filter((e) => e.barcode && !osMatchedBarcodes.has(normalize(e.barcode)))
+      .filter((e) => e.barcode && (e.productId == null ? !osMatchedBarcodes.has(normalize(e.barcode)) : !osMatchedLines.has(`${normalize(e.barcode)}|${e.productId}`)))
       .map((e, idx) => ({
         id: -1000 - idx,
         sessionId: activeOrderScanSession.id,
         barcode: e.barcode,
+        productId: e.productId ?? null,
         itemName: e.itemName,
         sapCode: null,
         expectedQty: 0,
@@ -2794,12 +2800,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // CSV Items table and the Extra-pallets total below. extraPartIndexesByBarcode carries which
     // part(s) each barcode's extra actually happened on, so a "from Part X" label can be shown
     // when it's not the part you're currently looking at.
-    const extraByBarcode = new Map(
-      (osExtrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.totalQty ?? 0]),
+    // Keyed by barcode AND product - an extra of the 65 g is not an extra of the 60 g that shares its barcode.
+    const extraKey = (barcode: string | null | undefined, productId?: number | null) => `${normalize(barcode ?? "")}|${productId ?? ""}`;
+    const extraByLine = new Map(
+      (osExtrasQuery.data ?? []).map((e) => [extraKey(e.barcode, e.productId), e.totalQty ?? 0]),
     );
-    const extraPartIndexesByBarcode = new Map(
-      (osExtrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.partIndexes ?? []]),
+    const extraPartsByLine = new Map(
+      (osExtrasQuery.data ?? []).map((e) => [extraKey(e.barcode, e.productId), e.partIndexes ?? []]),
     );
+    const extraOf = (item: { barcode: string | null; productId?: number | null }) => extraByLine.get(extraKey(item.barcode, item.productId)) ?? extraByLine.get(extraKey(item.barcode)) ?? 0;
+    const extraPartsOf = (item: { barcode: string | null; productId?: number | null }) => extraPartsByLine.get(extraKey(item.barcode, item.productId)) ?? extraPartsByLine.get(extraKey(item.barcode)) ?? [];
     const currentPartIndex = osGroupCreditsQuery.data?.partIndex ?? null;
 
     // Per-row derived values shared by the CSV Items columns and the row tint.
@@ -2812,8 +2822,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       const credit = osCreditFor(item);
       const exp = item.expectedQty ?? 0;
       const effScanned = (item.totalScannedQty ?? 0) + (credit?.creditedQty ?? 0);
-      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-      const extraPartIndexes = extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [];
+      const extra = extraOf(item);
+      const extraPartIndexes = extraPartsOf(item);
       // Only worth labeling when some of this barcode's extra happened on a DIFFERENT part
       // than the one currently open — an extra scanned on this same part needs no "from Part
       // X" note, that's just... this part.
@@ -2863,7 +2873,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osKioskTotals = sumKioskTotals(osVisible, (item) => {
       const exp = item.expectedQty ?? 0;
       const effScanned = (item.totalScannedQty ?? 0) + (osCreditFor(item)?.creditedQty ?? 0);
-      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+      const extra = extraOf(item);
       return {
         exp,
         done: effScanned + extra,
@@ -3768,8 +3778,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         const creditQty = credit?.creditedQty ?? 0;
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
-                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-                        const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+                        const extra      = extraOf(item);
+                        const extraFromOtherParts = (extraPartsOf(item))
                           .filter((p) => p !== currentPartIndex);
                         // Received = full physical count (order-matched + credit, plus extra) —
                         // matches Master View's convention. See osRowState's comment above.
@@ -3891,8 +3901,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         // Received below (full physical count) — same convention as Master View.
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
-                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-                        const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+                        const extra      = extraOf(item);
+                        const extraFromOtherParts = (extraPartsOf(item))
                           .filter((p) => p !== currentPartIndex);
                         const scanned    = effScanned + extra;
                         const remaining  = Math.max(0, exp - effScanned);

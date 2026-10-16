@@ -1351,6 +1351,9 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
   try {
     const barcode = String(req.query.barcode ?? '').trim();
     const sessionIdsParam = String(req.query.sessionIds ?? '').trim();
+    // Two products can share a barcode (65 g / 60 g): the history of a clicked row is that PRODUCT's entries only.
+    const productIdRaw = parseInt(String(req.query.productId ?? ''), 10);
+    const productId = Number.isFinite(productIdRaw) ? productIdRaw : null;
     if (!barcode || !sessionIdsParam) {
       return res.status(400).json({ message: 'barcode and sessionIds are required' });
     }
@@ -1380,8 +1383,13 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
       FROM order_scan_events ose
       JOIN order_import_sessions ois ON ois.id = ose.session_id
       WHERE ose.session_id = ANY($1::int[]) AND LOWER(ose.barcode) = LOWER($2)
+        AND ($3::int IS NULL
+             OR ose.product_id = $3::int
+             -- an older entry with no product belongs to the barcode's only product
+             OR (ose.product_id IS NULL AND (SELECT COUNT(DISTINCT osi.product_id) FROM order_scan_items osi
+                   WHERE osi.session_id = ANY($1::int[]) AND LOWER(osi.barcode) = LOWER($2) AND osi.product_id IS NOT NULL) <= 1))
       ORDER BY ose.scanned_at DESC
-    `, [allowedSessionIds, barcode]);
+    `, [allowedSessionIds, barcode, productId]);
 
     res.json({ items: rows });
   } catch (err) {

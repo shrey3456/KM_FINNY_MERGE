@@ -30,7 +30,7 @@ import { type FilterableColumn, type FilterCondition, isConditionEmpty, matchAll
 // from, Purchase and Sale are the day-wise figures with their Extra inside, Opening and Closing are added up for the period you pick.
 
 type Row = {
-  id: number | null; plant: string; state: string | null; barcode: string; itemName: string;
+  id: number | null; productId?: number | null; plant: string; state: string | null; barcode: string; itemName: string;
   sapCode: string | null; sapIsFallback: boolean; srNo: string | null; brand: string | null; category: string | null;
   palletSize: number | null; stock: number;
   openingStock: number; purchaseQty: number; extraPurchaseQty: number; saleQty: number; extraSaleQty: number;
@@ -710,10 +710,11 @@ function EntriesPanel({ row, dateSelected }: { row: Row; dateSelected: boolean }
   const newest = (it: any) => +new Date(it.arrivedAt ?? it.scannedAt ?? it.at ?? 0);
   // One history per plant, merged newest first — what the Stock Overview does for a combined (all plants / state) row.
   const hist = (name: string, forTab: string) => useQuery<Hist>({
-    queryKey: [`/api/scan-sessions/reports/${name}`, row.barcode, plantsKey],
+    queryKey: [`/api/scan-sessions/reports/${name}`, row.barcode, plantsKey, parts.map((p) => p.productId ?? "").join(",")],
     queryFn: async () => {
-      const per = await Promise.all(plants.map((plant) =>
-        apiRequest("GET", `/api/scan-sessions/reports/${name}?barcode=${encodeURIComponent(row.barcode)}&plant=${encodeURIComponent(plant)}`, undefined, false, true)
+      // Each plant's own line carries its product - two products can share a barcode (65 g / 60 g), and a line's history is its own.
+      const per = await Promise.all(parts.map(({ plant, productId }) =>
+        apiRequest("GET", `/api/scan-sessions/reports/${name}?barcode=${encodeURIComponent(row.barcode)}&plant=${encodeURIComponent(plant)}${productId != null ? `&productId=${productId}` : ""}`, undefined, false, true)
           .then((d: Hist) => d.items.map((it) => ({ ...it, plant })))));
       return { items: per.flat().sort((a, b) => newest(b) - newest(a)) };
     },

@@ -49,6 +49,8 @@ type SessionOption = {
 // Matches GET /api/order-scan/sessions/:id/items.
 type OsScanItem = {
   id: number; sessionId: number;
+  // The product this line means - two products can share a barcode (65 g / 60 g).
+  productId?: number | null;
   barcode: string | null; itemName: string | null; sapCode: string | null;
   expectedQty: number; itemsPerPallet: number;
   // The item's real, defined GJ/MP PLT pack size (0 when not configured) — informational only,
@@ -60,11 +62,12 @@ type OsScanItem = {
 };
 
 // Matches GET /api/order-scan/sessions/:id/extras (grouped, un-voided only).
-type ExtraRow = { barcode: string; itemName: string | null; totalQty: number; partIndexes: number[] };
+type ExtraRow = { barcode: string; productId?: number | null; itemName: string | null; totalQty: number; partIndexes: number[] };
 
 // One raw item row from GET /api/order-import/master-view's files[].items — a single CSV
 // part's line for one barcode, before merging across parts (see MvMergedItem below).
 type MvRawItem = {
+  productId?: number | null;
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
   quantity: number | null; scannedQty: number | null; isExtra: boolean; lastScannedAt: string | null;
   // The item's real GJ/MP PLT pack size (0/absent when not configured) — same informational
@@ -84,6 +87,7 @@ type MvResponse = { date: string; totalFiles: number; totalRows: number; files: 
 // server already includes those as isExtra rows — see order-import.ts's "Fold in extra scans"
 // comment), permanently, regardless of how long ago it was scanned.
 type MvMergedItem = {
+  productId?: number | null;
   barcode: string | null; itemName: string | null; sapCode: string | null;
   quantity: number; scannedQty: number; extraQty: number; itemsPerPallet: number;
   isExtraOnly: boolean; lastScannedAt: string | null;
@@ -493,12 +497,12 @@ export default function ScanViewer() {
     mvQuery.data.files.forEach((f) => {
       f.items.forEach((item) => {
         // Two products can share a barcode (65 g / 60 g): each is its own Master View row.
-        const key = (item.barcode ? `${item.barcode.trim().toLowerCase()}|${(item as any).productId ?? ""}` : "")
+        const key = (item.barcode ? `${item.barcode.trim().toLowerCase()}|${item.productId ?? ""}` : "")
           || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
           g = {
-            barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
+            barcode: item.barcode, productId: item.productId ?? null, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, itemsPerPallet: 0,
             isExtraOnly: true, lastScannedAt: null, srNo: null,
           };
@@ -536,11 +540,15 @@ export default function ScanViewer() {
     queryFn: () => apiRequest("GET", `/api/order-scan/sessions/${sessionId}/extras`).then((r) => r.json()),
     enabled: sessionId != null,
   });
-  const extraByBarcode = new Map((extrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.totalQty ?? 0]));
+  // Keyed by barcode AND product - an extra of the 65 g is not an extra of the 60 g that shares its barcode.
+  const extraKey = (barcode: string | null | undefined, productId?: number | null) => `${normalize(barcode ?? "")}|${productId ?? ""}`;
+  const extraByLine = new Map((extrasQuery.data ?? []).map((e) => [extraKey(e.barcode, e.productId), e.totalQty ?? 0]));
   // Which part(s) each barcode's extra actually happened on (the endpoint now spans the whole
   // order group, not just this one part) — used to label an extra "from Part X" when it isn't
   // this part's own, same as the Scan tab.
-  const extraPartIndexesByBarcode = new Map((extrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.partIndexes ?? []]));
+  const extraPartsByLine = new Map((extrasQuery.data ?? []).map((e) => [extraKey(e.barcode, e.productId), e.partIndexes ?? []]));
+  const extraOf = (item: { barcode: string | null; productId?: number | null }) => extraByLine.get(extraKey(item.barcode, item.productId)) ?? extraByLine.get(extraKey(item.barcode)) ?? 0;
+  const extraPartsOf = (item: { barcode: string | null; productId?: number | null }) => extraPartsByLine.get(extraKey(item.barcode, item.productId)) ?? extraPartsByLine.get(extraKey(item.barcode)) ?? [];
   const currentPartIndex = sessionOptions.find((s) => s.id === sessionId)?.partIndex ?? null;
 
   // Every part sharing this plant + order date — history spans the whole order, not just the
@@ -769,11 +777,11 @@ export default function ScanViewer() {
 
   const [historyItem, setHistoryItem] = useState<OsScanItem | null>(null);
   const historyQuery = useQuery<{ items: HistoryEvent[] }>({
-    queryKey: ["/api/order-import/master-view/item-history", "scan-viewer", historyItem?.barcode, groupSessionIds.join(",")],
+    queryKey: ["/api/order-import/master-view/item-history", "scan-viewer", historyItem?.barcode, historyItem?.productId ?? null, groupSessionIds.join(",")],
     queryFn: () =>
       apiRequest(
         "GET",
-        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(historyItem!.barcode!)}&sessionIds=${groupSessionIds.join(",")}`,
+        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(historyItem!.barcode!)}&sessionIds=${groupSessionIds.join(",")}${historyItem!.productId != null ? `&productId=${historyItem!.productId}` : ""}`,
       ).then((r) => r.json()),
     enabled: !!historyItem?.barcode && groupSessionIds.length > 0,
   });
@@ -835,13 +843,15 @@ export default function ScanViewer() {
   // Exp/Received left at 0 since there's no CSV line backing them; rowState's own `received`
   // (scanned + extra) still correctly shows the physical qty via the Extra column.
   const realItems = itemsQuery.data ?? [];
+  const matchedLines = new Set(realItems.map((i) => `${normalize(i.barcode ?? "")}|${i.productId ?? ""}`));
   const matchedBarcodes = new Set(realItems.map((i) => normalize(i.barcode ?? "")));
   const extraOnlyItems: OsScanItem[] = (extrasQuery.data ?? [])
-    .filter((e) => e.barcode && !matchedBarcodes.has(normalize(e.barcode)))
+    .filter((e) => e.barcode && (e.productId == null ? !matchedBarcodes.has(normalize(e.barcode)) : !matchedLines.has(`${normalize(e.barcode)}|${e.productId}`)))
     .map((e, idx) => ({
       id: -1000 - idx,
       sessionId: sessionId ?? 0,
       barcode: e.barcode,
+      productId: e.productId ?? null,
       itemName: e.itemName,
       sapCode: null,
       expectedQty: 0,
@@ -857,8 +867,8 @@ export default function ScanViewer() {
   const rowState = (item: OsScanItem) => {
     const exp = item.expectedQty ?? 0;
     const scanned = item.totalScannedQty ?? 0;
-    const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-    const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+    const extra = extraOf(item);
+    const extraFromOtherParts = (extraPartsOf(item))
       .filter((p) => p !== currentPartIndex);
     // Synthetic extra-only rows (barcodes scanned as Extra that aren't on any CSV — see
     // extraOnlyItems above) have expectedQty 0, so a status badge that only checks
@@ -903,7 +913,7 @@ export default function ScanViewer() {
   (extrasQuery.data ?? []).forEach((e) => {
     const qty = e.totalQty ?? 0;
     totals.extra += qty;
-    const match = items.find((i) => normalize(i.barcode ?? "") === normalize(e.barcode));
+    const match = items.find((i) => normalize(i.barcode ?? "") === normalize(e.barcode) && (e.productId == null || i.productId == null || i.productId === e.productId));
     const ipp = match?.itemsPerPallet ?? 0;
     if (ipp > 0) totals.palletsExtra += qty / ipp;
   });
@@ -2563,7 +2573,7 @@ export default function ScanViewer() {
                 // A stable id for every row. The old Math.random() fallback gave rows without a barcode a
                 // new id on every render, so React rebuilt them each time — including on every mouse
                 // move while dragging a column edge.
-                getRowId={(row) => row.barcode ?? `name:${row.itemName ?? ""}`}
+                getRowId={(row) => (row.barcode ? `${row.barcode}|${row.productId ?? ""}` : `name:${row.itemName ?? ""}`)}
                 enableZebraStripes
                 rowClassName={(row) => (row.isExtraOnly ? "bg-orange-50/40" : undefined)}
                 emptyState={allMvItems.length === 0 ? "No items in this order." : "No items match your filters."}

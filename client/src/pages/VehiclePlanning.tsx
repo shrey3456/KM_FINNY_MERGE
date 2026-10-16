@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  ChevronsRight, ChevronUp, History, Loader2, RefreshCw, Search, Truck,
+  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, RefreshCw, Search, Truck,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,8 @@ type CurrentOrder = {
   orderNumber: string; partyName: string | null; plant: string | null;
   orderDate: string | null; notionStatus: string | null; tripCompletesOn: string | null;
   vehicleMismatch: boolean; mismatchProformaVehicleNumber: string | null;
+  // Notion has this vehicle on this order but our system has no slip for it (Vehicle Planning never creates one by itself).
+  notInSystem?: boolean;
 } | null;
 
 type VehicleRow = {
@@ -95,6 +97,7 @@ export default function VehiclePlanning() {
   const [assignDate, setAssignDate] = useState(() => format(new Date(), "yyyy-MM-dd"));
   const [assignSearch, setAssignSearch] = useState("");
   const [mismatchTarget, setMismatchTarget] = useState<VehicleRow | null>(null);
+  const [fetchSlipTarget, setFetchSlipTarget] = useState<VehicleRow | null>(null);
   const [historyTarget, setHistoryTarget] = useState<VehicleRow | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [showNoHistory, setShowNoHistory] = useState(false);
@@ -238,16 +241,32 @@ export default function VehiclePlanning() {
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/vehicle-planning/sync");
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to sync from Notion");
-      return res.json() as Promise<{ syncedVehicles: number; mismatches: number }>;
+      return res.json() as Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number }>;
     },
     onSuccess: (result) => {
       toast({
-        title: "Synced from Notion",
-        description: `${result.syncedVehicles} vehicle(s) checked${result.mismatches > 0 ? ` · ${result.mismatches} vehicle mismatch(es) found` : ""}`,
+        title: "Refreshed from Notion",
+        description: `${result.syncedVehicles} vehicle(s) checked${result.mismatches > 0 ? ` · ${result.mismatches} vehicle mismatch(es) found` : ""}${result.notInSystem > 0 ? ` · ${result.notInSystem} order(s) assigned in Notion but not in our system` : ""}`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
     },
     onError: (err: any) => toast({ title: "Sync failed", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
+  // Notion has this vehicle on an order that has no slip in our system: only when the planner confirms is that ONE slip fetched from Notion.
+  const fetchSlipMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/vehicle-planning/fetch-slip", { orderNumber: fetchSlipTarget!.currentOrder!.orderNumber });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to fetch the slip");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Slip added to our system", description: `Order #${fetchSlipTarget?.currentOrder?.orderNumber} is now in Proforma Slips.` });
+      setFetchSlipTarget(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/available-orders"] });
+    },
+    onError: (err: any) => toast({ title: "Could not fetch the slip", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   const settingsMutation = useMutation({
@@ -386,7 +405,7 @@ export default function VehiclePlanning() {
           disabled={syncMutation.isPending}
         >
           <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
-          {syncMutation.isPending ? "Syncing…" : "Sync from Notion"}
+          {syncMutation.isPending ? "Refreshing…" : "Refresh from Notion"}
         </Button>
 
         <Popover open={filterOpen} onOpenChange={setFilterOpen}>
@@ -680,6 +699,16 @@ export default function VehiclePlanning() {
                       title={c.key === "orderNumber" ? "Click for this vehicle's order history" : (c.value ?? undefined)}
                       onClick={() => setHistoryTarget(v)}
                     >
+                      {c.key === "orderNumber" && v.currentOrder?.notInSystem && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); if (canWrite) setFetchSlipTarget(v); }}
+                          title={`Notion has ${v.vehicleNumber} on this order, but the slip is not in our system${canWrite ? " — click to fetch it" : ""}`}
+                          className="shrink-0 text-sky-600 hover:text-sky-700"
+                        >
+                          <DatabaseZap className="h-3 w-3" />
+                        </button>
+                      )}
                       {c.key === "orderNumber" && v.currentOrder?.vehicleMismatch && (
                         <button
                           type="button"
@@ -815,7 +844,7 @@ export default function VehiclePlanning() {
 
       {/* Stays open until the Notion sync has finished; no progress count is available for this
           one, so it just says it's running. */}
-      <SyncProgressDialog open={syncMutation.isPending} title="Syncing from Notion…" />
+      <SyncProgressDialog open={syncMutation.isPending} title="Refreshing from Notion…" />
 
       <Dialog open={!!assignTarget} onOpenChange={(open) => { if (!open) setAssignTarget(null); }}>
         <DialogContent className="sm:max-w-md">
@@ -860,6 +889,27 @@ export default function VehiclePlanning() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setAssignTarget(null)} disabled={assignMutation.isPending}>
               Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!fetchSlipTarget} onOpenChange={(open) => { if (!open) setFetchSlipTarget(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-1.5">
+              <DatabaseZap className="h-4 w-4 text-sky-600" /> Order not in our system
+            </DialogTitle>
+            <DialogDescription>
+              Notion has vehicle {fetchSlipTarget?.vehicleNumber} on order #{fetchSlipTarget?.currentOrder?.orderNumber}
+              {fetchSlipTarget?.currentOrder?.partyName ? ` (${fetchSlipTarget.currentOrder.partyName})` : ""}, but this order has no proforma slip in our system.
+              Fetch just this one slip from Notion so it can be used here?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="outline" disabled={fetchSlipMutation.isPending} onClick={() => setFetchSlipTarget(null)}>Not now</Button>
+            <Button disabled={fetchSlipMutation.isPending} onClick={() => fetchSlipMutation.mutate()}>
+              {fetchSlipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Fetch this slip"}
             </Button>
           </DialogFooter>
         </DialogContent>

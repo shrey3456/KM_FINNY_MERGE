@@ -1081,6 +1081,9 @@ export type VehiclePlanningOrderEntry = {
   state: string | null;
   vehicleMismatch: boolean;
   mismatchProformaVehicleNumber: string | null;
+  // Notion says this vehicle carries this order, but the order has no proforma slip in OUR system. Vehicle Planning never creates a slip by itself;
+  // the planner fetches it on purpose (POST /vehicle-planning/fetch-slip), which clears this flag.
+  notInSystem?: boolean;
   // The real date a sync FIRST observed this order's status go terminal (DISPATCHED/DELIVERED/
   // etc) — distinct from tripCompletesOn, which is Notion's own formula ESTIMATE of when the
   // trip would be free. Set once, on the sync that first sees it terminal, and never overwritten
@@ -1093,6 +1096,8 @@ export const vehiclePlanningState = pgTable("vehicle_planning_state", {
   vehicleId: integer("vehicle_id").references(() => vehicleInfo.id).notNull().unique(),
   orderHistory: jsonb("order_history").$type<VehiclePlanningOrderEntry[]>().notNull().default([]),
   lastSyncedAt: timestamp("last_synced_at"),
+  // Set after the vehicle's first sync, so a vehicle added later (another company, a new Vehicle Master row) gets its own first pass.
+  setupDone: boolean("setup_done").notNull().default(false),
 });
 
 export type VehiclePlanningStateRow = typeof vehiclePlanningState.$inferSelect;
