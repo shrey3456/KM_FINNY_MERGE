@@ -54,7 +54,7 @@ export async function getFinnyStatusOptions(): Promise<FinnyStatusOption[]> {
   }
 }
 
-async function findOrderPageIds(notion: Client, orderDatabaseId: string, orderNumber: string): Promise<string[]> {
+export async function findOrderPageIds(notion: Client, orderDatabaseId: string, orderNumber: string): Promise<string[]> {
   const response = await notion.databases.query({
     database_id: orderDatabaseId,
     filter: { property: 'Order No. :', rich_text: { equals: orderNumber } },
@@ -201,10 +201,12 @@ export type NotionSyncOutcome = {
   state: 'ok' | 'retrying' | 'skipped' | 'failed';
   message: string;
 };
-type NotionWanted = { status?: string; vehiclePageId?: string };
+// vehiclePageId / driverPageId SET the relation; clearVehicle / clearDriver EMPTY it (Vehicle Planning's "remove the vehicle").
+type NotionWanted = { status?: string; vehiclePageId?: string; clearVehicle?: boolean; driverPageId?: string; clearDriver?: boolean };
 type NotionWho = { userCode?: string | null; userName?: string | null };
 
 const VEHICLE_RELATION_PROPERTY = 'Vehi  No. :'; // two spaces — that is how the Order database names it
+const DRIVER_RELATION_PROPERTY = 'Driver :';
 // A status further along than Loading / Ready for Dispatch — never pushed back by the app.
 const LATER_STAGES = new Set(['DISPATCHED', 'DELIVERED', 'UNLOADING', 'SHORTAGE', 'CANCELLED']);
 const NOTION_MAX_TRIES = 5;
@@ -241,6 +243,16 @@ async function tryNotionOnce(orderNumber: string, want: NotionWanted): Promise<T
       if (!(currentIds.length === 1 && currentIds[0] === compactId(want.vehiclePageId))) {
         updates[VEHICLE_RELATION_PROPERTY] = { relation: [{ id: want.vehiclePageId }] };
       }
+    } else if (want.clearVehicle) {
+      if ((page.properties?.[VEHICLE_RELATION_PROPERTY]?.relation ?? []).length > 0) updates[VEHICLE_RELATION_PROPERTY] = { relation: [] };
+    }
+    if (want.driverPageId) {
+      const currentIds: string[] = (page.properties?.[DRIVER_RELATION_PROPERTY]?.relation ?? []).map((r: any) => compactId(r.id));
+      if (!(currentIds.length === 1 && currentIds[0] === compactId(want.driverPageId))) {
+        updates[DRIVER_RELATION_PROPERTY] = { relation: [{ id: want.driverPageId }] };
+      }
+    } else if (want.clearDriver) {
+      if ((page.properties?.[DRIVER_RELATION_PROPERTY]?.relation ?? []).length > 0) updates[DRIVER_RELATION_PROPERTY] = { relation: [] };
     }
 
     if (Object.keys(updates).length > 0) {
@@ -252,9 +264,13 @@ async function tryNotionOnce(orderNumber: string, want: NotionWanted): Promise<T
       }
       if (updates[VEHICLE_RELATION_PROPERTY]) {
         const ids: string[] = (after.properties?.[VEHICLE_RELATION_PROPERTY]?.relation ?? []).map((r: any) => compactId(r.id));
-        if (!(ids.length === 1 && ids[0] === compactId(want.vehiclePageId!))) {
-          return { ok: false, reason: 'Notion did not keep the vehicle change' };
-        }
+        const wrong = want.vehiclePageId ? !(ids.length === 1 && ids[0] === compactId(want.vehiclePageId)) : ids.length > 0;
+        if (wrong) return { ok: false, reason: 'Notion did not keep the vehicle change' };
+      }
+      if (updates[DRIVER_RELATION_PROPERTY]) {
+        const ids: string[] = (after.properties?.[DRIVER_RELATION_PROPERTY]?.relation ?? []).map((r: any) => compactId(r.id));
+        const wrong = want.driverPageId ? !(ids.length === 1 && ids[0] === compactId(want.driverPageId)) : ids.length > 0;
+        if (wrong) return { ok: false, reason: 'Notion did not keep the driver change' };
       }
     }
   }
@@ -326,7 +342,11 @@ export async function syncOrderToNotion(orderNumber: string, want: NotionWanted,
   try {
     const previous = pendingNotionSyncs.get(orderNumber);
     if (previous?.timer) clearTimeout(previous.timer);
-    const entry: PendingNotionSync = { want: { ...(previous?.want ?? {}), ...want }, tries: 0, who };
+    const merged: NotionWanted = { ...(previous?.want ?? {}), ...want };
+    // A later "set" cancels an earlier "clear" of the same relation, and the other way round.
+    if (want.vehiclePageId) merged.clearVehicle = false; else if (want.clearVehicle) delete merged.vehiclePageId;
+    if (want.driverPageId) merged.clearDriver = false; else if (want.clearDriver) delete merged.driverPageId;
+    const entry: PendingNotionSync = { want: merged, tries: 0, who };
     pendingNotionSyncs.set(orderNumber, entry);
     return await runNotionAttempt(orderNumber, entry);
   } catch (error) {

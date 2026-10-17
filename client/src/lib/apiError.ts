@@ -66,3 +66,11 @@ export function matchNoSapConfirm(error: unknown): string[] | null {
     return parsed?.code === 'NO_SAP_CONFIRM' && Array.isArray(parsed.warnings) ? parsed.warnings : null;
   } catch { return null; }
 }
+
+// The JSON body of an apiRequest error ("STATUS: {json}"), or null when it was not JSON - for the few places that act on a `code` the server sends.
+export function parseApiErrorBody(error: unknown): any | null {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  const idx = raw.indexOf(": ");
+  if (idx === -1) return null;
+  try { return JSON.parse(raw.slice(idx + 2)); } catch { return null; }
+}

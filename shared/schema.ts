@@ -1087,6 +1087,20 @@ export type VehiclePlanningOrderEntry = {
   state: string | null;
   vehicleMismatch: boolean;
   mismatchProformaVehicleNumber: string | null;
+  // Set by a person, never by a sync (a Refresh keeps them): the real arrival day (the Arrived button), and the expected last day when the planner
+  // stretched the bar. The vehicle's last busy day is the arrival, else the expected end, else the planned end (order date + trip days - 1).
+  arrivedOn?: string | null;
+  arrivedByCode?: string | null;
+  arrivedByName?: string | null;
+  arrivedAt?: string | null;
+  arrivalNote?: string | null;
+  expectedEnd?: string | null;
+  expectedEndByCode?: string | null;
+  expectedEndAt?: string | null;
+  // The driver's Notion page (the "Driver :" relation), set when the planner picks a driver on Assign / Change.
+  driverNotionId?: string | null;
+  // Set when the last push to Notion did not go through (the page shows "Notion not updated" and a Retry button); cleared when it does.
+  notionNote?: string | null;
   // Notion says this vehicle carries this order, but the order has no proforma slip in OUR system. Vehicle Planning never creates a slip by itself;
   // the planner fetches it on purpose (POST /vehicle-planning/fetch-slip), which clears this flag.
   notInSystem?: boolean;
