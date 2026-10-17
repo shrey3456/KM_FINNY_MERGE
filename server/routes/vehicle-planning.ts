@@ -7,7 +7,7 @@ import { listNotionDrivers, readNotionOrderInfo } from '../services/vehiclePlann
 import { fetchProformaOrdersFromNotion, writeOrderToDb } from '../services/proformaNotionSync';
 import { syncOrderToNotion, settleNotionSync, watchStatusAfterVehicleChange, type NotionSyncOutcome } from '../services/notionOrderStatusSync';
 import type { VehiclePlanningOrderEntry } from '@shared/schema';
-import { computeVehicleTrips, mergeLocalTripFields, checkArrival, checkExpectedEnd, toDmy, addDays, todayIst } from '../lib/vehicleTrips';
+import { computeVehicleTrips, groupEntries, groupPrimaryOf, mergeLocalTripFields, checkArrival, checkExpectedEnd, toDmy, addDays, todayIst } from '../lib/vehicleTrips';
 
 // Vehicle Planning — a Gantt-style "when is each vehicle free" view over a configurable slice of
 // the fleet, so a planner can see which vehicle to assign a pending order to.
@@ -527,7 +527,16 @@ async function saveHistory(vehicleId: number, history: VehiclePlanningOrderEntry
 const who = (req: Request): { userCode?: string; userName?: string } => { const u = req.user as any; return { userCode: u?.userCode ?? undefined, userName: u?.name ?? u?.username ?? undefined }; };
 const tripsView = (history: VehiclePlanningOrderEntry[]) => { const vt = computeVehicleTrips(history); return { trips: vt.trips, freeFrom: vt.freeFrom, vehicleState: vt.vehicleState, conflicts: vt.conflicts }; };
 
-// POST /api/vehicle-planning/trips/arrival - body { vehicleId, orderNumber, arrivedOn: 'YYYY-MM-DD', note? } records the real arrival; { undo: true } clears it.
+// The orders of a trip (one, or several for a shared load) - what a person records on a trip is written to all of them - and the one that starts first, which the
+// date checks use.
+function tripEntries(history: VehiclePlanningOrderEntry[], orderNumber: string) {
+  const group = groupEntries(history, orderNumber);
+  const first = [...group].sort((a, b) => String(a.orderDate ?? '').localeCompare(String(b.orderDate ?? '')))[0];
+  return { group, first };
+}
+
+// POST /api/vehicle-planning/trips/arrival - body { vehicleId, orderNumber, arrivedOn: 'YYYY-MM-DD', note?, freeSameDay? } records the real arrival; { undo: true } clears it.
+// freeSameDay (default true): the vehicle can go out again on the arrival day itself, so an order starting that day does not clash.
 router.post('/vehicle-planning/trips/arrival', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
   try {
     const vehicleId = Number(req.body?.vehicleId);
@@ -535,26 +544,33 @@ router.post('/vehicle-planning/trips/arrival', requirePageWrite('vehicle-plannin
     if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
     const { history, entry } = await loadTrip(vehicleId, orderNumber);
     if (!entry) return res.status(404).json({ message: 'That trip is not on this vehicle.' });
+    const { group, first } = tripEntries(history, orderNumber);
     const { userCode, userName } = who(req);
     const vehicle = await storage.getVehicleInfo(vehicleId);
+    const orders = group.map((g) => `#${g.orderNumber}`).join(', ');
     if (req.body?.undo === true) {
-      if (!entry.arrivedOn) return res.status(409).json({ message: 'No arrival is recorded for this trip.' });
-      const was = entry.arrivedOn;
-      entry.arrivedOn = null; entry.arrivedByCode = null; entry.arrivedByName = null; entry.arrivedAt = null; entry.arrivalNote = null;
+      const was = group.find((g) => g.arrivedOn)?.arrivedOn;
+      if (!was) return res.status(409).json({ message: 'No arrival is recorded for this trip.' });
+      for (const g of group) { g.arrivedOn = null; g.arrivedByCode = null; g.arrivedByName = null; g.arrivedAt = null; g.arrivalNote = null; g.freeSameDay = null; }
       await saveHistory(vehicleId, history);
-      if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `Arrival of ${vehicle?.vehicleNumber ?? vehicleId} on order #${orderNumber} undone by ${userName ?? userCode} (it was ${was})`, userCode, userName });
+      if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `Arrival of ${vehicle?.vehicleNumber ?? vehicleId} on order ${orders} undone by ${userName ?? userCode} (it was ${was})`, userCode, userName });
       return res.json(tripsView(history));
     }
-    const problem = checkArrival(entry, req.body?.arrivedOn);
+    const problem = checkArrival(first, req.body?.arrivedOn);
     if (problem) return res.status(400).json({ message: problem });
-    entry.arrivedOn = String(req.body.arrivedOn);
-    entry.arrivedByCode = userCode ?? null; entry.arrivedByName = userName ?? null; entry.arrivedAt = new Date().toISOString();
-    entry.arrivalNote = typeof req.body?.note === 'string' && req.body.note.trim() ? req.body.note.trim().slice(0, 300) : null;
+    const note = typeof req.body?.note === 'string' && req.body.note.trim() ? req.body.note.trim().slice(0, 300) : null;
+    const sameDay = req.body?.freeSameDay !== false;
+    const plannedLast = computeVehicleTrips(group).trips[0]?.plannedLastDay ?? String(req.body.arrivedOn);
+    for (const g of group) {
+      g.arrivedOn = String(req.body.arrivedOn);
+      g.arrivedByCode = userCode ?? null; g.arrivedByName = userName ?? null; g.arrivedAt = new Date().toISOString();
+      g.arrivalNote = note; g.freeSameDay = sameDay;
+    }
     await saveHistory(vehicleId, history);
-    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId} marked arrived on ${entry.arrivedOn} for order #${orderNumber} by ${userName ?? userCode}${entry.arrivalNote ? ` — ${entry.arrivalNote}` : ''}`, userCode, userName });
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId} marked arrived on ${req.body.arrivedOn} for order ${orders} by ${userName ?? userCode}${sameDay ? ' (can go out again the same day)' : ''}${note ? ` — ${note}` : ''}`, userCode, userName });
     const view = tripsView(history);
     // Early arrival: the vehicle is free sooner than planned, so say how many orders are waiting for a vehicle.
-    const early = !!view.freeFrom && !!entry.arrivedOn && entry.arrivedOn < (computeVehicleTrips([entry]).trips[0]?.plannedLastDay ?? entry.arrivedOn);
+    const early = !!view.freeFrom && String(req.body.arrivedOn) < plannedLast;
     res.json({ ...view, early, waiting: early && view.freeFrom ? await countWaitingOrders(view.freeFrom) : 0 });
   } catch (error) {
     console.error('Error recording the arrival:', error);
@@ -571,17 +587,18 @@ router.post('/vehicle-planning/trips/expected-end', requirePageWrite('vehicle-pl
     if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
     const { history, entry } = await loadTrip(vehicleId, orderNumber);
     if (!entry) return res.status(404).json({ message: 'That trip is not on this vehicle.' });
+    const { group, first } = tripEntries(history, orderNumber);
     const { userCode, userName } = who(req);
     const vehicle = await storage.getVehicleInfo(vehicleId);
     if (req.body?.expectedEnd == null) {
-      entry.expectedEnd = null; entry.expectedEndByCode = null; entry.expectedEndAt = null;
+      for (const g of group) { g.expectedEnd = null; g.expectedEndByCode = null; g.expectedEndAt = null; }
     } else {
-      const problem = checkExpectedEnd(entry, req.body.expectedEnd);
+      const problem = checkExpectedEnd({ ...first, arrivedOn: group.find((g) => g.arrivedOn)?.arrivedOn ?? null }, req.body.expectedEnd);
       if (problem) return res.status(400).json({ message: problem });
-      entry.expectedEnd = String(req.body.expectedEnd); entry.expectedEndByCode = userCode ?? null; entry.expectedEndAt = new Date().toISOString();
+      for (const g of group) { g.expectedEnd = String(req.body.expectedEnd); g.expectedEndByCode = userCode ?? null; g.expectedEndAt = new Date().toISOString(); }
     }
     await saveHistory(vehicleId, history);
-    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId}: expected last day of order #${orderNumber} ${entry.expectedEnd ? `set to ${entry.expectedEnd}` : 'cleared (back to the planned end)'} by ${userName ?? userCode}`, userCode, userName });
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId}: expected last day of order${group.length > 1 ? 's' : ''} ${group.map((g) => `#${g.orderNumber}`).join(', ')} ${group[0].expectedEnd ? `set to ${group[0].expectedEnd}` : 'cleared (back to the planned end)'} by ${userName ?? userCode}`, userCode, userName });
     res.json(tripsView(history));
   } catch (error) {
     console.error('Error setting the expected end:', error);
@@ -654,7 +671,7 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
       const busy = vt.vehicleState !== 'free';
       const busyUntil = busy && vt.freeFrom ? toDmy(addDays(vt.freeFrom, -1)) : null;
       // The bar still reads tripCompletesOn: give it the real last busy day of this trip (arrival / stretch / plan).
-      const thisTrip = vt.trips.find((x) => x.orderNumber === currentOrder.orderNumber);
+      const thisTrip = vt.trips.find((x) => x.members.some((m) => m.orderNumber === currentOrder.orderNumber));
       const tripCompletesOn = thisTrip ? toDmy(thisTrip.lastBusyDay) : currentOrder.tripCompletesOn;
 
       return {
@@ -841,159 +858,258 @@ async function countWaitingOrders(freeFrom: string): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
-// POST /api/vehicle-planning/assign - body { orderNumber, vehicleId, driverName?, driverPageId?, force? }
+// Takes an order out of a vehicle's history. When it was the PRIMARY of a shared load, the next order of that trip becomes the primary and keeps what was
+// recorded on the trip (arrival, same-day tick, expected end), so the other orders stay together.
+function removeFromHistory(history: VehiclePlanningOrderEntry[], orderNumber: string): VehiclePlanningOrderEntry[] {
+  const leaving = history.find((e) => e.orderNumber === orderNumber);
+  const rest = history.filter((e) => e.orderNumber !== orderNumber);
+  if (!leaving) return rest;
+  const followers = rest.filter((e) => e.sameTripAs === orderNumber);
+  if (followers.length === 0) return rest;
+  const next = [...followers].sort((a, b) => String(a.orderDate ?? '').localeCompare(String(b.orderDate ?? '')))[0];
+  for (const k of ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt'] as const) {
+    if ((next as any)[k] == null && (leaving as any)[k] != null) (next as any)[k] = (leaving as any)[k];
+  }
+  next.sameTripAs = leaving.sameTripAs ?? null;
+  for (const f of followers) if (f !== next) f.sameTripAs = next.orderNumber;
+  return rest;
+}
+
+type AssignInput = { orderNumber: string; vehicleId: number; driverName?: string | null; driverPageId?: string | null; force?: boolean; sameTripAs?: string | null };
+type AssignActor = { userCode?: string; userName?: string; isAdmin: boolean };
+
+// The whole assignment, as a function so "Move all" can run it once per order of a shared trip.
 // Order of work: the date rule -> our slip first (vehicle, driver, who) -> the vehicle's history trip (trip days: Notion, else the party's earlier trip, else 1)
 // -> Notion (vehicle + driver; retried in the background) -> an Activities line. A slip that was on another vehicle leaves that vehicle's history.
+async function performAssign(inp: AssignInput, actor: AssignActor): Promise<{ status: number; body: any }> {
+  const { orderNumber, vehicleId } = inp;
+  const fail = (status: number, body: any) => ({ status, body });
+  // Only a slip that is already in our system can be assigned - Vehicle Planning never creates one.
+  const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+  if (!slip) return fail(404, { message: `Order ${orderNumber} is not in our system. Add its slip first, then assign the vehicle.` });
+
+  const vehicle = await storage.getVehicleInfo(vehicleId);
+  if (!vehicle) return fail(404, { message: 'Vehicle not found' });
+  if (!vehicle.vehicleNumber) return fail(400, { message: 'This vehicle has no vehicle number set in Vehicle Master.' });
+
+  const { userCode, userName } = actor;
+  const previousVehicleId = slip.vehicleInfoId ?? null;
+  const movingVehicle = !!slip.vehicleNumber && (previousVehicleId !== vehicle.id || slip.vehicleNumber !== vehicle.vehicleNumber);
+  if (movingVehicle) {
+    const locked = planningLock(slip);
+    if (locked) return fail(409, { code: 'LOCKED', message: locked });
+  }
+
+  const orderDay = dayOf(slip.orderDate);
+  const history = await loadHistory(vehicle.id);
+  const others = history.filter((e) => e.orderNumber !== orderNumber);
+
+  // A SHARED load: this order rides an existing trip of this vehicle, so the date rule does not apply to it.
+  let joinPrimary: string | null = null;
+  if (inp.sameTripAs) {
+    if (inp.sameTripAs === orderNumber || !others.some((e) => e.orderNumber === inp.sameTripAs)) return fail(400, { message: `Order ${inp.sameTripAs} is not on this vehicle, so it cannot share its trip.` });
+    joinPrimary = groupPrimaryOf(others, inp.sameTripAs);
+    const target = computeVehicleTrips(others).trips.find((t) => t.orderNumber === joinPrimary);
+    const alreadyMember = history.find((e) => e.orderNumber === orderNumber)?.sameTripAs === joinPrimary;
+    if (!alreadyMember && target && (target.state === 'arrived' || target.state === 'closed')) return fail(409, { message: `That trip has already arrived, so another order cannot join it.` });
+  }
+
+  // 1. The date rule: an order cannot start before the vehicle is back. An admin may still do it, after confirming.
+  const vt = computeVehicleTrips(others);
+  const early = !joinPrimary && !!vt.freeFrom && !!orderDay && orderDay < vt.freeFrom;
+  if (early) {
+    if (!inp.force) {
+      const live = vt.trips.filter((t) => t.state !== 'cancelled');
+      const holder = live.reduce((m, t) => (t.freeFromDay > m.freeFromDay ? t : m), live[0]);
+      const today = todayIst();
+      const overlapping = live
+        .filter((t) => (t.state === 'planned' || t.state === 'on_trip' || t.state === 'awaiting') && t.startDay <= orderDay && orderDay <= t.lastBusyDay)
+        .map((t) => ({ orderNumber: t.orderNumber, partyName: t.members.map((m) => m.partyName).filter(Boolean).join(' + ') || null }));
+      // The trip holding the vehicle could simply be marked arrived (it has ended or ends today, nothing recorded): offered as "Mark arrived and assign".
+      const suggested = holder.lastBusyDay <= today ? holder.lastBusyDay : today;
+      const canMarkArrived = !holder.arrivedOn && (holder.state === 'on_trip' || holder.state === 'awaiting') && suggested >= holder.startDay && suggested <= today && orderDay >= suggested;
+      return fail(409, {
+        code: 'BEFORE_FREE', freeFrom: vt.freeFrom, busyOrder: holder?.orderNumber ?? null, overlapping,
+        blocking: holder ? { orderNumber: holder.orderNumber, partyName: holder.members.map((m) => m.partyName).filter(Boolean).join(' + ') || null, suggestedArrival: suggested, canMarkArrived } : null,
+        message: `${vehicle.vehicleNumber} is busy until ${toDmy(addDays(vt.freeFrom!, -1))}${holder ? ` (order #${holder.orderNumber})` : ''}. This order starts ${toDmy(orderDay)}.`,
+      });
+    }
+    if (!actor.isAdmin) return fail(403, { message: 'Only an admin can assign a vehicle before it is free.' });
+  }
+
+  // 2. Our slip first.
+  const driverName = typeof inp.driverName === 'string' ? inp.driverName.trim() : null;
+  const driverPageId = typeof inp.driverPageId === 'string' && inp.driverPageId ? inp.driverPageId : null;
+  const updated = await storage.updateProformaSlip(slip.id, {
+    vehicleNumber: vehicle.vehicleNumber,
+    vehicleInfoId: vehicle.id,
+    vehicleAssignedByCode: userCode ?? null,
+    ...(driverName ? { driverName } : {}),
+  } as any);
+  if (!updated) return fail(500, { message: 'Failed to assign vehicle' });
+
+  // 3. The vehicle's history: leave the old vehicle, trip days, then the trip itself.
+  if (previousVehicleId && previousVehicleId !== vehicle.id) {
+    const oldHistory = await loadHistory(previousVehicleId);
+    if (oldHistory.some((e) => e.orderNumber === orderNumber)) await saveHistory(previousVehicleId, removeFromHistory(oldHistory, orderNumber));
+  }
+  const existing = history.find((e) => e.orderNumber === orderNumber);
+  let tripDays = parseInt(String(existing?.tripDays ?? ''), 10);
+  let tripDaysSource = 'kept';
+  if (!(tripDays >= 1)) {
+    const notionInfo = await readNotionOrderInfo(orderNumber);
+    if (notionInfo?.tripDays) { tripDays = notionInfo.tripDays; tripDaysSource = 'Notion'; }
+    else {
+      const earlier = await partyEarlierTripDays(updated.partyName);
+      if (earlier) { tripDays = earlier; tripDaysSource = "the party's earlier trip"; }
+      else { tripDays = 1; tripDaysSource = 'default (1 day)'; }
+    }
+  }
+  const start = dayOf(updated.orderDate);
+  await upsertHistoryEntry(vehicle.id, {
+    orderNumber,
+    proformaSlipId: updated.id,
+    orderDate: start || null,
+    status: updated.notionStatus ?? null,
+    driver: driverName || updated.driverName || existing?.driver || null,
+    driverNotionId: driverPageId ?? existing?.driverNotionId ?? null,
+    tripCompletesOn: start ? toDmy(addDays(start, tripDays - 1)) : null,
+    tripDays: String(tripDays),
+    partyName: updated.partyName ?? null,
+    plant: updated.plant ?? null,
+    state: existing?.state ?? null,
+    vehicleMismatch: false,
+    mismatchProformaVehicleNumber: null,
+    notInSystem: false,
+    actualCompletedAt: existing?.actualCompletedAt ?? null,
+    ...(joinPrimary ? { sameTripAs: joinPrimary } : {}),
+  });
+
+  // 4. Notion - "Vehi  No. :" and "Driver :" are RELATIONS (to the vehicle's / driver's own Notion page). Compare, write, read back, retry every 2 minutes
+  // up to 5 tries (see notionOrderStatusSync.ts). The slip above already holds the assignment, so a Notion hiccup is reported, not thrown.
+  const notionOutcome: NotionSyncOutcome = vehicle.notionPageId
+    ? await settleNotionSync(syncOrderToNotion(orderNumber, { vehiclePageId: vehicle.notionPageId, ...(driverPageId ? { driverPageId } : {}) }, { userCode }))
+    : { state: 'skipped', message: `${vehicle.vehicleNumber} has no Notion page, so Notion was not updated with this vehicle.` };
+  await noteNotionOutcome(vehicle.id, orderNumber, notionOutcome);
+  // Notion's automation may change the status after a vehicle is set - two minutes from now the status of a load started in the app is put back.
+  void watchStatusAfterVehicleChange(orderNumber, { userCode });
+
+  // 5. Activities.
+  if (userCode) {
+    await storage.logActivity({
+      pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_assignment', entityId: orderNumber,
+      details: `${vehicle.vehicleNumber} assigned to order #${orderNumber}${driverName ? ` with driver ${driverName}` : ''} by ${userName ?? userCode}`
+        + `${slip.vehicleNumber && slip.vehicleNumber !== vehicle.vehicleNumber ? ` (was on ${slip.vehicleNumber})` : ''}`
+        + `${joinPrimary ? ` as a shared load with order #${joinPrimary}` : ''}`
+        + `${early ? ` - assigned before the vehicle was free (${toDmy(vt.freeFrom!)}), admin override` : ''}; trip days ${tripDays} (${tripDaysSource}); Notion: ${notionOutcome.state}`,
+      userCode, userName,
+    });
+  }
+
+  const after = tripsView(await loadHistory(vehicle.id));
+  return { status: 200, body: { slip: updated, notion: notionOutcome, tripDays, tripDaysSource, early, sharedWith: joinPrimary, ...after } };
+}
+
+// POST /api/vehicle-planning/assign - body { orderNumber, vehicleId, driverName?, driverPageId?, force?, sameTripAs? }
 router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
   try {
     const orderNumber = String(req.body?.orderNumber ?? '').trim();
     const vehicleId = req.body?.vehicleId != null ? Number(req.body.vehicleId) : null;
     if (!orderNumber || !vehicleId) return res.status(400).json({ message: 'orderNumber and vehicleId are required' });
-
-    // Only a slip that is already in our system can be assigned - Vehicle Planning never creates one.
-    const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
-    if (!slip) return res.status(404).json({ message: `Order ${orderNumber} is not in our system. Add its slip first, then assign the vehicle.` });
-
-    const vehicle = await storage.getVehicleInfo(vehicleId);
-    if (!vehicle) return res.status(404).json({ message: 'Vehicle not found' });
-    if (!vehicle.vehicleNumber) return res.status(400).json({ message: 'This vehicle has no vehicle number set in Vehicle Master.' });
-
-    const { userCode, userName } = who(req);
-    const previousVehicleId = slip.vehicleInfoId ?? null;
-    const movingVehicle = !!slip.vehicleNumber && (previousVehicleId !== vehicle.id || slip.vehicleNumber !== vehicle.vehicleNumber);
-    if (movingVehicle) {
-      const locked = planningLock(slip);
-      if (locked) return res.status(409).json({ code: 'LOCKED', message: locked });
-    }
-
-    // 1. The date rule: an order cannot start before the vehicle is back. An admin may still do it, after confirming.
-    const orderDay = dayOf(slip.orderDate);
-    const history = await loadHistory(vehicle.id);
-    const others = history.filter((e) => e.orderNumber !== orderNumber);
-    const vt = computeVehicleTrips(others);
-    const early = !!vt.freeFrom && !!orderDay && orderDay < vt.freeFrom;
-    if (early) {
-      if (!req.body?.force) {
-        const live = vt.trips.filter((t) => t.state !== 'cancelled');
-        const holder = live.reduce((m, t) => (t.lastBusyDay > m.lastBusyDay ? t : m), live[0]);
-        return res.status(409).json({
-          code: 'BEFORE_FREE', freeFrom: vt.freeFrom, busyOrder: holder?.orderNumber ?? null,
-          message: `${vehicle.vehicleNumber} is busy until ${toDmy(addDays(vt.freeFrom!, -1))}${holder ? ` (order #${holder.orderNumber})` : ''}. This order starts ${toDmy(orderDay)}.`,
-        });
-      }
-      if (!isAdminUser(req)) return res.status(403).json({ message: 'Only an admin can assign a vehicle before it is free.' });
-    }
-
-    // 2. Our slip first.
-    const driverName = typeof req.body?.driverName === 'string' ? req.body.driverName.trim() : null;
-    const driverPageId = typeof req.body?.driverPageId === 'string' && req.body.driverPageId ? req.body.driverPageId : null;
-    const updated = await storage.updateProformaSlip(slip.id, {
-      vehicleNumber: vehicle.vehicleNumber,
-      vehicleInfoId: vehicle.id,
-      vehicleAssignedByCode: userCode ?? null,
-      ...(driverName ? { driverName } : {}),
-    } as any);
-    if (!updated) return res.status(500).json({ message: 'Failed to assign vehicle' });
-
-    // 3. The vehicle's history: leave the old vehicle, trip days, then the trip itself.
-    if (previousVehicleId && previousVehicleId !== vehicle.id) {
-      const oldHistory = await loadHistory(previousVehicleId);
-      if (oldHistory.some((e) => e.orderNumber === orderNumber)) await saveHistory(previousVehicleId, oldHistory.filter((e) => e.orderNumber !== orderNumber));
-    }
-    const existing = history.find((e) => e.orderNumber === orderNumber);
-    let tripDays = parseInt(String(existing?.tripDays ?? ''), 10);
-    let tripDaysSource = 'kept';
-    if (!(tripDays >= 1)) {
-      const notionInfo = await readNotionOrderInfo(orderNumber);
-      if (notionInfo?.tripDays) { tripDays = notionInfo.tripDays; tripDaysSource = 'Notion'; }
-      else {
-        const earlier = await partyEarlierTripDays(updated.partyName);
-        if (earlier) { tripDays = earlier; tripDaysSource = "the party's earlier trip"; }
-        else { tripDays = 1; tripDaysSource = 'default (1 day)'; }
-      }
-    }
-    const start = dayOf(updated.orderDate);
-    await upsertHistoryEntry(vehicle.id, {
-      orderNumber,
-      proformaSlipId: updated.id,
-      orderDate: start || null,
-      status: updated.notionStatus ?? null,
-      driver: driverName || updated.driverName || existing?.driver || null,
-      driverNotionId: driverPageId ?? existing?.driverNotionId ?? null,
-      tripCompletesOn: start ? toDmy(addDays(start, tripDays - 1)) : null,
-      tripDays: String(tripDays),
-      partyName: updated.partyName ?? null,
-      plant: updated.plant ?? null,
-      state: existing?.state ?? null,
-      vehicleMismatch: false,
-      mismatchProformaVehicleNumber: null,
-      notInSystem: false,
-      actualCompletedAt: existing?.actualCompletedAt ?? null,
-    });
-
-    // 4. Notion - "Vehi  No. :" and "Driver :" are RELATIONS (to the vehicle's / driver's own Notion page). Compare, write, read back, retry every 2 minutes
-    // up to 5 tries (see notionOrderStatusSync.ts). The slip above already holds the assignment, so a Notion hiccup is reported, not thrown.
-    const notionOutcome: NotionSyncOutcome = vehicle.notionPageId
-      ? await settleNotionSync(syncOrderToNotion(orderNumber, { vehiclePageId: vehicle.notionPageId, ...(driverPageId ? { driverPageId } : {}) }, { userCode }))
-      : { state: 'skipped', message: `${vehicle.vehicleNumber} has no Notion page, so Notion was not updated with this vehicle.` };
-    await noteNotionOutcome(vehicle.id, orderNumber, notionOutcome);
-    // Notion's automation may change the status after a vehicle is set - two minutes from now the status of a load started in the app is put back.
-    void watchStatusAfterVehicleChange(orderNumber, { userCode });
-
-    // 5. Activities.
-    if (userCode) {
-      await storage.logActivity({
-        pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_assignment', entityId: orderNumber,
-        details: `${vehicle.vehicleNumber} assigned to order #${orderNumber}${driverName ? ` with driver ${driverName}` : ''} by ${userName ?? userCode}`
-          + `${slip.vehicleNumber && slip.vehicleNumber !== vehicle.vehicleNumber ? ` (was on ${slip.vehicleNumber})` : ''}`
-          + `${early ? ` - assigned before the vehicle was free (${toDmy(vt.freeFrom!)}), admin override` : ''}; trip days ${tripDays} (${tripDaysSource}); Notion: ${notionOutcome.state}`,
-        userCode, userName,
-      });
-    }
-
-    const after = tripsView(await loadHistory(vehicle.id));
-    res.json({ slip: updated, notion: notionOutcome, tripDays, tripDaysSource, early, ...after });
+    const r = await performAssign({
+      orderNumber, vehicleId, driverName: req.body?.driverName, driverPageId: req.body?.driverPageId, force: !!req.body?.force,
+      sameTripAs: typeof req.body?.sameTripAs === 'string' && req.body.sameTripAs.trim() ? req.body.sameTripAs.trim() : null,
+    }, { ...who(req), isAdmin: isAdminUser(req) });
+    res.status(r.status).json(r.body);
   } catch (error) {
     console.error('Error assigning vehicle from vehicle planning:', error);
     res.status(500).json({ message: 'Failed to assign vehicle' });
   }
 });
 
+// POST /api/vehicle-planning/trips/move-group - body { vehicleId, orderNumber, toVehicleId, force? }: a shared trip (all its orders) moves to another vehicle together.
+router.post('/vehicle-planning/trips/move-group', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const vehicleId = Number(req.body?.vehicleId);
+    const toVehicleId = Number(req.body?.toVehicleId);
+    const orderNumber = String(req.body?.orderNumber ?? '').trim();
+    if (!vehicleId || !toVehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId, orderNumber and toVehicleId are required' });
+    const history = await loadHistory(vehicleId);
+    const members = groupEntries(history, orderNumber);
+    if (members.length === 0) return res.status(404).json({ message: 'That trip is not on this vehicle.' });
+    // Either order started loading or went out: the whole trip stays where it is.
+    for (const m of members) {
+      const sl = await storage.getProformaSlipByOrderNumber(m.orderNumber);
+      const locked = sl ? planningLock(sl) : null;
+      if (locked) return res.status(409).json({ code: 'LOCKED', message: `Order ${m.orderNumber}: ${locked}` });
+    }
+    const primary = groupPrimaryOf(history, orderNumber);
+    const ordered = [...members].sort((a, b) => Number(b.orderNumber === primary) - Number(a.orderNumber === primary));
+    const actor = { ...who(req), isAdmin: isAdminUser(req) };
+    // The primary is checked against the new vehicle's dates first (and may ask the planner); the others then ride along with it.
+    let last: { status: number; body: any } = { status: 200, body: {} };
+    for (let i = 0; i < ordered.length; i++) {
+      const m = ordered[i];
+      last = await performAssign({ orderNumber: m.orderNumber, vehicleId: toVehicleId, driverName: m.driver, driverPageId: m.driverNotionId, force: !!req.body?.force, sameTripAs: i === 0 ? null : primary }, actor);
+      if (last.status !== 200) {
+        // Not the first? Put the ones already moved back so the trip is not split across two vehicles.
+        for (let k = 0; k < i; k++) await performAssign({ orderNumber: ordered[k].orderNumber, vehicleId, driverName: ordered[k].driver, driverPageId: ordered[k].driverNotionId, force: true, sameTripAs: k === 0 ? null : primary }, { ...actor, isAdmin: true }).catch(() => null);
+        return res.status(last.status).json(last.body);
+      }
+    }
+    res.json({ ...last.body, moved: ordered.map((m) => m.orderNumber) });
+  } catch (error) {
+    console.error('Error moving a shared trip:', error);
+    res.status(500).json({ message: 'Failed to move the trip' });
+  }
+});
+
 // ─── Change plan: the driver of a trip, and taking the vehicle off an order ─────────────────────────────────────────
 // (Moving a trip to another vehicle is /assign with the new vehicle: it leaves the old vehicle's history and replaces the vehicle in Notion.)
 
-// Finds the slip behind a trip and refuses when Loading has taken the order over. Sends the reply itself and returns null on a refusal.
-async function slipForChange(req: Request, res: Response, vehicleId: number, orderNumber: string) {
-  const { entry } = await loadTrip(vehicleId, orderNumber);
+// Finds the slip(s) behind a trip and refuses when Loading has taken the order over. `whole` = every order of a shared trip (a driver change, a move of the whole
+// trip); otherwise just that order. Sends the reply itself and returns null on a refusal.
+async function slipsForChange(res: Response, vehicleId: number, orderNumber: string, whole: boolean) {
+  const { history, entry } = await loadTrip(vehicleId, orderNumber);
   if (!entry) { res.status(404).json({ message: 'That trip is not on this vehicle.' }); return null; }
-  const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
-  if (!slip) { res.status(404).json({ message: `Order ${orderNumber} is not in our system, so it cannot be changed here.` }); return null; }
-  const locked = planningLock(slip);
-  if (locked) { res.status(409).json({ code: 'LOCKED', message: locked }); return null; }
-  return slip;
+  const orders = whole ? groupEntries(history, orderNumber).map((e) => e.orderNumber) : [orderNumber];
+  const slips: any[] = [];
+  for (const no of orders) {
+    const slip = await storage.getProformaSlipByOrderNumber(no);
+    if (!slip) { res.status(404).json({ message: `Order ${no} is not in our system, so it cannot be changed here.` }); return null; }
+    const locked = planningLock(slip);
+    if (locked) { res.status(409).json({ code: 'LOCKED', message: orders.length > 1 ? `Order ${no}: ${locked}` : locked }); return null; }
+    slips.push(slip);
+  }
+  return slips;
 }
 
 // POST /api/vehicle-planning/trips/driver - body { vehicleId, orderNumber, driverName, driverPageId? }. An empty driverName clears the driver.
+// A shared trip has ONE driver, so every order of the trip changes together.
 router.post('/vehicle-planning/trips/driver', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
   try {
     const vehicleId = Number(req.body?.vehicleId);
     const orderNumber = String(req.body?.orderNumber ?? '').trim();
     if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
-    const slip = await slipForChange(req, res, vehicleId, orderNumber);
-    if (!slip) return;
+    const slips = await slipsForChange(res, vehicleId, orderNumber, true);
+    if (!slips) return;
     const driverName = typeof req.body?.driverName === 'string' ? req.body.driverName.trim() : '';
     const driverPageId = typeof req.body?.driverPageId === 'string' && req.body.driverPageId ? req.body.driverPageId : null;
     const { userCode, userName } = who(req);
     const vehicle = await storage.getVehicleInfo(vehicleId);
 
-    await storage.updateProformaSlip(slip.id, { driverName: driverName || null } as any);
-    const { history, entry } = await loadTrip(vehicleId, orderNumber);
-    entry!.driver = driverName || null;
-    entry!.driverNotionId = driverName ? driverPageId : null;
-    await saveHistory(vehicleId, history);
-    const outcome: NotionSyncOutcome = await settleNotionSync(syncOrderToNotion(orderNumber, driverName ? (driverPageId ? { driverPageId } : {}) : { clearDriver: true }, { userCode }));
-    await noteNotionOutcome(vehicleId, orderNumber, outcome);
-    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_assignment', entityId: orderNumber, details: `Driver of order #${orderNumber} (${vehicle?.vehicleNumber ?? vehicleId}) ${driverName ? `changed to ${driverName}` : 'removed'} by ${userName ?? userCode}; Notion: ${outcome.state}`, userCode, userName });
+    let outcome: NotionSyncOutcome = { state: 'ok', message: 'Notion is up to date.' };
+    for (const slip of slips) {
+      await storage.updateProformaSlip(slip.id, { driverName: driverName || null } as any);
+      const { history, entry } = await loadTrip(vehicleId, slip.orderNumber);
+      entry!.driver = driverName || null;
+      entry!.driverNotionId = driverName ? driverPageId : null;
+      await saveHistory(vehicleId, history);
+      const o: NotionSyncOutcome = await settleNotionSync(syncOrderToNotion(slip.orderNumber, driverName ? (driverPageId ? { driverPageId } : {}) : { clearDriver: true }, { userCode }));
+      await noteNotionOutcome(vehicleId, slip.orderNumber, o);
+      if (o.state === 'failed' || o.state === 'retrying' || outcome.state === 'ok') outcome = o;
+    }
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_assignment', entityId: orderNumber, details: `Driver of order${slips.length > 1 ? 's' : ''} ${slips.map((s) => `#${s.orderNumber}`).join(', ')} (${vehicle?.vehicleNumber ?? vehicleId}) ${driverName ? `changed to ${driverName}` : 'removed'} by ${userName ?? userCode}; Notion: ${outcome.state}`, userCode, userName });
     res.json({ notion: outcome, ...tripsView(await loadHistory(vehicleId)) });
   } catch (error) {
     console.error('Error changing the driver from vehicle planning:', error);
@@ -1001,21 +1117,22 @@ router.post('/vehicle-planning/trips/driver', requirePageWrite('vehicle-planning
   }
 });
 
-// POST /api/vehicle-planning/trips/remove-vehicle - body { vehicleId, orderNumber }: the order goes back to "no vehicle". The vehicle AND the driver are cleared on our
-// slip and in Notion, and the trip leaves the vehicle's history.
+// POST /api/vehicle-planning/trips/remove-vehicle - body { vehicleId, orderNumber }: this ONE order goes back to "no vehicle" (the other orders of a shared trip stay).
+// The vehicle AND the driver are cleared on our slip and in Notion, and the order leaves the vehicle's history.
 router.post('/vehicle-planning/trips/remove-vehicle', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
   try {
     const vehicleId = Number(req.body?.vehicleId);
     const orderNumber = String(req.body?.orderNumber ?? '').trim();
     if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
-    const slip = await slipForChange(req, res, vehicleId, orderNumber);
-    if (!slip) return;
+    const slips = await slipsForChange(res, vehicleId, orderNumber, false);
+    if (!slips) return;
+    const slip = slips[0];
     const { userCode, userName } = who(req);
     const vehicle = await storage.getVehicleInfo(vehicleId);
 
     await storage.updateProformaSlip(slip.id, { vehicleNumber: null, vehicleInfoId: null, vehicleAssignedByCode: null, driverName: null } as any);
     const { history } = await loadTrip(vehicleId, orderNumber);
-    await saveHistory(vehicleId, history.filter((e) => e.orderNumber !== orderNumber));
+    await saveHistory(vehicleId, removeFromHistory(history, orderNumber));
     const outcome: NotionSyncOutcome = await settleNotionSync(syncOrderToNotion(orderNumber, { clearVehicle: true, clearDriver: true }, { userCode }));
     void watchStatusAfterVehicleChange(orderNumber, { userCode });
     if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_assignment', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId} removed from order #${orderNumber} (vehicle and driver cleared) by ${userName ?? userCode}; Notion: ${outcome.state}`, userCode, userName });

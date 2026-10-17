@@ -42,8 +42,19 @@ type CurrentOrder = {
 
 // One trip (an order on this vehicle) as the server works it out - server/lib/vehicleTrips.ts.
 type TripState = "planned" | "on_trip" | "awaiting" | "arrived" | "closed" | "cancelled";
+// One order inside a trip (a shared load is one trip with several of these).
+type TripMember = {
+  orderNumber: string; proformaSlipId: number | null; partyName: string | null; plant: string | null; status: string | null;
+  driver: string | null; driverNotionId: string | null; notionNote: string | null; notInSystem: boolean; startDay: string; plannedLastDay: string; tripDays: number;
+};
+// The vehicle is not free for an order: the server says who overlaps (a shared load is possible) and which older trip could simply be marked arrived.
+type NotFreeAsk = {
+  message: string; orderNumber: string; destId: number;
+  overlapping: { orderNumber: string; partyName: string | null }[];
+  blocking: { orderNumber: string; partyName: string | null; suggestedArrival: string; canMarkArrived: boolean } | null;
+};
 type Trip = {
-  orderNumber: string; proformaSlipId: number | null; partyName: string | null; plant: string | null;
+  orderNumber: string; members: TripMember[]; freeSameDay: boolean; freeFromDay: string; proformaSlipId: number | null; partyName: string | null; plant: string | null;
   status: string | null; driver: string | null; driverNotionId: string | null; notionNote: string | null; notInSystem: boolean; tripDays: number;
   startDay: string; plannedLastDay: string; expectedEnd: string | null; arrivedOn: string | null;
   lastBusyDay: string; state: TripState; assumed: boolean;
@@ -127,7 +138,7 @@ export default function VehiclePlanning() {
   // null = untouched, so the box shows the vehicle's last driver; driverExtra remembers a driver read from Notion that is not in the list.
   const [driverText, setDriverText] = useState<string | null>(null);
   const [driverExtra, setDriverExtra] = useState<NotionDriver | null>(null);
-  const [assignAsk, setAssignAsk] = useState<{ message: string; orderNumber: string } | null>(null);
+  const [assignAsk, setAssignAsk] = useState<NotFreeAsk | null>(null);
   const [earlyAsk, setEarlyAsk] = useState<{ vehicle: VehicleRow; freeFrom: string; waiting: number } | null>(null);
   const isAdmin = (() => { try { return isAdminOrSuperAdmin(JSON.parse(localStorage.getItem("currentUser") || "{}").role ?? ""); } catch { return false; } })();
   const [mismatchTarget, setMismatchTarget] = useState<VehicleRow | null>(null);
@@ -147,7 +158,10 @@ export default function VehiclePlanning() {
   const [changeTarget, setChangeTarget] = useState<{ vehicle: VehicleRow; trip: Trip } | null>(null);
   const [moveSearch, setMoveSearch] = useState("");
   const [moveDest, setMoveDest] = useState<VehicleRow | null>(null);
-  const [moveAsk, setMoveAsk] = useState<{ message: string; destId: number } | null>(null);
+  const [moveAsk, setMoveAsk] = useState<NotFreeAsk | null>(null);
+  // Which order of a shared trip the Change dialog works on: "" = the whole trip.
+  const [changeOrder, setChangeOrder] = useState("");
+  const [arrivalSameDay, setArrivalSameDay] = useState(true);
   const [changeDriverText, setChangeDriverText] = useState<string | null>(null);
   const [changeDriverExtra, setChangeDriverExtra] = useState<NotionDriver | null>(null);
   const [removeSure, setRemoveSure] = useState(false);
@@ -297,9 +311,9 @@ export default function VehiclePlanning() {
   });
 
   const assignMutation = useMutation({
-    mutationFn: async ({ orderNumber, force }: { orderNumber: string; force?: boolean }) => {
+    mutationFn: async ({ orderNumber, force, sameTripAs }: { orderNumber: string; force?: boolean; sameTripAs?: string }) => {
       const res = await apiRequest("POST", "/api/vehicle-planning/assign", {
-        orderNumber, vehicleId: assignTarget!.id, force: force || undefined,
+        orderNumber, vehicleId: assignTarget!.id, force: force || undefined, sameTripAs: sameTripAs || undefined,
         driverName: effectiveDriver.trim() || undefined, driverPageId: matchedDriverId || undefined,
       });
       return res.json();
@@ -316,14 +330,14 @@ export default function VehiclePlanning() {
     },
     onError: (err: any, vars) => {
       const body = parseApiErrorBody(err);
-      if (body?.code === "BEFORE_FREE") { setAssignAsk({ message: body.message, orderNumber: vars.orderNumber }); return; }
+      if (body?.code === "BEFORE_FREE") { setAssignAsk({ message: body.message, orderNumber: vars.orderNumber, destId: assignTarget!.id, overlapping: body.overlapping ?? [], blocking: body.blocking ?? null }); return; }
       toast({ title: "Could not assign vehicle", description: parseApiErrorMessage(err), variant: "destructive" });
     },
   });
 
   // Arrived / Undo arrival on one trip.
   const arrivalMutation = useMutation({
-    mutationFn: async (body: { vehicleId: number; orderNumber: string; arrivedOn?: string; note?: string; undo?: boolean }) => {
+    mutationFn: async (body: { vehicleId: number; orderNumber: string; arrivedOn?: string; note?: string; undo?: boolean; freeSameDay?: boolean }) => {
       const res = await apiRequest("POST", "/api/vehicle-planning/trips/arrival", body);
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to save the arrival");
       return res.json();
@@ -358,24 +372,35 @@ export default function VehiclePlanning() {
 
   // Change plan. Moving a trip is the same call as assigning, with the new vehicle: the old vehicle's history and Notion's vehicle are replaced for us.
   const moveMutation = useMutation({
-    mutationFn: async ({ destId, force }: { destId: number; force?: boolean }) => {
+    mutationFn: async ({ destId, force, sameTripAs }: { destId: number; force?: boolean; sameTripAs?: string }) => {
       const t = changeTarget!.trip;
+      // "" = the whole trip (all its orders go together); otherwise just the picked order of a shared trip.
+      if (!changeOrder) {
+        const res = await apiRequest("POST", "/api/vehicle-planning/trips/move-group", {
+          vehicleId: changeTarget!.vehicle.id, orderNumber: t.orderNumber, toVehicleId: destId, force: force || undefined,
+        });
+        return res.json();
+      }
+      const m = t.members.find((x) => x.orderNumber === changeOrder);
       const res = await apiRequest("POST", "/api/vehicle-planning/assign", {
-        orderNumber: t.orderNumber, vehicleId: destId, force: force || undefined,
-        driverName: t.driver || undefined, driverPageId: t.driverNotionId || undefined,
+        orderNumber: changeOrder, vehicleId: destId, force: force || undefined, sameTripAs: sameTripAs || undefined,
+        driverName: m?.driver || undefined, driverPageId: m?.driverNotionId || undefined,
       });
       return res.json();
     },
     onSuccess: (data, { destId }) => {
       const dest = allVehicles.find((x) => x.id === destId);
-      toast(withNotionNotice({ title: "Moved to another vehicle", description: `Order #${changeTarget?.trip.orderNumber} → ${dest?.vehicleNumber ?? destId}` }, data));
+      toast(withNotionNotice({ title: "Moved to another vehicle", description: `Order${data?.moved?.length > 1 ? "s" : ""} #${(data?.moved ?? [changeOrder || changeTarget?.trip.orderNumber]).join(", #")} → ${dest?.vehicleNumber ?? destId}` }, data));
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
       setMoveAsk(null);
       setChangeTarget(null);
     },
     onError: (err: any, vars) => {
       const body = parseApiErrorBody(err);
-      if (body?.code === "BEFORE_FREE") { setMoveAsk({ message: body.message, destId: vars.destId }); return; }
+      if (body?.code === "BEFORE_FREE") {
+        setMoveAsk({ message: body.message, orderNumber: changeOrder || changeTarget!.trip.orderNumber, destId: vars.destId, overlapping: body.overlapping ?? [], blocking: body.blocking ?? null });
+        return;
+      }
       toast({ title: "Could not move the order", description: parseApiErrorMessage(err), variant: "destructive" });
     },
   });
@@ -423,7 +448,7 @@ export default function VehiclePlanning() {
     setAssignDate(""); setAssignSearch(""); setAssignPick(null); setDriverText(null); setDriverExtra(null); setAssignAsk(null);
   }, [assignTarget?.id]);
   useEffect(() => {
-    setMoveSearch(""); setMoveDest(null); setMoveAsk(null); setChangeDriverText(null); setChangeDriverExtra(null); setRemoveSure(false);
+    setChangeOrder(""); setMoveSearch(""); setMoveDest(null); setMoveAsk(null); setChangeDriverText(null); setChangeDriverExtra(null); setRemoveSure(false);
   }, [changeTarget?.trip.orderNumber, changeTarget?.vehicle.id]);
 
 
@@ -636,10 +661,73 @@ export default function VehiclePlanning() {
     expectedEndMutation.mutate({ vehicleId: v.id, orderNumber: trip.orderNumber, expectedEnd: newEnd === trip.plannedLastDay ? null : newEnd });
   }
 
+  const chipCls = (on: boolean) => `rounded-full px-3 py-1 text-xs font-medium ${on ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`;
+
+  // The label over a trip's bar: one party, or for a shared load both names when there is room ("Party A + Party B") and the first with "+1" when there is not.
+  function barLabel(t: Trip, labelDays: number): string {
+    if (t.members.length <= 1) return t.partyName ?? "—";
+    const names = t.members.map((m) => m.partyName ?? "—");
+    return labelDays * DAY_COL_MIN_WIDTH >= 200 ? names.join(" + ") : `${names[0]} +${names.length - 1}`;
+  }
+
+  // Marks the older trip that holds the vehicle as arrived (same day), then runs the assignment / move again.
+  async function markBlockingArrivedThen(ask: NotFreeAsk, close: () => void, run: () => void) {
+    if (!ask.blocking) return;
+    try {
+      const res = await apiRequest("POST", "/api/vehicle-planning/trips/arrival", {
+        vehicleId: ask.destId, orderNumber: ask.blocking.orderNumber, arrivedOn: ask.blocking.suggestedArrival, freeSameDay: true,
+      });
+      await res.json();
+      queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+      close();
+      run();
+    } catch (err) {
+      toast({ title: "Could not mark it arrived", description: parseApiErrorMessage(err), variant: "destructive" });
+    }
+  }
+
+  // The dialog for "the vehicle is not free for this order". Options, in the order a planner wants them: ride along on a running trip (shared load), mark the
+  // older trip arrived and carry on, or (an admin only) go ahead anyway.
+  function renderNotFree(ask: NotFreeAsk | null, setAsk: (a: NotFreeAsk | null) => void, pending: boolean, run: (o: { force?: boolean; sameTripAs?: string }) => void, forceLabel: string, allowShare = true) {
+    return (
+      <Dialog open={!!ask} onOpenChange={(open) => { if (!open && !pending) setAsk(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-1.5"><AlertTriangle className="h-4 w-4 text-amber-500" /> Vehicle is not free yet</DialogTitle>
+            <DialogDescription>{ask?.message}</DialogDescription>
+          </DialogHeader>
+          {ask && canWrite && ((allowShare && ask.overlapping.length > 0) || ask.blocking?.canMarkArrived) && (
+            <div className="space-y-2">
+              {ask.blocking?.canMarkArrived && (
+                <Button className="w-full justify-start text-left" variant="outline" disabled={pending} onClick={() => markBlockingArrivedThen(ask, () => setAsk(null), () => run({}))}>
+                  Mark #{ask.blocking.orderNumber} arrived on {dayLabel(ask.blocking.suggestedArrival)} and continue
+                </Button>
+              )}
+              {allowShare && ask.overlapping.map((o) => (
+                <Button key={o.orderNumber} className="w-full justify-start text-left" variant="outline" disabled={pending} onClick={() => run({ sameTripAs: o.orderNumber })}>
+                  Same trip as #{o.orderNumber}{o.partyName ? ` (${o.partyName})` : ""} - shared load
+                </Button>
+              ))}
+            </div>
+          )}
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="outline" disabled={pending} onClick={() => setAsk(null)}>{isAdmin ? "No" : "Close"}</Button>
+            {isAdmin && (
+              <Button disabled={pending} onClick={() => run({ force: true })}>
+                {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : forceLabel}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
   function openArrival(v: VehicleRow, t: Trip) {
     const todayIso = format(new Date(), "yyyy-MM-dd");
     setArrivalDay(t.lastBusyDay < todayIso && t.lastBusyDay >= t.startDay ? t.lastBusyDay : todayIso);
     setArrivalNote("");
+    setArrivalSameDay(true);
     setArrivalTarget({ vehicle: v, trip: t });
   }
 
@@ -1042,14 +1130,14 @@ export default function VehiclePlanning() {
                       return (
                         <div key={t.orderNumber} className="absolute flex flex-col gap-0.5" style={{ top: 4 + l.lane * LANE_HEIGHT, left: `${(l.startIdx / windowDays) * 100}%`, width: `${((Math.max(l.labelEndIdx, endIdx) - l.startIdx) / windowDays) * 100}%` }}>
                           <div className="truncate text-[10px] font-medium leading-[1.15] text-black" title={t.partyName ?? undefined}>
-                            {t.partyName ?? "—"}
+                            {barLabel(t, l.labelEndIdx - l.startIdx)}
                           </div>
                           <div className="relative h-2.5" style={{ width: `${((endIdx - l.startIdx) / (Math.max(l.labelEndIdx, endIdx) - l.startIdx)) * 100}%` }}>
                             <button
                               type="button"
                               onClick={() => setTripTarget({ vehicle: v, trip: t })}
                               className={`h-full w-full rounded-full shadow-sm ${tripBarClass(t.state, l.conflict)}`}
-                              title={`#${t.orderNumber} · ${t.partyName ?? "—"} · ${dayLabel(t.startDay)} to ${dayLabel(t.lastBusyDay)} · ${l.conflict ? "Vehicle not back yet" : stateText[t.state]}${t.notionNote ? " · Notion not updated" : ""}`}
+                              title={`#${t.members.map((m) => m.orderNumber).join(" + #")} · ${t.members.map((m) => m.partyName ?? "—").join(" + ")} · ${dayLabel(t.startDay)} to ${dayLabel(t.lastBusyDay)} · ${l.conflict ? "Vehicle not back yet" : stateText[t.state]}${t.notionNote ? " · Notion not updated" : ""}`}
                             />
                             {t.notionNote && <AlertTriangle className="pointer-events-none absolute -top-3 right-0 h-3 w-3 text-amber-500" />}
                             {canStretch && (
@@ -1263,23 +1351,8 @@ export default function VehiclePlanning() {
         </DialogContent>
       </Dialog>
 
-      {/* The order starts before the vehicle is back. An admin can still go ahead; anyone else just sees why not. */}
-      <Dialog open={!!assignAsk} onOpenChange={(open) => { if (!open && !assignMutation.isPending) setAssignAsk(null); }}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-1.5"><AlertTriangle className="h-4 w-4 text-amber-500" /> Vehicle is not free yet</DialogTitle>
-            <DialogDescription>{assignAsk?.message}{isAdmin ? " Assign anyway?" : " An admin has to do this."}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2 sm:gap-2">
-            <Button variant="outline" disabled={assignMutation.isPending} onClick={() => setAssignAsk(null)}>{isAdmin ? "No" : "OK"}</Button>
-            {isAdmin && (
-              <Button disabled={assignMutation.isPending} onClick={() => assignAsk && assignMutation.mutate({ orderNumber: assignAsk.orderNumber, force: true })}>
-                {assignMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Assign anyway"}
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* The order starts before the vehicle is back: join a running trip (shared load), mark the older trip arrived, or (an admin) go ahead anyway. */}
+      {renderNotFree(assignAsk, setAssignAsk, assignMutation.isPending, (o) => assignAsk && assignMutation.mutate({ orderNumber: assignAsk.orderNumber, ...o }), "Assign anyway")}
 
       {/* A trip bar was clicked: its details, and Arrived / Undo arrival. */}
       <Dialog open={!!tripTarget} onOpenChange={(open) => { if (!open) setTripTarget(null); }}>
@@ -1300,6 +1373,12 @@ export default function VehiclePlanning() {
                       <span>Vehicle not back yet: order #{inConflict.withOrderNumber} keeps it until {dayLabel(inConflict.withLastBusyDay)}, but this order starts {dayLabel(inConflict.startDay)}.</span>
                     </div>
                   )}
+                  {t.members.length > 1 && (
+                    <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+                      <div className="mb-1 font-semibold">Shared load - {t.members.length} orders on one trip</div>
+                      {t.members.map((m) => <div key={m.orderNumber}>#{m.orderNumber} · {m.partyName ?? "—"}{m.plant ? ` · ${m.plant}` : ""}</div>)}
+                    </div>
+                  )}
                   {t.notionNote && (
                     <div className="flex items-start justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       <span>Notion not updated. {t.notionNote}</span>
@@ -1316,7 +1395,7 @@ export default function VehiclePlanning() {
                     <span className="text-gray-500">Trip days</span><span>{t.tripDays}</span>
                     <span className="text-gray-500">Planned last day</span><span>{dayLabel(t.plannedLastDay)}</span>
                     {t.expectedEnd && <><span className="text-gray-500">Expected last day</span><span>{dayLabel(t.expectedEnd)}</span></>}
-                    {t.arrivedOn && <><span className="text-gray-500">Arrived on</span><span>{dayLabel(t.arrivedOn)}</span></>}
+                    {t.arrivedOn && <><span className="text-gray-500">Arrived on</span><span>{dayLabel(t.arrivedOn)}{t.freeSameDay ? " (free the same day)" : ""}</span></>}
                     <span className="text-gray-500">Driver</span><span>{t.driver ?? "—"}</span>
                   </div>
                 </div>
@@ -1327,6 +1406,12 @@ export default function VehiclePlanning() {
                       <Undo2 className="mr-1.5 h-4 w-4" /> Undo arrival
                     </Button>
                   )}
+                  {canWrite && inConflict && (() => {
+                    const blocker = v.trips?.find((x) => x.orderNumber === inConflict.withOrderNumber);
+                    return blocker && !blocker.arrivedOn && (blocker.state === "on_trip" || blocker.state === "awaiting") ? (
+                      <Button variant="outline" onClick={() => { setTripTarget(null); openArrival(v, blocker); }}>Mark #{blocker.orderNumber} arrived</Button>
+                    ) : null;
+                  })()}
                   {canWrite && !t.arrivedOn && t.state !== "closed" && t.state !== "cancelled" && !t.notInSystem && (
                     <Button variant="outline" onClick={() => { setTripTarget(null); setChangeTarget({ vehicle: v, trip: t }); }}>Change</Button>
                   )}
@@ -1348,7 +1433,7 @@ export default function VehiclePlanning() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4 text-emerald-600" /> Vehicle arrived</DialogTitle>
             <DialogDescription>
-              {arrivalTarget?.vehicle.vehicleNumber} · order #{arrivalTarget?.trip.orderNumber}. It is free from the day after the arrival date.
+              {arrivalTarget?.vehicle.vehicleNumber} · order #{arrivalTarget?.trip.orderNumber}. Untick the box below if it cannot go out again that day.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -1356,6 +1441,10 @@ export default function VehiclePlanning() {
               <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Arrived on</label>
               <Input type="date" value={arrivalDay} min={arrivalTarget?.trip.startDay} max={format(new Date(), "yyyy-MM-dd")} onChange={(e) => setArrivalDay(e.target.value)} className="h-9" />
             </div>
+            <label className="flex items-center gap-2 text-xs text-gray-700">
+              <Checkbox checked={arrivalSameDay} onCheckedChange={(on) => setArrivalSameDay(on === true)} />
+              Can go out again the same day
+            </label>
             <div>
               <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Note (optional)</label>
               <Input value={arrivalNote} onChange={(e) => setArrivalNote(e.target.value)} placeholder="For example: came back early" className="h-9" />
@@ -1365,7 +1454,7 @@ export default function VehiclePlanning() {
             <Button variant="outline" onClick={() => setArrivalTarget(null)} disabled={arrivalMutation.isPending}>Cancel</Button>
             <Button
               disabled={arrivalMutation.isPending || !arrivalDay}
-              onClick={() => arrivalMutation.mutate({ vehicleId: arrivalTarget!.vehicle.id, orderNumber: arrivalTarget!.trip.orderNumber, arrivedOn: arrivalDay, note: arrivalNote.trim() || undefined })}
+              onClick={() => arrivalMutation.mutate({ vehicleId: arrivalTarget!.vehicle.id, orderNumber: arrivalTarget!.trip.orderNumber, arrivedOn: arrivalDay, note: arrivalNote.trim() || undefined, freeSameDay: arrivalSameDay })}
             >
               {arrivalMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save arrival"}
             </Button>
@@ -1443,7 +1532,14 @@ export default function VehiclePlanning() {
               <>
                 <DialogHeader>
                   <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> Change plan · order #{t.orderNumber}</DialogTitle>
-                  <DialogDescription>{v.vehicleNumber} · {t.partyName ?? "—"} · starts {dayLabel(t.startDay)}</DialogDescription>
+                  <DialogDescription>{v.vehicleNumber} · {t.members.map((m) => m.partyName ?? "—").join(" + ")} · starts {dayLabel(t.startDay)}</DialogDescription>
+                  {t.members.length > 1 && (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1 text-xs">
+                      <span className="text-gray-500">Applies to:</span>
+                      <button type="button" onClick={() => setChangeOrder("")} className={chipCls(changeOrder === "")}>Whole trip</button>
+                      {t.members.map((m) => <button key={m.orderNumber} type="button" onClick={() => setChangeOrder(m.orderNumber)} className={chipCls(changeOrder === m.orderNumber)}>#{m.orderNumber}</button>)}
+                    </div>
+                  )}
                 </DialogHeader>
 
                 <div className="space-y-1.5">
@@ -1462,7 +1558,7 @@ export default function VehiclePlanning() {
                     {candidates.length === 0 && <p className="py-3 text-center text-xs text-gray-400">No vehicles found.</p>}
                   </div>
                   <Button size="sm" disabled={!moveDest || busy} onClick={() => moveDest && moveMutation.mutate({ destId: moveDest.id })}>
-                    {moveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : moveDest ? `Move to ${moveDest.vehicleNumber}` : "Pick a vehicle"}
+                    {moveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : moveDest ? `Move ${t.members.length > 1 && !changeOrder ? "whole trip " : ""}to ${moveDest.vehicleNumber}` : "Pick a vehicle"}
                   </Button>
                 </div>
 
@@ -1488,13 +1584,13 @@ export default function VehiclePlanning() {
                 <div className="space-y-1.5 border-t pt-3">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Remove the vehicle</div>
                   {!removeSure ? (
-                    <Button size="sm" variant="outline" className="border-red-300 text-red-600 hover:bg-red-50" disabled={busy} onClick={() => setRemoveSure(true)}>Remove {v.vehicleNumber} from this order</Button>
+                    <Button size="sm" variant="outline" className="border-red-300 text-red-600 hover:bg-red-50" disabled={busy || (t.members.length > 1 && !changeOrder)} title={t.members.length > 1 && !changeOrder ? "Pick one order above first" : undefined} onClick={() => setRemoveSure(true)}>Remove {v.vehicleNumber} from {t.members.length > 1 ? `order #${changeOrder || "…"}` : "this order"}</Button>
                   ) : (
                     <div className="space-y-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
                       <p>This clears the vehicle and the driver on order #{t.orderNumber}, here and in Notion. The order goes back to "no vehicle".</p>
                       <div className="flex gap-2">
                         <Button size="sm" variant="outline" disabled={busy} onClick={() => setRemoveSure(false)}>No</Button>
-                        <Button size="sm" className="bg-red-600 hover:bg-red-700" disabled={busy} onClick={() => removeMutation.mutate({ vehicleId: v.id, orderNumber: t.orderNumber })}>
+                        <Button size="sm" className="bg-red-600 hover:bg-red-700" disabled={busy} onClick={() => removeMutation.mutate({ vehicleId: v.id, orderNumber: changeOrder || t.orderNumber })}>
                           {removeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Yes, remove"}
                         </Button>
                       </div>
@@ -1509,23 +1605,8 @@ export default function VehiclePlanning() {
         </DialogContent>
       </Dialog>
 
-      {/* The move target is not free before this order starts. An admin can still go ahead. */}
-      <Dialog open={!!moveAsk} onOpenChange={(open) => { if (!open && !moveMutation.isPending) setMoveAsk(null); }}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-1.5"><AlertTriangle className="h-4 w-4 text-amber-500" /> Vehicle is not free yet</DialogTitle>
-            <DialogDescription>{moveAsk?.message}{isAdmin ? " Move it anyway?" : " An admin has to do this."}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2 sm:gap-2">
-            <Button variant="outline" disabled={moveMutation.isPending} onClick={() => setMoveAsk(null)}>{isAdmin ? "No" : "OK"}</Button>
-            {isAdmin && (
-              <Button disabled={moveMutation.isPending} onClick={() => moveAsk && moveMutation.mutate({ destId: moveAsk.destId, force: true })}>
-                {moveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Move anyway"}
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* The move target is not free before this order starts. */}
+      {renderNotFree(moveAsk, setMoveAsk, moveMutation.isPending, (o) => moveAsk && moveMutation.mutate({ destId: moveAsk.destId, ...o }), "Move anyway", !!changeOrder)}
 
       {/* The vehicle came back earlier than planned. */}
       <Dialog open={!!earlyAsk} onOpenChange={(open) => { if (!open) setEarlyAsk(null); }}>

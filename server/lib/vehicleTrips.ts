@@ -12,8 +12,18 @@ import type { VehiclePlanningOrderEntry } from '@shared/schema';
 
 export type TripState = 'planned' | 'on_trip' | 'awaiting' | 'arrived' | 'closed' | 'cancelled';
 
+// One order inside a trip. A trip is usually one order; a SHARED load (two parties on one vehicle at the same time) is one trip with several members.
+export type TripMember = {
+  orderNumber: string; proformaSlipId: number | null; partyName: string | null; plant: string | null; status: string | null;
+  driver: string | null; driverNotionId: string | null; notionNote: string | null; notInSystem: boolean;
+  startDay: string; plannedLastDay: string; tripDays: number;
+};
+
 export type Trip = {
-  orderNumber: string;
+  orderNumber: string;           // for a shared load: the PRIMARY order (the one the others say "same trip as")
+  members: TripMember[];         // every order in the trip (the primary first); one entry for an ordinary trip
+  freeSameDay: boolean;          // arrived with "can go out again the same day": the vehicle is free from the arrival day itself
+  freeFromDay: string;           // the first day this trip no longer keeps the vehicle busy
   proformaSlipId: number | null;
   partyName: string | null;
   plant: string | null;
@@ -61,7 +71,7 @@ export function parseDmy(raw: string | null | undefined): string | null {
 export function toDmy(day: string): string { const [y, m, d] = day.split('-'); return `${d}/${m}/${y}`; }
 
 type Entry = Pick<VehiclePlanningOrderEntry, 'orderNumber' | 'orderDate' | 'tripDays' | 'tripCompletesOn' | 'status' | 'partyName' | 'plant' | 'driver' | 'proformaSlipId'>
-  & { notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null };
+  & { notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null; freeSameDay?: boolean | null; sameTripAs?: string | null };
 
 export function plannedLastDayOf(e: Pick<Entry, 'orderDate' | 'tripDays' | 'tripCompletesOn'>): { start: string; last: string; days: number } | null {
   const start = String(e.orderDate ?? '').slice(0, 10);
@@ -73,50 +83,99 @@ export function plannedLastDayOf(e: Pick<Entry, 'orderDate' | 'tripDays' | 'trip
   return { start, last: start, days: 1 };
 }
 
+// The order a "same trip as" chain leads to (followed a few steps; an entry whose target is not on this vehicle stands alone).
+export function groupPrimaryOf(history: Pick<Entry, 'orderNumber' | 'sameTripAs'>[], orderNumber: string): string {
+  const byNo = new Map(history.map((e) => [e.orderNumber, e] as const));
+  let cur = orderNumber;
+  for (let i = 0; i < 4; i++) {
+    const next = byNo.get(cur)?.sameTripAs;
+    if (!next || next === cur || !byNo.has(next)) break;
+    cur = next;
+  }
+  return cur;
+}
+// Every history entry of the trip an order belongs to (the primary and the orders that say "same trip as" it).
+export function groupEntries<T extends Pick<Entry, 'orderNumber' | 'sameTripAs'>>(history: T[], orderNumber: string): T[] {
+  const primary = groupPrimaryOf(history, orderNumber);
+  return history.filter((e) => groupPrimaryOf(history, e.orderNumber) === primary);
+}
+
 export function computeVehicleTrips(history: Entry[], today: string = todayIst()): VehicleTrips {
+  // 1. Each entry with an order date, grouped into trips (a shared load is several entries under one primary).
+  type Built = { e: Entry; p: NonNullable<ReturnType<typeof plannedLastDayOf>> };
+  const built: Built[] = [];
+  for (const e of history) { const p = plannedLastDayOf(e); if (p) built.push({ e, p }); }
+  const builtEntries = built.map((b) => b.e);
+  const groups = new Map<string, Built[]>();
+  for (const b of built) {
+    const key = groupPrimaryOf(builtEntries, b.e.orderNumber);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(b);
+  }
+
   const trips: Trip[] = [];
-  for (const e of history) {
-    const p = plannedLastDayOf(e);
-    if (!p) continue;
-    const arrivedOn = isDay(e.arrivedOn) ? e.arrivedOn : null;
-    const expectedEnd = isDay(e.expectedEnd) && e.expectedEnd >= p.start ? e.expectedEnd : null;
-    const cancelled = String(e.status ?? '').trim().toUpperCase() === 'CANCELLED';
-    let lastBusyDay = arrivedOn ?? expectedEnd ?? p.last;
+  for (const [primaryNo, all] of groups) {
+    const isCancelled = (b: Built) => String(b.e.status ?? '').trim().toUpperCase() === 'CANCELLED';
+    const liveMembers = all.filter((b) => !isCancelled(b));
+    const cancelled = liveMembers.length === 0;
+    const used = cancelled ? all : liveMembers;
+    const primary = all.find((b) => b.e.orderNumber === primaryNo) ?? used[0];
+    const head = (used.find((b) => b.e.orderNumber === primaryNo) ?? used[0]).e;
+    const startDay = used.reduce((m, b) => (b.p.start < m ? b.p.start : m), used[0].p.start);
+    const plannedLastDay = used.reduce((m, b) => (b.p.last > m ? b.p.last : m), used[0].p.last);
+    // What a person recorded is stored on every member of the trip; the primary's copy wins.
+    const arrivedRaw = primary.e.arrivedOn ?? all.find((b) => b.e.arrivedOn)?.e.arrivedOn ?? null;
+    const arrivedOn = isDay(arrivedRaw) ? arrivedRaw : null;
+    const endRaw = primary.e.expectedEnd ?? all.find((b) => b.e.expectedEnd)?.e.expectedEnd ?? null;
+    const expectedEnd = isDay(endRaw) && endRaw >= startDay ? endRaw : null;
+    const lastBusyDay = arrivedOn ?? expectedEnd ?? plannedLastDay;
     let state: TripState;
     let assumed = false;
     if (cancelled) state = 'cancelled';
     else if (arrivedOn) state = 'arrived';
-    else if (p.start > today) state = 'planned';
+    else if (startDay > today) state = 'planned';
     else if (lastBusyDay >= today) state = 'on_trip';
     else if (daysBetween(lastBusyDay, today) > ASSUMED_AFTER_DAYS) { state = 'closed'; assumed = true; }
     else state = 'awaiting';
+    const freeSameDay = !!arrivedOn && (primary.e.freeSameDay ?? all.find((b) => b.e.freeSameDay != null)?.e.freeSameDay) === true;
+    const members: TripMember[] = [...used]
+      .sort((a, b) => Number(b.e.orderNumber === primaryNo) - Number(a.e.orderNumber === primaryNo) || a.p.start.localeCompare(b.p.start))
+      .map((b) => ({
+        orderNumber: b.e.orderNumber, proformaSlipId: b.e.proformaSlipId ?? null, partyName: b.e.partyName ?? null, plant: b.e.plant ?? null, status: b.e.status ?? null,
+        driver: b.e.driver ?? null, driverNotionId: b.e.driverNotionId ?? null, notionNote: b.e.notionNote ?? null, notInSystem: !!b.e.notInSystem,
+        startDay: b.p.start, plannedLastDay: b.p.last, tripDays: b.p.days,
+      }));
     trips.push({
-      orderNumber: e.orderNumber, proformaSlipId: e.proformaSlipId ?? null, partyName: e.partyName ?? null, plant: e.plant ?? null,
-      status: e.status ?? null, driver: e.driver ?? null, driverNotionId: e.driverNotionId ?? null, notionNote: e.notionNote ?? null, notInSystem: !!e.notInSystem,
-      tripDays: p.days, startDay: p.start, plannedLastDay: p.last, expectedEnd, arrivedOn, lastBusyDay, state, assumed,
+      orderNumber: head.orderNumber, members, freeSameDay, freeFromDay: addDays(lastBusyDay, arrivedOn && freeSameDay ? 0 : 1),
+      proformaSlipId: head.proformaSlipId ?? null, partyName: head.partyName ?? null, plant: head.plant ?? null,
+      status: head.status ?? null, driver: head.driver ?? null, driverNotionId: head.driverNotionId ?? null,
+      notionNote: members.find((m) => m.notionNote)?.notionNote ?? null,
+      notInSystem: members.every((m) => m.notInSystem),
+      tripDays: daysBetween(startDay, plannedLastDay) + 1, startDay, plannedLastDay, expectedEnd, arrivedOn, lastBusyDay, state, assumed,
     });
   }
   trips.sort((a, b) => a.startDay.localeCompare(b.startDay) || a.orderNumber.localeCompare(b.orderNumber));
 
   const live = trips.filter((t) => t.state !== 'cancelled');
-  const freeFrom = live.length ? addDays(live.reduce((m, t) => (t.lastBusyDay > m ? t.lastBusyDay : m), live[0].lastBusyDay), 1) : null;
+  const freeFrom = live.length ? live.reduce((m, t) => (t.freeFromDay > m ? t.freeFromDay : m), live[0].freeFromDay) : null;
   const vehicleState: VehicleTrips['vehicleState'] = live.some((t) => t.state === 'on_trip') ? 'busy' : live.some((t) => t.state === 'awaiting') ? 'awaiting' : 'free';
 
-  // A trip that starts on or before the previous trip's last busy day cannot happen: the vehicle is not back yet.
+  // A trip that starts before the previous trip frees the vehicle cannot happen: the vehicle is not back yet. (Arrived with "can go out again the same day"
+  // frees the vehicle on the arrival day itself, so an order starting that day is fine.)
   const conflicts: TripConflict[] = [];
   for (let i = 1; i < live.length; i++) {
     const t = live[i];
     if (t.state === 'arrived' || t.state === 'closed') continue;
     for (let j = i - 1; j >= 0; j--) {
       const prev = live[j];
-      if (t.startDay <= prev.lastBusyDay) { conflicts.push({ orderNumber: t.orderNumber, startDay: t.startDay, withOrderNumber: prev.orderNumber, withLastBusyDay: prev.lastBusyDay }); break; }
+      if (t.startDay < prev.freeFromDay) { conflicts.push({ orderNumber: t.orderNumber, startDay: t.startDay, withOrderNumber: prev.orderNumber, withLastBusyDay: prev.lastBusyDay }); break; }
     }
   }
   return { trips, freeFrom, vehicleState, conflicts };
 }
 
 // The fields only a person sets on a trip. A Refresh from Notion rebuilds the trip from Notion's data; these must survive it.
-const LOCAL_TRIP_FIELDS = ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt'] as const;
+const LOCAL_TRIP_FIELDS = ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'sameTripAs', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt'] as const;
 export function mergeLocalTripFields<T extends Record<string, any>>(previous: Record<string, any> | undefined, next: T): T {
   if (!previous) return next;
   for (const k of LOCAL_TRIP_FIELDS) if (previous[k] != null && next[k] == null) (next as any)[k] = previous[k];

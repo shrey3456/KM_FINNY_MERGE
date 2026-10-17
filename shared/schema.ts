@@ -1094,6 +1094,10 @@ export type VehiclePlanningOrderEntry = {
   arrivedByName?: string | null;
   arrivedAt?: string | null;
   arrivalNote?: string | null;
+  // Arrived with "can go out again the same day": the vehicle is free from the arrival day itself (not the day after).
+  freeSameDay?: boolean | null;
+  // A SHARED load (two orders on one vehicle at the same time): this order rides the trip of the order named here, so the two never clash.
+  sameTripAs?: string | null;
   expectedEnd?: string | null;
   expectedEndByCode?: string | null;
   expectedEndAt?: string | null;
