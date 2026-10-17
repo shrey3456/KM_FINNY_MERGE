@@ -1235,28 +1235,42 @@ router.get('/loading/date-items', requirePageAccess(['loading-overview', 'scan-v
       if (report) slips.push(...report.slips.filter((s) => !orderParam || s.orderNumber === orderParam).map((s) => ({ ...s, plant: p.plant as string })));
     }
 
+    // Name and Sr No come from the line's own product (two products can share a barcode: 35GM / 37GM salted peanuts); a line with no known product
+    // falls back to the first product that has its barcode.
+    const productIds = Array.from(new Set(slips.flatMap((s) => s.items.map((i: any) => i.productId).filter((id: any) => id != null))));
     const barcodes = Array.from(new Set(slips.flatMap((s) => s.items.map((i: any) => i.barcode))));
+    const nameById = new Map<number, string>();
+    const srById = new Map<number, string>();
     const nameByBarcode = new Map<string, string>();
     const srByBarcode = new Map<string, string>();
+    if (productIds.length > 0) {
+      const { rows } = await pool.query(`SELECT id, name, new_sr FROM products WHERE id = ANY($1::int[])`, [productIds]);
+      for (const r of rows as any[]) {
+        if (r.name) nameById.set(r.id, r.name);
+        if (r.new_sr) srById.set(r.id, String(r.new_sr));
+      }
+    }
     if (barcodes.length > 0) {
       const { rows: productRows } = await pool.query(
-        `SELECT barcode, name, new_sr FROM products WHERE barcode = ANY($1::text[])`, [barcodes],
+        `SELECT barcode, name, new_sr FROM products WHERE barcode = ANY($1::text[]) ORDER BY id`, [barcodes],
       );
       for (const r of productRows as any[]) {
         if (r.name && !nameByBarcode.has(r.barcode)) nameByBarcode.set(r.barcode, r.name);
-        // A barcode can sit on more than one product row (one per plant) — take the first Sr No set.
         if (r.new_sr && !srByBarcode.has(r.barcode)) srByBarcode.set(r.barcode, String(r.new_sr));
       }
     }
 
     type PartyRow = { partyName: string; orderNumber: string; plant: string; vehicleNumber: string | null; expected: number; loaded: number; extra: number; remaining: number };
-    type ItemAgg = { barcode: string; srNo: string | null; itemName: string; itemsPerPallet: number; expected: number; loaded: number; extra: number; remaining: number; parties: PartyRow[] };
-    const byBarcode = new Map<string, ItemAgg>();
+    type ItemAgg = { barcode: string; productId: number | null; sapCode: string | null; srNo: string | null; itemName: string; itemsPerPallet: number; expected: number; loaded: number; extra: number; remaining: number; parties: PartyRow[] };
+    const byItem = new Map<string, ItemAgg>();
     for (const slip of slips) {
       for (const it of slip.items) {
         const loaded = it.receivedQty + it.extraQty;
-        const row: ItemAgg = byBarcode.get(it.barcode) ?? {
-          barcode: it.barcode, srNo: srByBarcode.get(it.barcode) ?? null, itemName: nameByBarcode.get(it.barcode) ?? it.itemName, itemsPerPallet: it.itemsPerPallet,
+        const key = `${it.barcode}|${it.productId ?? ''}`;
+        const row: ItemAgg = byItem.get(key) ?? {
+          barcode: it.barcode, productId: it.productId ?? null, sapCode: it.sapCode ?? null,
+          srNo: (it.productId != null ? srById.get(it.productId) : undefined) ?? srByBarcode.get(it.barcode) ?? null,
+          itemName: (it.productId != null ? nameById.get(it.productId) : undefined) ?? nameByBarcode.get(it.barcode) ?? it.itemName, itemsPerPallet: it.itemsPerPallet,
           expected: 0, loaded: 0, extra: 0, remaining: 0, parties: [],
         };
         const remaining = Math.max(0, it.expectedQty - loaded);
@@ -1268,11 +1282,11 @@ router.get('/loading/date-items', requirePageAccess(['loading-overview', 'scan-v
           partyName: slip.partyName, orderNumber: slip.orderNumber, plant: slip.plant, vehicleNumber: slip.vehicleNumber,
           expected: it.expectedQty, loaded, extra: it.extraQty, remaining,
         });
-        byBarcode.set(it.barcode, row);
+        byItem.set(key, row);
       }
     }
     // In Sr No order (the order Product Master lists them in); products with no Sr No go last.
-    const items = Array.from(byBarcode.values()).sort((a, b) =>
+    const items = Array.from(byItem.values()).sort((a, b) =>
       (a.srNo ? 0 : 1) - (b.srNo ? 0 : 1)
       || (a.srNo ?? '').localeCompare(b.srNo ?? '', undefined, { numeric: true, sensitivity: 'base' })
       || a.itemName.localeCompare(b.itemName, undefined, { numeric: true, sensitivity: 'base' }));

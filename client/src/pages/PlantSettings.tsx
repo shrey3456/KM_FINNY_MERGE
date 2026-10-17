@@ -1,4 +1,5 @@
-import React, { useState, type ReactNode } from "react";
+import React, { useEffect, useRef, useState, type ReactNode } from "react";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { sortNatural } from "@/lib/utils";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -113,8 +114,12 @@ export default function PlantSettings() {
   const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingPlant, setEditingPlant] = useState<any>(null);
-  const [expandedPlantId, setExpandedPlantId] = useState<number | null>(null);
-  const [plantSearch, setPlantSearch] = useState("");
+  // The search, the open plant, and the table's page, page size and sort are kept for the browser session (leave the page and come back to where you were).
+  const [expandedPlantId, setExpandedPlantId] = usePersistentFilter<number | null>("plantSettings:expanded", null);
+  const [plantSearch, setPlantSearch] = usePersistentFilter<string>("plantSettings:search", "");
+  const [pageIndex, setPageIndex] = usePersistentFilter<number>("plantSettings:page", 0);
+  const [pageSize, setPageSize] = usePersistentFilter<number>("plantSettings:pageSize", 10);
+  const [tableSort, setTableSort] = usePersistentFilter<{ columnId: string; direction: "asc" | "desc" } | null>("plantSettings:sort", null);
   const [newStv, setNewStv] = useState("");
   const [editingStvId, setEditingStvId] = useState<number | null>(null);
   const [editingStvValue, setEditingStvValue] = useState("");
@@ -152,6 +157,10 @@ export default function PlantSettings() {
   });
 
   const selectedPlant = plants?.find((plant) => plant.id === expandedPlantId) ?? null;
+  // A saved open plant that no longer exists is closed; a new search starts again from the first page (the first run keeps the saved page).
+  useEffect(() => { if (plants && expandedPlantId != null && !plants.some((p: any) => p.id === expandedPlantId)) setExpandedPlantId(null); }, [plants, expandedPlantId]);
+  const firstSearchRun = useRef(true);
+  useEffect(() => { if (firstSearchRun.current) { firstSearchRun.current = false; return; } setPageIndex(0); }, [plantSearch]);
 
   const { data: stvs, isLoading: isStvsLoading } = useQuery<any[]>({
     queryKey: ["/api/plants", expandedPlantId, "stvs"],
@@ -1071,6 +1080,12 @@ export default function PlantSettings() {
             noResultsState="No plants match your search."
             hasActiveFilters={!!plantSearch}
             sortMode="client"
+            defaultSort={tableSort}
+            onSortingChange={(sv: any) => setTableSort(sv)}
+            pageIndex={pageIndex}
+            onPageIndexChange={setPageIndex}
+            pageSize={pageSize}
+            onPageSizeChange={setPageSize}
             // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box of
             // its own — matching develop.
             paginationMode="client"

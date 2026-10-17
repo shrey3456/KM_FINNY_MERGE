@@ -26,7 +26,7 @@ type Plant = { id: number; name: string; bgColor?: string | null; textColor?: st
 
 type PartyRow = { partyName: string; orderNumber: string; plant: string; vehicleNumber: string | null; expected: number; loaded: number; extra: number; remaining: number };
 type ItemRow = {
-  barcode: string; srNo: string | null; itemName: string; itemsPerPallet: number;
+  barcode: string; productId?: number | null; sapCode?: string | null; srNo: string | null; itemName: string; itemsPerPallet: number;
   expected: number; loaded: number; extra: number; remaining: number;
   parties: PartyRow[];
 };
@@ -122,21 +122,22 @@ export function LoadingViewerSection({
   getPlantColorCfg: (plantName: string | null | undefined) => Plant | null;
 }) {
   const [plant, setPlant] = usePersistentFilter<string>("scanViewer:loading:plant", "");
-  // Always opens on today — not remembered between visits, so it never reopens on an old date.
-  const [date, setDate] = useState(() => format(new Date(), "yyyy-MM-dd"));
-  const [search, setSearch] = useState("");
+  // Everything on this page is kept for the browser session (leave Load Master and come back, and the date, search, picked order, tab, chip, open row and
+  // column filters are as you left them). It is session-only, so a new visit starts on today; the Today chip jumps back at any time.
+  const [date, setDate] = usePersistentFilter<string>("loadMaster:date", format(new Date(), "yyyy-MM-dd"));
+  const [search, setSearch] = usePersistentFilter<string>("loadMaster:search", "");
   // Order-number search: narrows the whole page to that order — only its items, and every quantity
   // (rows, totals, stats) counted for that order alone, not the whole date.
-  const [orderNo, setOrderNo] = useState("");
-  const [picked, setPicked] = useState<OrderHit | null>(null);
+  const [orderNo, setOrderNo] = usePersistentFilter<string>("loadMaster:orderNo", "");
+  const [picked, setPicked] = usePersistentFilter<OrderHit | null>("loadMaster:picked", null);
   const [sugOpen, setSugOpen] = useState(false);
   // Items = every product of the day; Slips = every proforma slip of the day, each opening in Load Operations.
-  const [tab, setTab] = useState<"items" | "slips">("items");
+  const [tab, setTab] = usePersistentFilter<"items" | "slips">("loadMaster:tab", "items");
   // Slips tab: "" = every slip; "load:<state>" or "notion:<status>" narrows to one status chip.
-  const [slipChip, setSlipChip] = useState("");
+  const [slipChip, setSlipChip] = usePersistentFilter<string>("loadMaster:slipChip", "");
   const [, navigate] = useLocation();
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [conditions, setConditions] = useState<Record<string, FilterCondition>>({});
+  const [expanded, setExpanded] = usePersistentFilter<string | null>("loadMaster:expanded", null);
+  const [conditions, setConditions] = usePersistentFilter<Record<string, FilterCondition>>("loadMaster:conditions", {});
 
   // A saved plant this user may no longer see falls back to the first one they can.
   // "All plants" is a choice of its own (and the default), not a plant name.
@@ -254,7 +255,9 @@ export function LoadingViewerSection({
     return `${it.srNo ?? ""} ${it.itemName} ${it.barcode} ${it.parties.map((p) => `${p.partyName} ${p.orderNumber}`).join(" ")}`.toLowerCase().includes(q);
   });
 
-  const toggle = (barcode: string) => setExpanded((cur) => (cur === barcode ? null : barcode));
+  // Two products can share a barcode, so a row is the barcode AND its product.
+  const rowKey = (r: { barcode: string; productId?: number | null }) => `${r.barcode}|${r.productId ?? ""}`;
+  const toggle = (key: string) => setExpanded((cur) => (cur === key ? null : key));
   const plantCfg = activePlant === ALL_PLANTS ? null : getPlantColorCfg(activePlant);
 
   const columns: DataTableColumn<ItemRow>[] = [
@@ -274,7 +277,7 @@ export function LoadingViewerSection({
           <ProductThumb name={r.itemName} />
           <div className="min-w-0">
             <span className="block text-sm font-medium leading-snug text-gray-900">{r.itemName}</span>
-            <span className="block font-mono text-sm text-gray-400">{r.barcode}</span>
+            <span className="block font-mono text-sm text-gray-400">{r.barcode}{r.sapCode ? ` · SAP ${r.sapCode}` : ""}</span>
             {r.itemsPerPallet > 0 && <span className="block text-xs font-semibold text-gray-500">{r.itemsPerPallet} per pallet</span>}
             {r.expected === 0 && r.extra > 0 && (
               <span className="mt-0.5 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-sm font-bold text-amber-800">
@@ -619,13 +622,13 @@ export function LoadingViewerSection({
                 headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white text-xs sm:text-xs"
                 columns={columns}
                 data={rows}
-                getRowId={(r) => r.barcode}
+                getRowId={(r) => rowKey(r)}
                 enableZebraStripes
                 rowClassName={(r) => (r.extra > 0 ? "bg-amber-50 hover:bg-amber-50/80" : r.expected > 0 && r.loaded >= r.expected ? "bg-emerald-50 hover:bg-emerald-50/80" : undefined)}
                 renderExpandedRow={(r) => <PartyBreakdown row={r} showPlant={activePlant === ALL_PLANTS} />}
                 isRowExpandable={() => true}
                 expandedRowId={expanded}
-                onRowClick={(r) => toggle(r.barcode)}
+                onRowClick={(r) => toggle(rowKey(r))}
                 emptyState="No items."
                 noResultsState="No items match this filter."
                 hasActiveFilters={!!q || conditionList.length > 0}
@@ -642,12 +645,12 @@ export function LoadingViewerSection({
               {rows.length === 0 ? (
                 <p className="col-span-full py-8 text-center text-base text-gray-400">No items match this filter.</p>
               ) : rows.map((r) => {
-                const open = expanded === r.barcode;
+                const open = expanded === rowKey(r);
                 return (
-                  <div key={r.barcode} className={open ? "sm:col-span-2" : undefined}>
+                  <div key={rowKey(r)} className={open ? "sm:col-span-2" : undefined}>
                     <div
                       role="button"
-                      onClick={() => toggle(r.barcode)}
+                      onClick={() => toggle(rowKey(r))}
                       className={`flex items-center gap-3 rounded-lg border border-l-4 px-3 py-2.5 shadow-sm ${
                         r.extra > 0 ? "border-l-amber-400 bg-amber-50" : r.expected > 0 && r.loaded >= r.expected ? "border-l-emerald-500 bg-emerald-50" : "border-l-gray-300 bg-white"
                       }`}
@@ -655,7 +658,7 @@ export function LoadingViewerSection({
                       <ProductThumb name={r.itemName} className="h-14 w-14" />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-base font-semibold text-gray-900">{r.itemName}</p>
-                        <p className="truncate font-mono text-sm text-gray-400">{r.barcode}{r.itemsPerPallet > 0 ? ` · ${r.itemsPerPallet}/plt` : ""}</p>
+                        <p className="truncate font-mono text-sm text-gray-400">{r.barcode}{r.sapCode ? ` · SAP ${r.sapCode}` : ""}{r.itemsPerPallet > 0 ? ` · ${r.itemsPerPallet}/plt` : ""}</p>
                         {r.expected === 0 && r.extra > 0 && (
                           <p className="truncate text-sm font-bold text-amber-700">
                             {picked ? "Extra · not on this order's slip" : `Not on any order · ${r.parties.filter((p) => p.extra > 0).map((p) => `#${p.orderNumber}`).join(", ")}`}

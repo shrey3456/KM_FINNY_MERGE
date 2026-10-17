@@ -1,5 +1,5 @@
 import { pool } from '../db';
-import { storage } from '../storage';
+import { resolveLineProduct } from './productSap';
 import { getPlantStateCode, resolvePalletSizeOrQty } from '../routes/order-scan';
 
 // Read-time report across every proforma slip loaded against one plant+order date — the
@@ -15,6 +15,8 @@ import { getPlantStateCode, resolvePalletSizeOrQty } from '../routes/order-scan'
 
 export type LoadDateReportItem = {
   barcode: string; itemName: string; itemsPerPallet: number;
+  // Two products can share one barcode (35GM / 37GM salted peanuts); the item is the barcode AND its product.
+  productId: number | null; sapCode: string | null;
   expectedQty: number; receivedQty: number; extraQty: number; missingQty: number;
 };
 export type LoadDateReportSlip = {
@@ -43,22 +45,22 @@ export async function computeLoadDateReport(plant: string, orderDate: string): P
   const orderNumbers = slipRows.map((s: any) => s.orderNumber);
 
   const { rows: itemRows } = await pool.query(
-    `SELECT proforma_slip_id AS "slipId", barcode, item_name AS "itemName", quantity
+    `SELECT proforma_slip_id AS "slipId", barcode, item_name AS "itemName", quantity, product_id AS "productId", sap_code AS "sapCode"
      FROM proforma_slip_items WHERE proforma_slip_id = ANY($1::int[])`,
     [slipIds],
   );
   // Received/extra keyed by orderNumber (loading_scan_events has no proformaSlipId reliably set
   // on every historical row — orderNumber is the column every /scan write has always populated).
   const { rows: receivedRows } = await pool.query(
-    `SELECT order_number AS "orderNumber", barcode, COALESCE(SUM(total_qty), 0)::int AS "receivedQty"
+    `SELECT order_number AS "orderNumber", barcode, product_id AS "productId", MAX(sap_code) AS "sapCode", COALESCE(SUM(total_qty), 0)::int AS "receivedQty"
      FROM loading_scan_events WHERE order_number = ANY($1::text[]) AND is_extra = false AND voided IS NOT TRUE
-     GROUP BY order_number, barcode`,
+     GROUP BY order_number, barcode, product_id`,
     [orderNumbers],
   );
   const { rows: extraRows } = await pool.query(
-    `SELECT order_number AS "orderNumber", barcode, COALESCE(SUM(total_qty), 0)::int AS "extraQty"
+    `SELECT order_number AS "orderNumber", barcode, product_id AS "productId", MAX(sap_code) AS "sapCode", COALESCE(SUM(total_qty), 0)::int AS "extraQty"
      FROM loading_scan_events WHERE order_number = ANY($1::text[]) AND is_extra = true AND voided IS NOT TRUE
-     GROUP BY order_number, barcode`,
+     GROUP BY order_number, barcode, product_id`,
     [orderNumbers],
   );
   const { rows: timingRows } = await pool.query(
@@ -70,19 +72,36 @@ export async function computeLoadDateReport(plant: string, orderDate: string): P
 
   const plantForState = slipRows[0].plant ?? plant;
   const state = await getPlantStateCode(pool, plantForState);
-  const ippByBarcode = new Map<string, number>();
-  async function ippFor(barcode: string, fallbackQty: number): Promise<number> {
-    if (ippByBarcode.has(barcode)) return ippByBarcode.get(barcode)!;
-    const product = await storage.getProductByBarcode(barcode, plantForState);
-    const ipp = resolvePalletSizeOrQty(product ?? null, state, fallbackQty);
-    ippByBarcode.set(barcode, ipp);
-    return ipp;
-  }
 
-  const receivedMap = new Map<string, number>();
-  for (const r of receivedRows as any[]) receivedMap.set(`${r.orderNumber}::${r.barcode}`, r.receivedQty);
-  const extraMap = new Map<string, number>();
-  for (const r of extraRows as any[]) extraMap.set(`${r.orderNumber}::${r.barcode}`, r.extraQty);
+  // The product a line / scan means: the one stored on it, else found from its barcode + SAP (the same rule the Loading page uses).
+  const productRowCache = new Map<number, any>();
+  async function productRowById(id: number): Promise<any | null> {
+    if (productRowCache.has(id)) return productRowCache.get(id);
+    const { rows } = await pool.query(`SELECT * FROM products WHERE id = $1`, [id]);
+    productRowCache.set(id, rows[0] ?? null);
+    return rows[0] ?? null;
+  }
+  async function productOf(barcode: string, productId: number | null, sap: string | null): Promise<{ id: number | null; row: any | null }> {
+    if (productId != null) return { id: Number(productId), row: await productRowById(Number(productId)) };
+    const lp = await resolveLineProduct(pool, barcode, sap, state);
+    return { id: lp.productId, row: lp.row };
+  }
+  const lineKey = (barcode: string, productId: number | null) => `${barcode}|${productId ?? ''}`;
+
+  // Scan totals per slip line: key = barcode + product.
+  type Tot = { received: number; extra: number };
+  const totalsByOrder = new Map<string, Map<string, Tot & { barcode: string; productId: number | null; sapCode: string | null }>>();
+  const addTotal = async (r: any, field: 'received' | 'extra', qty: number) => {
+    const p = await productOf(r.barcode, r.productId ?? null, r.sapCode ?? null);
+    if (!totalsByOrder.has(r.orderNumber)) totalsByOrder.set(r.orderNumber, new Map());
+    const m = totalsByOrder.get(r.orderNumber)!;
+    const k = lineKey(r.barcode, p.id);
+    const cur = m.get(k) ?? { received: 0, extra: 0, barcode: r.barcode, productId: p.id, sapCode: r.sapCode ?? null };
+    cur[field] += qty;
+    m.set(k, cur);
+  };
+  for (const r of receivedRows as any[]) await addTotal(r, 'received', r.receivedQty);
+  for (const r of extraRows as any[]) await addTotal(r, 'extra', r.extraQty);
   const startTimeMap = new Map<string, string>();
   for (const r of timingRows as any[]) if (r.startTime) startTimeMap.set(r.orderNumber, new Date(r.startTime).toISOString());
 
@@ -96,35 +115,49 @@ export async function computeLoadDateReport(plant: string, orderDate: string): P
   const slips: LoadDateReportSlip[] = [];
   for (const slip of slipRows as any[]) {
     const rawItems = itemsBySlip.get(slip.id) ?? [];
-    // Same-barcode lines on one slip are summed into a single item row, same as the live Items
-    // table (withProgress in loading.ts) does.
-    const expectedByBarcode = new Map<string, { itemName: string; expectedQty: number }>();
+    // Lines of the SAME product (same barcode and product) on one slip are summed into one item row, like the live Items table does; two products that
+    // share a barcode stay two rows.
+    type Line = { barcode: string; productId: number | null; sapCode: string | null; itemName: string; expectedQty: number; row: any | null };
+    const lines = new Map<string, Line>();
     for (const it of rawItems) {
-      const existing = expectedByBarcode.get(it.barcode);
+      const p = await productOf(it.barcode, it.productId ?? null, it.sapCode ?? null);
+      const k = lineKey(it.barcode, p.id);
+      const existing = lines.get(k);
       if (existing) existing.expectedQty += it.quantity ?? 0;
-      else expectedByBarcode.set(it.barcode, { itemName: it.itemName ?? it.barcode, expectedQty: it.quantity ?? 0 });
+      else lines.set(k, { barcode: it.barcode, productId: p.id, sapCode: it.sapCode ?? null, itemName: it.itemName ?? it.barcode, expectedQty: it.quantity ?? 0, row: p.row });
     }
-    // A barcode scanned as a pure Extra (not on this slip's manifest at all) still needs a row.
-    for (const key of extraMap.keys()) {
-      const [orderNumber, barcode] = key.split('::');
-      if (orderNumber === slip.orderNumber && !expectedByBarcode.has(barcode)) {
-        expectedByBarcode.set(barcode, { itemName: barcode, expectedQty: 0 });
+    // Scans of a barcode that is not on this slip at all (a pure Extra) still need a row.
+    const totals = totalsByOrder.get(slip.orderNumber) ?? new Map();
+    // A scan with no known product joins the first slip line that has the same barcode.
+    const landing = (t: { barcode: string; productId: number | null }) => {
+      const exact = lineKey(t.barcode, t.productId);
+      if (lines.has(exact)) return exact;
+      if (t.productId == null) { for (const [k, l] of lines) if (l.barcode === t.barcode) return k; }
+      return exact;
+    };
+    const perLine = new Map<string, Tot>();
+    for (const t of totals.values()) {
+      const k = landing(t);
+      if (!lines.has(k)) {
+        const p = await productOf(t.barcode, t.productId, t.sapCode);
+        lines.set(k, { barcode: t.barcode, productId: t.productId, sapCode: t.sapCode, itemName: p.row?.name ?? t.barcode, expectedQty: 0, row: p.row });
       }
+      const cur = perLine.get(k) ?? { received: 0, extra: 0 };
+      cur.received += t.received; cur.extra += t.extra;
+      perLine.set(k, cur);
     }
 
     const items: LoadDateReportItem[] = [];
-    for (const [barcode, info] of expectedByBarcode.entries()) {
-      const key = `${slip.orderNumber}::${barcode}`;
-      const received = receivedMap.get(key) ?? 0;
-      const extra = extraMap.get(key) ?? 0;
+    for (const [k, line] of lines.entries()) {
+      const t = perLine.get(k) ?? { received: 0, extra: 0 };
       items.push({
-        barcode, itemName: info.itemName,
-        itemsPerPallet: await ippFor(barcode, info.expectedQty),
-        expectedQty: info.expectedQty, receivedQty: received, extraQty: extra,
-        missingQty: Math.max(0, info.expectedQty - received),
+        barcode: line.barcode, itemName: line.itemName, productId: line.productId, sapCode: line.sapCode,
+        itemsPerPallet: resolvePalletSizeOrQty(line.row, state, line.expectedQty),
+        expectedQty: line.expectedQty, receivedQty: t.received, extraQty: t.extra,
+        missingQty: Math.max(0, line.expectedQty - t.received),
       });
     }
-    items.sort((a, b) => a.barcode.localeCompare(b.barcode));
+    items.sort((a, b) => a.barcode.localeCompare(b.barcode) || (a.productId ?? 0) - (b.productId ?? 0));
 
     slips.push({
       slipId: slip.id, orderNumber: slip.orderNumber, partyName: slip.partyName, vehicleNumber: slip.vehicleNumber,

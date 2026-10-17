@@ -1251,7 +1251,10 @@ export default function Unloading() {
   };
 
   function renderItemHistoryPanel(row: SessionItem) {
-    const rowEvents = (itemHistoryQuery.data?.events ?? []).filter((ev) => normalize(ev.barcode) === normalize(row.barcode));
+    // Two products can share a barcode (35GM / 37GM salted peanuts): an entry belongs to the line when the barcode AND the SAP code match
+    // (an entry with no stored SAP code falls back to the barcode alone).
+    const rowEvents = (itemHistoryQuery.data?.events ?? []).filter((ev) =>
+      normalize(ev.barcode) === normalize(row.barcode) && (!ev.sapCode || !row.sapCode || normalize(ev.sapCode) === normalize(row.sapCode)));
     return (
       <div className="bg-gray-50 px-3 py-3 sm:px-4">
         {itemHistoryQuery.isLoading ? (

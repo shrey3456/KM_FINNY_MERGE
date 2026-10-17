@@ -205,7 +205,7 @@ type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: bo
 type LoadHistoryEvent = {
   id: number; barcode: string | null; itemName: string | null; totalQty: number;
   isExtra: boolean; voided: boolean | null; scannedByName: string | null; scannedAt: string;
-  stv: string | null;
+  stv: string | null; sapCode?: string | null;
   // Written by the Items table's +/- buttons, not a scan — shown as "Loading Adjust".
   isAdjust?: boolean;
 };
@@ -2727,7 +2727,10 @@ export default function LoadOperation() {
   ];
 
   function renderLoadingItemHistoryPanel(item: ProformaItem) {
-    const itemEvents = (orderLoadHistoryQuery.data?.items ?? []).filter((ev) => normalize(ev.barcode) === normalize(item.barcode));
+    // Two products can share one barcode (35GM and 37GM salted peanuts), so a scan belongs to the line when the barcode AND the SAP code match;
+    // an entry with no stored SAP code falls back to the barcode alone.
+    const itemEvents = (orderLoadHistoryQuery.data?.items ?? []).filter((ev) =>
+      normalize(ev.barcode) === normalize(item.barcode) && (!ev.sapCode || !item.sapCode || normalize(ev.sapCode) === normalize(item.sapCode)));
     return (
       <div className="border-b border-gray-200 bg-gray-50 p-3">
         {orderLoadHistoryQuery.isLoading ? (

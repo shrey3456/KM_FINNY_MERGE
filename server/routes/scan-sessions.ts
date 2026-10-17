@@ -834,7 +834,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       pb.new_sr            AS "srNo",
       ois.csv_file_name    AS "orderName",
       ois.order_date       AS "orderDate",
-      ois.plant            AS "plant"
+      ois.plant            AS "plant",
+      NULL::text           AS "sapCode"
     FROM order_scan_events ose
     JOIN order_import_sessions ois ON ois.id = ose.session_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ose.barcode))
@@ -878,7 +879,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       pb.new_sr AS "srNo",
       lse.order_number AS "orderName",
       sod.order_date::text AS "orderDate",
-      lse.plant AS "plant"
+      lse.plant AS "plant",
+      lse.sap_code AS "sapCode"
     FROM loading_scan_events lse
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(lse.barcode))
     LEFT JOIN slip_order_date sod ON sod.order_number = lse.order_number
@@ -921,7 +923,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       pb.new_sr AS "srNo",
       use.vehicle_number AS "orderName",
       uis.order_date AS "orderDate",
-      use.plant AS "plant"
+      use.plant AS "plant",
+      NULL::text AS "sapCode"
     FROM unload_scan_events use
     JOIN unload_import_sessions uis ON uis.id = use.session_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(use.barcode))
@@ -962,7 +965,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       COALESCE(ln.sr_no, pb.new_sr) AS "srNo",
       sl.reason AS "orderName",
       NULL::text AS "orderDate",
-      ln.plant AS "plant"
+      ln.plant AS "plant",
+      NULL::text AS "sapCode"
     FROM stock_v2_ledger sl
     JOIN stock_v2_lines ln ON ln.id = sl.line_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ln.barcode))
@@ -1015,7 +1019,8 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       COALESCE(ssp.sr_no, pb.new_sr) AS "srNo",
       ssp.order_number   AS "orderName",
       ss.order_date::text AS "orderDate",
-      ss.plant           AS "plant"
+      ss.plant           AS "plant",
+      NULL::text         AS "sapCode"
     FROM sort_slip_picks ssp
     JOIN sort_slips ss ON ss.id = ssp.sort_slip_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ssp.barcode))

@@ -143,6 +143,8 @@ interface DataTableProps<TData> {
 
   sortMode?: "none" | "client" | "external";
   sortState?: DataTableSortState | null;
+  /** sortMode="client" only: the sort the table starts with (a page that remembers its sort passes the saved one here). */
+  defaultSort?: DataTableSortState | null;
   onSortingChange?: (state: DataTableSortState | null) => void;
   onSortColumnClick?: (columnId: string) => void;
 
@@ -254,6 +256,7 @@ export function DataTable<TData>({
   searchableColumnIds,
   sortMode = "none",
   sortState,
+  defaultSort,
   onSortingChange,
   onSortColumnClick,
   paginationMode = "none",
@@ -296,7 +299,7 @@ export function DataTable<TData>({
   containerClassName,
 }: DataTableProps<TData>) {
   const [internalSearch, setInternalSearch] = useState("");
-  const [internalSort, setInternalSort] = useState<DataTableSortState | null>(null);
+  const [internalSort, setInternalSort] = useState<DataTableSortState | null>(defaultSort ?? null);
   const [internalPageIndex, setInternalPageIndex] = useState(0);
   const [internalPageSize, setInternalPageSize] = useState(defaultPageSize);
   const [internalSelectedIds, setInternalSelectedIds] = useState<string[]>([]);

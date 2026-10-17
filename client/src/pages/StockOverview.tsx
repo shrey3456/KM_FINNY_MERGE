@@ -15,6 +15,7 @@ import { scanTypeLabel } from "./Scanning/ScanHistory";
 import { Input } from "@/components/ui/input";
 import PageHeader from "@/components/PageHeader";
 import { PlantBadge } from "@/components/PlantBadge";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
@@ -101,17 +102,25 @@ export default function StockOverview() {
   // Same rule as the Stock Overview: only an admin sees the delete icon (the server checks it too).
   const isAdmin = ["admin", "super-admin"].includes((((user as any)?.role as string) ?? "").toLowerCase());
   const [adjustTarget, setAdjustTarget] = useState<Row | null>(null);
-  const [search, setSearch] = useState("");
-  const [state, setState] = useState("");
-  const [plant, setPlant] = useState("");
+  // Where you were is kept for the browser session (leave the page and come back, and the search, State, Plant, date, Extra only, the open product and
+  // its tab, the sort and the page are all as you left them). "Clear all" / the pills / the search box's own clear put them back.
+  const [search, setSearch] = usePersistentFilter<string>("stockOverview:search", "");
+  const [state, setState] = usePersistentFilter<string>("stockOverview:state", "");
+  const [plant, setPlant] = usePersistentFilter<string>("stockOverview:plant", "");
+  const [extraOnly, setExtraOnly] = usePersistentFilter<boolean>("stockOverview:extraOnly", false);
+  const [pageIndex, setPageIndex] = usePersistentFilter<number>("stockOverview:page", 0);
+  const [pageSize, setPageSize] = usePersistentFilter<number>("stockOverview:pageSize", 50);
   // Same encoding as the Stock Overview: "d:YYYY-MM-DD" (one day) or "r:YYYY-MM-DD:YYYY-MM-DD" (a range).
-  const [dateValue, setDateValue] = useState("");
+  const [dateValue, setDateValue] = usePersistentFilter<string>("stockOverview:date", "");
   const { from, to } = useMemo(() => {
     if (dateValue.startsWith("d:")) return { from: dateValue.slice(2), to: dateValue.slice(2) };
     if (dateValue.startsWith("r:")) { const [, f, t] = dateValue.split(":"); return { from: f ?? "", to: t ?? "" }; }
     return { from: "", to: "" };
   }, [dateValue]);
-  const [detail, setDetail] = useState<Row | null>(null);
+  // The open product row is remembered by its id (the row itself is rebuilt from the data), and so is its tab. Opening a product starts on Plants.
+  const [detailId, setDetailId] = usePersistentFilter<string | null>("stockOverview:detailId", null);
+  const [detailTab, setDetailTab] = usePersistentFilter<string>("stockOverview:detailTab", "plants");
+  const toggleDetail = (r: Row) => { const id = rowIdOf(r); setDetailTab("plants"); setDetailId((cur) => (cur === id ? null : id)); };
   // Excel-style per-column filters (the funnel on each header, or "+ Filter"): same engine as the Stock Overview (lib/columnFilters).
   const [columnConditions, setColumnConditions] = useState<Record<string, FilterCondition>>(() => {
     try { return JSON.parse(sessionStorage.getItem(FILTERS_KEY) ?? "{}"); } catch { return {}; }
@@ -120,7 +129,7 @@ export default function StockOverview() {
   const setColumnCondition = (id: string, c: FilterCondition) => setColumnConditions((prev) => ({ ...prev, [id]: c }));
   const clearColumnCondition = (id: string) => setColumnConditions((prev) => { const n = { ...prev }; delete n[id]; return n; });
   // The table's own sort, captured so an export comes out in the order you are looking at.
-  const [sortState, setSortState] = useState<{ columnId: string; direction: "asc" | "desc" } | null>(null);
+  const [sortState, setSortState] = usePersistentFilter<{ columnId: string; direction: "asc" | "desc" } | null>("stockOverview:sort", null);
   const [filterPickerOpen, setFilterPickerOpen] = useState(false);
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
@@ -224,11 +233,26 @@ export default function StockOverview() {
     { id: "stock", label: "Stock", filterType: "number", options: numberOptions((r) => r.stock), accessor: (r) => r.stock },
   ];
   const conditionList = Object.values(columnConditions);
-  const rows = useMemo(
+  const afterFilters = useMemo(
     () => (conditionList.length ? mergedRows.filter((r) => matchAllConditions(r, conditionList, filterableColumns)) : mergedRows),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [mergedRows, columnConditions],
   );
+  // "Extra only": the lines that had an Extra Purchase or an Extra Sale in the period. A combined row adds its plants, so it stays when any plant had extra.
+  const hasExtra = (r: Row) => r.extraPurchaseQty > 0 || r.extraSaleQty > 0;
+  const extraCount = useMemo(() => afterFilters.filter(hasExtra).length, [afterFilters]);
+  const rows = useMemo(() => (extraOnly ? afterFilters.filter(hasExtra) : afterFilters), [afterFilters, extraOnly]);
+  const detail = useMemo(() => (detailId ? rows.find((r) => rowIdOf(r) === detailId) ?? null : null), [rows, detailId]);
+  // A changed filter starts again from the first page (but the very first run keeps the page that was saved).
+  const filterSig = JSON.stringify([search, state, plant, dateValue, extraOnly, columnConditions]);
+  const firstFilterRun = useRef(true);
+  useEffect(() => { if (firstFilterRun.current) { firstFilterRun.current = false; return; } setPageIndex(0); }, [filterSig]);
+  // A saved State / Plant that no longer exists is dropped.
+  useEffect(() => {
+    if (!all) return;
+    if (state && !states.some((g) => g.state === state)) { setState(""); setPlant(""); return; }
+    if (plant && !(states.find((g) => g.state === state)?.plants ?? states.flatMap((g) => g.plants)).includes(plant)) setPlant("");
+  }, [all, states, state, plant]);
   const columnHeader = (id: string, label: string) => {
     const col = filterableColumns.find((c) => c.id === id);
     if (!col) return label;
@@ -265,7 +289,7 @@ export default function StockOverview() {
       id: "itemName", header: "Item", hideable: false, width: 220, fixedWidth: true, sortable: true, totalable: false,
       accessor: (r) => r.itemName, cellClassName: "font-medium text-gray-900 whitespace-normal break-words",
       render: (r) => (
-        <button type="button" onClick={() => setDetail((cur) => (cur && rowIdOf(cur) === rowIdOf(r) ? null : r))} className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e]">
+        <button type="button" onClick={() => toggleDetail(r)} className="text-left underline decoration-dotted decoration-gray-300 underline-offset-2 hover:text-[#001d6e]">
           {r.itemName}
         </button>
       ),
@@ -369,7 +393,7 @@ export default function StockOverview() {
       XLSX.writeFile(book, `stock-new-${stamp}.xlsx`);
     } else {
       const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
-      const scope = [state ? `State ${state}` : "All states", plant || "", search ? `search "${search}"` : "", Object.keys(columnConditions).length ? `${Object.keys(columnConditions).length} filter(s)` : ""].filter(Boolean).join(" · ");
+      const scope = [state ? `State ${state}` : "All states", plant || "", extraOnly ? "Extra only" : "", search ? `search "${search}"` : "", Object.keys(columnConditions).length ? `${Object.keys(columnConditions).length} filter(s)` : ""].filter(Boolean).join(" · ");
       const subtitle = `${period} · ${scope} · ${rows.length} rows`;
       setPdfProperties(doc, "Stock Overview Report", subtitle);
       const startY = drawPdfHeader(doc, { title: "Stock Overview Report", subtitle, margin: 10, generated: format(new Date(), "d MMM yyyy, HH:mm") });
@@ -412,9 +436,10 @@ export default function StockOverview() {
           <button key={g.state} onClick={() => { setState(g.state); setPlant(""); }} className={state === g.state && !plant ? PILL_ON : PILL_OFF}>{g.state}</button>
         ))}
       </div>
-      {state && (states.find((g) => g.state === state)?.plants.length ?? 0) > 1 && (
+      {state && (states.find((g) => g.state === state)?.plants.length ?? 0) > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>
+          <button onClick={() => setPlant("")} className={!plant ? PILL_ON : PILL_OFF}>All plants</button>
           {states.find((g) => g.state === state)!.plants.map((p) => (
             <button key={p} onClick={() => setPlant(plant === p ? "" : p)} className={plant === p ? PILL_ON : PILL_OFF}>{p}</button>
           ))}
@@ -433,6 +458,15 @@ export default function StockOverview() {
             </Button>
             <CollapsibleSearch value={search} onChange={setSearch} placeholder="Sr No, item, barcode, SAP, category…" />
             <DateFilter value={dateValue} onChange={setDateValue} />
+            <button
+              type="button"
+              aria-pressed={extraOnly}
+              onClick={() => setExtraOnly((v) => !v)}
+              title={extraOnly ? "Showing only lines with an Extra Purchase or Extra Sale — click to show all" : "Show only lines with an Extra Purchase or an Extra Sale"}
+              className={`h-8 rounded-md border px-2.5 text-xs font-medium ${extraOnly ? "border-amber-500 bg-amber-500 text-white" : "border-amber-300 bg-white text-amber-700 hover:bg-amber-50"}`}
+            >
+              Extra only ({extraCount})
+            </button>
             <Popover
               open={filterPickerOpen}
               onOpenChange={(open) => { setFilterPickerOpen(open); if (!open) { setFilterPickerKey(""); setFilterPickerSearch(""); } }}
@@ -476,8 +510,8 @@ export default function StockOverview() {
                 ) : null}
               </PopoverContent>
             </Popover>
-            {Object.values(columnConditions).some((c) => !isConditionEmpty(c)) && (
-              <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900" onClick={() => setColumnConditions({})}>Clear all</Button>
+            {(extraOnly || Object.values(columnConditions).some((c) => !isConditionEmpty(c))) && (
+              <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-gray-900" onClick={() => { setColumnConditions({}); setExtraOnly(false); }}>Clear all</Button>
             )}
             <DataTableColumnToggle
               columnOrder={columnOrder}
@@ -510,12 +544,12 @@ export default function StockOverview() {
           columns={styledColumns}
           data={isLoading ? [] : rows}
           getRowId={rowIdOf}
-          renderExpandedRow={() => (detail ? <EntriesPanel row={detail} dateSelected={!!(from || to)} /> : null)}
+          renderExpandedRow={() => (detail ? <EntriesPanel row={detail} dateSelected={!!(from || to)} tab={detailTab} onTab={setDetailTab} /> : null)}
           isRowExpandable={() => true}
           expandedRowId={detail ? rowIdOf(detail) : null}
           emptyState="No stock lines yet. They appear here once stock is received, loaded or adjusted."
-          noResultsState="No stock rows match your search."
-          hasActiveFilters={!!search || Object.keys(columnConditions).length > 0}
+          noResultsState={extraOnly ? "No lines with an Extra Purchase or Extra Sale for these dates." : "No stock rows match your search."}
+          hasActiveFilters={!!search || extraOnly || Object.keys(columnConditions).length > 0}
           headerClassName="bg-[#001d6e] text-white border-[#1a3a9c] hover:bg-[#0a2b7e] hover:text-white"
           enableColumnVisibility
           columnVisibility={visibleSet}
@@ -527,9 +561,14 @@ export default function StockOverview() {
           enableTotalsRow
           enableZebraStripes
           sortMode="client"
+          defaultSort={sortState}
           isStickyHeader
           maxHeight="max(480px, calc(100dvh - 140px))"
           paginationMode="client"
+          pageIndex={pageIndex}
+          onPageIndexChange={setPageIndex}
+          pageSize={pageSize}
+          onPageSizeChange={setPageSize}
           stickyColumnIds={["srNo", "itemName", "barcode"]}
           defaultPageSize={50}
           pageSizeOptions={[20, 50, 100, 200]}
@@ -699,14 +738,19 @@ type Hist = { items: any[] };
 const fmtAt = (v: string | null | undefined) => { const d = v ? new Date(v) : null; return d && !isNaN(d.getTime()) ? format(d, "dd MMM yyyy, hh:mm:ss a") : "—"; };
 const tabCls = (on: boolean) => `rounded-full px-3 py-1 text-xs font-medium ${on ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`;
 
-function EntriesPanel({ row, dateSelected }: { row: Row; dateSelected: boolean }) {
+type EntryTab = "plants" | "days" | "scanning" | "unloading" | "loading" | "adjust";
+const ENTRY_TABS: EntryTab[] = ["plants", "days", "scanning", "unloading", "loading", "adjust"];
+
+function EntriesPanel({ row, dateSelected, tab: savedTab, onTab }: { row: Row; dateSelected: boolean; tab: string; onTab: (t: string) => void }) {
   const parts = row.parts && row.parts.length ? row.parts : [row];
   const multi = parts.length > 1;
   const plants = parts.map((p) => p.plant);
   const plantsKey = plants.join(",");
-  const [tab, setTab] = useState<"plants" | "days" | "scanning" | "unloading" | "loading" | "adjust">(multi ? "plants" : dateSelected ? "scanning" : "days");
+  // The Plants tab is always there (one plant lists just that plant) and is where a product opens. The tab is kept by the page, so it survives leaving it.
+  const tab: EntryTab = (ENTRY_TABS as string[]).includes(savedTab) ? (savedTab as EntryTab) : "plants";
+  const setTab = (t: EntryTab) => onTab(t);
   // The Days book is the all-dates view: with a date picked, the table above already is that day, so the tab is not offered.
-  useEffect(() => { if (dateSelected && tab === "days") setTab(multi ? "plants" : "scanning"); }, [dateSelected, tab, multi]);
+  useEffect(() => { if (dateSelected && tab === "days") setTab("plants"); }, [dateSelected, tab]);
   const newest = (it: any) => +new Date(it.arrivedAt ?? it.scannedAt ?? it.at ?? 0);
   // One history per plant, merged newest first — what the Stock Overview does for a combined (all plants / state) row.
   const hist = (name: string, forTab: string) => useQuery<Hist>({
@@ -859,7 +903,7 @@ function EntriesPanel({ row, dateSelected }: { row: Row; dateSelected: boolean }
         </span>
       </div>
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        {([...(multi ? [["plants", "Plants"]] : []), ...(dateSelected ? [] : [["days", "Days"]]), ["scanning", "Scan Order"], ["unloading", "Unloading"], ["loading", "Loading"], ["adjust", "Adjust"]] as [typeof tab, string][]).map(([k, l]) => (
+        {([["plants", "Plants"], ...(dateSelected ? [] : [["days", "Days"]]), ["scanning", "Scan Order"], ["unloading", "Unloading"], ["loading", "Loading"], ["adjust", "Adjust"]] as [typeof tab, string][]).map(([k, l]) => (
           <button key={k} type="button" onClick={() => setTab(k)} className={tabCls(tab === k)}>{l}</button>
         ))}
       </div>
@@ -878,7 +922,7 @@ function EntriesPanel({ row, dateSelected }: { row: Row; dateSelected: boolean }
           <span key="st" className="font-semibold tabular-nums text-[#001d6e]">{num(p.stock)}</span>,
         ]);
         const raws = parts.map((p) => [p.plant, p.openingStock, p.expectedPurchase, p.purchaseQty, p.extraPurchaseQty, p.adjustQty, p.transferIn, p.transferOut, totalPO(p), p.expectedSale, p.saleQty, p.extraSaleQty, p.closingStock, p.stock]);
-        return renderTable({ tabKey: "plants", busy: false, empty: "", head, rows: rowsOf, raw: raws, totalLabel: multi ? "Total" : undefined });
+        return renderTable({ tabKey: "plants", busy: false, empty: "", head, rows: rowsOf, raw: raws, totalLabel: "Total" });
       })()}
       {tab === "days" && (() => {
         const dd = days.data?.days ?? [];
