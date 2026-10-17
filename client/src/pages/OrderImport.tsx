@@ -638,7 +638,9 @@ export default function OrderImport() {
 
   // A product with no SAP for the plant's state would show a BLANK SAP: the server asks BEFORE importing (409 NO_SAP_CONFIRM) and this dialog
   // lists those items; "Import anyway" sends the same file again with the confirmation.
-  const [noSapConfirm, setNoSapConfirm] = useState<{ warnings: string[]; proceed: () => void } | null>(null);
+  const [noSapConfirm, setNoSapConfirm] = useState<{ warnings: string[]; proceed: () => void; cancel?: () => void } | null>(null);
+  // Set when "Import anyway" is pressed, so closing the dialog after it is not also treated as a cancel.
+  const noSapProceedRef = useRef(false);
 
   const importMutation = useMutation({
     mutationFn: async (payload: { plant: string; csvFileName: string; items: object[]; confirmNoSap?: boolean }) =>
@@ -1112,11 +1114,11 @@ export default function OrderImport() {
 
   // Imports the current queued file (with the shared plant + Order Date, so the server
   // auto-groups it), then either opens the next file's mapping dialog or finishes the batch.
-  async function importQueuedFile(csvFileName: string, items: object[]) {
+  async function importQueuedFile(csvFileName: string, items: object[], confirmNoSap = false) {
     setIsBatchImporting(true);
     const c = uploadCollectedRef.current;
     try {
-      const resp = await apiRequest("POST", "/api/order-import/sessions", { plant, csvFileName, items, orderDate });
+      const resp = await apiRequest("POST", "/api/order-import/sessions", { plant, csvFileName, items, orderDate, ...(confirmNoSap ? { confirmNoSap: true } : {}) });
       const data = await resp.json();
       if (data?.session?.id) {
         if (c.groupId == null) c.groupId = data.session.receivingSessionId ?? data.session.id;
@@ -1126,10 +1128,26 @@ export default function OrderImport() {
       } else {
         c.failed.push(csvFileName);
       }
-    } catch {
+    } catch (err) {
+      // The server asks BEFORE importing when products have no SAP for this plant's state: show the list; "Import anyway" sends this same file again
+      // with the confirmation, Cancel leaves it out and carries on with the queue.
+      const noSap = matchNoSapConfirm(err);
+      if (noSap) {
+        setIsBatchImporting(false);
+        setNoSapConfirm({
+          warnings: noSap,
+          proceed: () => { void importQueuedFile(csvFileName, items, true); },
+          cancel: () => { c.failed.push(`${csvFileName} (cancelled)`); void advanceImportQueue(); },
+        });
+        return;
+      }
       c.failed.push(csvFileName);
     }
+    await advanceImportQueue();
+  }
 
+  // Next file's mapping dialog, or finish the batch.
+  async function advanceImportQueue() {
     const nextIdx = uploadIdxRef.current + 1;
     const queue = uploadQueueRef.current;
     if (nextIdx < queue.length) {
@@ -1158,10 +1176,12 @@ export default function OrderImport() {
     refetchAllSessionQueries();
 
     const n = c.sessionIds.length;
+    // A file the person chose not to import (the "No SAP for this plant" question answered Cancel) is not a failure.
+    const cancelledOnly = c.failed.length > 0 && c.failed.every((f) => f.endsWith("(cancelled)"));
     toast({
-      title: c.failed.length === 0 ? "Import complete" : n === 0 ? "Import failed" : "Import finished with errors",
-      description: `${n} file(s) imported · ${c.totalRows} rows${c.failed.length ? ` · failed: ${c.failed.join(", ")}` : ""}. Same plant + order date auto-group; Part 1 loads now, the rest auto-load as each completes. View reports on the Order Reports page.`,
-      variant: n === 0 ? "destructive" : undefined,
+      title: c.failed.length === 0 ? "Import complete" : n === 0 ? (cancelledOnly ? "Import cancelled" : "Import failed") : "Import finished with errors",
+      description: `${n} file(s) imported · ${c.totalRows} rows${c.failed.length ? ` · ${cancelledOnly ? "not imported" : "failed"}: ${c.failed.join(", ")}` : ""}. Same plant + order date auto-group; Part 1 loads now, the rest auto-load as each completes. View reports on the Order Reports page.`,
+      variant: n === 0 && !cancelledOnly ? "destructive" : undefined,
       className: c.failed.length === 0 ? "bg-green-50 border-green-200 text-green-900" : undefined,
     });
   }
@@ -3036,7 +3056,7 @@ export default function OrderImport() {
       </AlertDialog>
 
       {/* ── No SAP for this plant — asked BEFORE the CSV is imported ── */}
-      <AlertDialog open={noSapConfirm !== null} onOpenChange={(open) => { if (!open) setNoSapConfirm(null); }}>
+      <AlertDialog open={noSapConfirm !== null} onOpenChange={(open) => { if (!open) { const cancel = noSapConfirm?.cancel; setNoSapConfirm(null); if (!noSapProceedRef.current) cancel?.(); noSapProceedRef.current = false; } }}>
         <AlertDialogContent className="rounded-xl">
           <AlertDialogHeader>
             <AlertDialogTitle>No SAP for this plant ({noSapConfirm?.warnings.length ?? 0} item{(noSapConfirm?.warnings.length ?? 0) === 1 ? "" : "s"})</AlertDialogTitle>
@@ -3050,7 +3070,7 @@ export default function OrderImport() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-[#001d6e] text-white hover:bg-[#001552]"
-              onClick={() => { const p = noSapConfirm?.proceed; setNoSapConfirm(null); p?.(); }}>
+              onClick={() => { const p = noSapConfirm?.proceed; noSapProceedRef.current = true; setNoSapConfirm(null); p?.(); }}>
               Import anyway
             </AlertDialogAction>
           </AlertDialogFooter>

@@ -705,17 +705,15 @@ export default function LoadOperation() {
         : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>),
     },
     {
-      id: "timeTaken", label: "Time Taken", title: "Time from when the load was created to when it was marked complete — counts up while it is still loading",
+      id: "timeTaken", label: "Time Taken", title: "Time from when the load was created to when it was marked complete — blank until the load is completed",
       render: (r) => {
         // The creation time — or, if the row was written AFTER its own scans (so the clock would run
         // backwards), the moment the first box was scanned.
         const startMs = Math.min(new Date(r.createdAt).getTime(), r.firstScanAt ? new Date(r.firstScanAt).getTime() : Infinity);
         const start = Number.isFinite(startMs) ? new Date(startMs).toISOString() : r.createdAt;
+        // Filled only once the load is completed (the Complete button); blank while it is still loading.
         if (r.loadingCompletedAt) return formatDuration(start, r.loadingCompletedAt) ?? "-";
-        const running = formatDuration(start, new Date().toISOString());
-        return running
-          ? <span className="whitespace-nowrap text-xs italic text-blue-600" title="Still loading — time since this load was started">{running} …</span>
-          : "-";
+        return " ";
       },
     },
     {
@@ -3405,7 +3403,7 @@ export default function LoadOperation() {
                             </span>
                             <span className="whitespace-nowrap tabular-nums">Qty <span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> / <span className="font-semibold text-gray-700">{r.totalQty ?? 0}</span></span>
                             <span className="whitespace-nowrap tabular-nums">Vol <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>{r.orderVolume != null && <> / <span className="font-semibold text-gray-700">{r.orderVolume.toFixed(2)}</span></>}</span>
-                            <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>
+                            {r.loadingCompletedAt && <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>}
                             {r.loadingCompletedAt && (r.loadingCompletedByName || r.loadingCompletedByCode) && (
                               <span className="whitespace-nowrap text-emerald-700">Completed by {r.loadingCompletedByName ?? r.loadingCompletedByCode}</span>
                             )}
