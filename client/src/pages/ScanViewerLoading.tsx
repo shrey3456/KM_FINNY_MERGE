@@ -212,16 +212,6 @@ export function LoadingViewerSection({
   const shownOrders = orderQ ? new Set(items.flatMap((i) => i.parties.map((p) => p.orderNumber))).size : (query.data?.orders ?? 0);
   const shownParties = orderQ ? new Set(items.flatMap((i) => i.parties.map((p) => p.partyName))).size : (query.data?.parties ?? 0);
 
-  const totals = items.reduce(
-    (acc, it) => {
-      acc.expected += it.expected; acc.loaded += it.loaded; acc.remaining += it.remaining; acc.extra += it.extra;
-      acc.pExpected += plt(it.expected, it.itemsPerPallet); acc.pLoaded += plt(it.loaded, it.itemsPerPallet);
-      acc.pRemaining += plt(it.remaining, it.itemsPerPallet); acc.pExtra += plt(it.extra, it.itemsPerPallet);
-      return acc;
-    },
-    { expected: 0, loaded: 0, remaining: 0, extra: 0, pExpected: 0, pLoaded: 0, pRemaining: 0, pExtra: 0 },
-  );
-
   const distinct = (values: string[]) =>
     Array.from(new Set(values.map((v) => v.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })).map((v) => ({ value: v, label: v }));
   const filterColumns: FilterableColumn<ItemRow>[] = [
@@ -254,6 +244,22 @@ export function LoadingViewerSection({
     if (!q) return true;
     return `${it.srNo ?? ""} ${it.itemName} ${it.barcode} ${it.parties.map((p) => `${p.partyName} ${p.orderNumber}`).join(" ")}`.toLowerCase().includes(q);
   });
+
+  // The cards above the table follow what the table shows: the search box and the column filters narrow them too (not only a picked order).
+  const filtering = !!q || conditionList.length > 0;
+  const statItems = filtering ? rows : items;
+  const statTotals = statItems.reduce(
+    (acc, it) => {
+      acc.expected += it.expected; acc.loaded += it.loaded; acc.remaining += it.remaining; acc.extra += it.extra;
+      acc.pExpected += plt(it.expected, it.itemsPerPallet); acc.pLoaded += plt(it.loaded, it.itemsPerPallet);
+      acc.pRemaining += plt(it.remaining, it.itemsPerPallet); acc.pExtra += plt(it.extra, it.itemsPerPallet);
+      return acc;
+    },
+    { expected: 0, loaded: 0, remaining: 0, extra: 0, pExpected: 0, pLoaded: 0, pRemaining: 0, pExtra: 0 },
+  );
+  // A search that matches a party or an order number narrows the item's share to that order/party; the counts below are those of the rows shown.
+  const statOrders = filtering || orderQ ? new Set(statItems.flatMap((i) => i.parties.map((p) => p.orderNumber))).size : shownOrders;
+  const statParties = filtering || orderQ ? new Set(statItems.flatMap((i) => i.parties.map((p) => p.partyName))).size : shownParties;
 
   // Two products can share a barcode, so a row is the barcode AND its product.
   const rowKey = (r: { barcode: string; productId?: number | null }) => `${r.barcode}|${r.productId ?? ""}`;
@@ -571,11 +577,11 @@ export function LoadingViewerSection({
           <StatsBar
             singleRow
             stats={[
-              { icon: Package, label: "Total", value: totals.expected, hint: `${totals.pExpected.toFixed(2)} plt`, tone: "navy" },
-              { icon: CheckCircle2, label: "Loaded", value: totals.loaded, hint: `${totals.pLoaded.toFixed(2)} plt`, tone: "emerald" },
-              { icon: Clock, label: "Remaining", value: totals.remaining, hint: `${totals.pRemaining.toFixed(2)} plt`, tone: "red" },
-              { icon: PackagePlus, label: "Extra", value: totals.extra, hint: `${totals.pExtra.toFixed(2)} plt`, tone: totals.extra > 0 ? "amber" : "muted" },
-              { icon: Users, label: "Orders", value: shownOrders, hint: `${shownParties} parties · ${items.length} items`, tone: "navy" },
+              { icon: Package, label: "Total", value: statTotals.expected, hint: `${statTotals.pExpected.toFixed(2)} plt`, tone: "navy" },
+              { icon: CheckCircle2, label: "Loaded", value: statTotals.loaded, hint: `${statTotals.pLoaded.toFixed(2)} plt`, tone: "emerald" },
+              { icon: Clock, label: "Remaining", value: statTotals.remaining, hint: `${statTotals.pRemaining.toFixed(2)} plt`, tone: "red" },
+              { icon: PackagePlus, label: "Extra", value: statTotals.extra, hint: `${statTotals.pExtra.toFixed(2)} plt`, tone: statTotals.extra > 0 ? "amber" : "muted" },
+              { icon: Users, label: "Orders", value: statOrders, hint: `${statParties} part${statParties === 1 ? "y" : "ies"} · ${statItems.length} item${statItems.length === 1 ? "" : "s"}`, tone: "navy" },
             ]}
           />
           )}
