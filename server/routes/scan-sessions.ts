@@ -835,9 +835,12 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ois.csv_file_name    AS "orderName",
       ois.order_date       AS "orderDate",
       ois.plant            AS "plant",
-      NULL::text           AS "sapCode"
+      -- The CSV line's own SAP (it tells two products with one barcode apart); an extra that is on no CSV line falls back to its product's.
+      COALESCE(NULLIF(osi.sap_code, ''), NULLIF(osp.sap_code, '')) AS "sapCode"
     FROM order_scan_events ose
     JOIN order_import_sessions ois ON ois.id = ose.session_id
+    LEFT JOIN order_scan_items osi ON osi.id = ose.scan_item_id
+    LEFT JOIN products osp ON osp.id = ose.product_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ose.barcode))
     LEFT JOIN user_name vun ON vun.user_code = ose.voided_by_code
     WHERE NOT COALESCE(ose.hidden_in_history, false)
@@ -880,8 +883,9 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       lse.order_number AS "orderName",
       sod.order_date::text AS "orderDate",
       lse.plant AS "plant",
-      lse.sap_code AS "sapCode"
+      COALESCE(NULLIF(lse.sap_code, ''), NULLIF(lsp.sap_code, '')) AS "sapCode"
     FROM loading_scan_events lse
+    LEFT JOIN products lsp ON lsp.id = lse.product_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(lse.barcode))
     LEFT JOIN slip_order_date sod ON sod.order_number = lse.order_number
     LEFT JOIN user_name vun ON vun.user_code = lse.voided_by_code
@@ -924,9 +928,10 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       use.vehicle_number AS "orderName",
       uis.order_date AS "orderDate",
       use.plant AS "plant",
-      NULL::text AS "sapCode"
+      COALESCE(NULLIF(use.sap_code, ''), NULLIF(usp.sap_code, '')) AS "sapCode"
     FROM unload_scan_events use
     JOIN unload_import_sessions uis ON uis.id = use.session_id
+    LEFT JOIN products usp ON usp.id = use.product_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(use.barcode))
     LEFT JOIN user_name vun ON vun.user_code = use.voided_by_code
     WHERE NOT COALESCE(use.hidden_in_history, false)
@@ -966,7 +971,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       sl.reason AS "orderName",
       NULL::text AS "orderDate",
       ln.plant AS "plant",
-      NULL::text AS "sapCode"
+      ln.sap_code AS "sapCode"
     FROM stock_v2_ledger sl
     JOIN stock_v2_lines ln ON ln.id = sl.line_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ln.barcode))
@@ -1020,7 +1025,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
       ssp.order_number   AS "orderName",
       ss.order_date::text AS "orderDate",
       ss.plant           AS "plant",
-      NULL::text         AS "sapCode"
+      prod.sap_code      AS "sapCode"
     FROM sort_slip_picks ssp
     JOIN sort_slips ss ON ss.id = ssp.sort_slip_id
     LEFT JOIN product_by_barcode pb ON pb.bkey = LOWER(TRIM(ssp.barcode))
@@ -1029,7 +1034,7 @@ const SCAN_HISTORY_COMBINED_SOURCE = `
     -- The product row this barcode means at THIS plant — a barcode can sit on more than one row
     -- (one per plant), and they can carry different pack sizes.
     LEFT JOIN LATERAL (
-      SELECT p.gj_plt, p.mp_plt FROM products p
+      SELECT p.gj_plt, p.mp_plt, p.sap_code FROM products p
        WHERE LOWER(TRIM(p.barcode)) = LOWER(TRIM(ssp.barcode))
        ORDER BY (LOWER(COALESCE(p.plant, '')) = LOWER(COALESCE(ss.plant, ''))) DESC, p.id
        LIMIT 1
@@ -1057,6 +1062,7 @@ const SCAN_HISTORY_FILTER_COLUMNS: Record<string, SqlFilterColumn> = {
   // but the SQL filter engine silently dropped it (unknown column id, not an error),
   // so those three filters looked broken even though everything else worked.
   barcode:   { sql: 'barcode',     type: 'text' },
+  sapCode:   { sql: '"sapCode"',   type: 'text' },
   qty:       { sql: '"totalQty"',  type: 'number' },
   pallets:   { sql: 'pallets',     type: 'number' },
   // Load Event tab only (the client offers it nowhere else): the proforma slip's order number.
