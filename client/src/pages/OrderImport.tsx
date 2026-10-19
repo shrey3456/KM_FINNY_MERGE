@@ -11,7 +11,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  FileBarChart,
   FileUp,
   History,
   Loader2,
@@ -28,7 +27,6 @@ import {
   X,
 } from "lucide-react";
 import EditCsvDialog from "@/components/modals/EditCsvDialog";
-import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import { PlantBadge } from "@/components/PlantBadge";
 import { useAuth } from "@/hooks/use-auth";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
@@ -383,17 +381,6 @@ export default function OrderImport() {
   // Session id whose "Edit CSV" dialog is open — set from the Edit button on an Available/
   // Active row, cleared when the dialog closes.
   const [editSessionId, setEditSessionId] = useState<number | null>(null);
-  // Reports live entirely inside Order Management now — no separate /order-reports page.
-  // Opens the Reports dialog right here so an operator mid-upload/scan-review never leaves
-  // this page just to check a report.
-  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
-  const openReports = (s: { id: number; csvFileName: string; plant: string; receivingSessionId?: number | null; partIndex?: number | null }) => {
-    setReportsSession({
-      id: s.id, csvFileName: s.csvFileName, plant: s.plant,
-      receivingSessionId: s.receivingSessionId, partIndex: s.partIndex,
-    });
-  };
-
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
   // A brand-new order's date can be up to 5 days in the past (the last 5 days)
@@ -2037,9 +2024,6 @@ export default function OrderImport() {
                                   <Pencil className="mr-2 h-3.5 w-3.5 text-gray-500" /> Edit CSV
                                 </DropdownMenuItem>
                               )}
-                              <DropdownMenuItem onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
-                                <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
-                              </DropdownMenuItem>
                               {canWriteOrderImport && (
                                 <DropdownMenuItem
                                   disabled={deactivateMutation.isPending}
@@ -2120,10 +2104,6 @@ export default function OrderImport() {
                           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
-                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-full"
-                            onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
-                            <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
-                          </Button>
                           {/* Admin-only: correct the expected quantities of a completed CSV. Scans that
                               no longer fit become Extra, and Extras that now fit become regular. */}
                           {isAdminOrSuper && (
@@ -2293,18 +2273,6 @@ export default function OrderImport() {
                                   <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 whitespace-nowrap">
                                     Ready
                                   </span>
-                                )}
-                                {((session as any).scanStatus === "completed" || (session as any).scanStatus === "active") && (
-                                  <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-full"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openReports({
-                                        id: session.id, csvFileName: session.csvFileName, plant: session.plant,
-                                        receivingSessionId: (session as any).receivingSessionId, partIndex: (session as any).partIndex,
-                                      });
-                                    }}>
-                                    <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
-                                  </Button>
                                 )}
                               </div>
                             </div>
@@ -3184,7 +3152,6 @@ export default function OrderImport() {
 
       <EditCsvDialog sessionId={editSessionId} onClose={() => setEditSessionId(null)} />
       <EditCsvDialog sessionId={unloadEditSessionId} onClose={() => setUnloadEditSessionId(null)} basePath="unloading" />
-      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} />
     </main>
   );
 }

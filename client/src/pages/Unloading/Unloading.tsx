@@ -6,7 +6,7 @@ import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import { useSidebarContext } from "@/lib/sidebarContext";
@@ -15,7 +15,6 @@ import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton }
 import { type FilterableColumn, type FilterCondition, type FilterOption, isConditionEmpty } from "@/lib/columnFilters";
 import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
-import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, parseApiErrorMessage } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
@@ -1112,13 +1111,6 @@ export default function Unloading() {
     onError: (error: any) => toast({ title: "Failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
-  // ─── Reports — same dialog Order Import uses (Summary/Activity/Hourly, per-part + whole-group),
-  // pointed at Unloading's own report endpoints via basePath="unloading". ───────────────────────
-  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
-  const openReports = (s: SessionListItem) => {
-    setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.groupId, partIndex: s.partIndex, orderDate: s.orderDate });
-  };
-
   // ─── Delete (replace vs discard) ──────────────────────────────────────────────────────────
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; vehicleNumber: string; orderDate: string } | null>(null);
   const [deleteMode, setDeleteMode] = useState<"replace" | "discard">("replace");
@@ -1715,13 +1707,6 @@ export default function Unloading() {
                         <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openSession(s)}>
                           View
                         </Button>
-                        <button
-                          className="rounded p-1 text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
-                          title="Reports"
-                          onClick={() => openReports(s)}
-                        >
-                          <FileBarChart className="h-3.5 w-3.5" />
-                        </button>
                         {canWrite && (
                           <Button
                             size="sm" variant="outline" className="h-7 text-xs"
@@ -1812,15 +1797,6 @@ export default function Unloading() {
                         >
                           {String(s.scannedQty).padStart(2, "0")}
                         </span>
-                        <button
-                          type="button"
-                          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100"
-                          title="Reports"
-                          aria-label={`View reports for ${s.vehicleNumber}`}
-                          onClick={(e) => { e.stopPropagation(); openReports(s); }}
-                        >
-                          <FileBarChart className="h-3.5 w-3.5" />
-                        </button>
                         {canWrite && (
                           <button
                             type="button"
@@ -1937,13 +1913,6 @@ export default function Unloading() {
                                         ? (compactVehicleTable ? "Start" : "Start Scan")
                                         : "Locked"}
                                 </Button>
-                                <button
-                                  className="rounded p-1 text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
-                                  title="Reports"
-                                  onClick={(e) => { e.stopPropagation(); openReports(s); }}
-                                >
-                                  <FileBarChart className="h-3.5 w-3.5" />
-                                </button>
                                 {canWrite && (
                                   <button
                                     className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
@@ -2756,7 +2725,6 @@ export default function Unloading() {
       {/* Import CSV moved to the Order Import page's own "Unloading" mode
           (client/src/pages/OrderImport.tsx) — see that page's plan comment for why. */}
 
-      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} basePath="unloading" />
       <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
       <ProductMasterMissingDialog message={barcodeNotInSystemMessage} onClose={() => setBarcodeNotInSystemMessage(null)} title="Barcode Not Found" />
 
