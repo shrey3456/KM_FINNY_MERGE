@@ -7,6 +7,7 @@ import {
   Truck, UserCircle2, X, Zap, Pause, Columns3,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
+import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import { useSidebarContext } from "@/lib/sidebarContext";
@@ -2561,12 +2562,18 @@ export default function LoadOperation() {
             {(row.stockAvailable ?? 0) <= 0 && <span className="ml-1.5 rounded-full bg-red-100 px-1 py-px text-[8px] font-bold text-red-700">NO STOCK</span>}
             {row.isComplete && <CheckCircle2 className="ml-1.5 inline h-3 w-3 text-emerald-600" />}
             <p className="font-mono text-[10px] leading-tight text-gray-400">
-              {row.barcode || "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+              {row.barcode || "—"}
             </p>
             {(row.itemsPerPallet ?? 0) > 0 && <p className="text-[10px] font-semibold leading-tight text-gray-500">{row.itemsPerPallet} per pallet</p>}
           </div>
         </div>
       ),
+    },
+    {
+      id: "sapCode", header: "SAP Code", align: "center", width: 92, minWidth: 70, sortable: true, totalable: false,
+      accessor: (row) => row.sapCode ?? "",
+      cellClassName: "align-top font-mono text-[11px] text-gray-600",
+      render: (row) => row.sapCode || <span className="text-gray-300">—</span>,
     },
     {
       id: "expected", header: itemColumnHeader("expected", "Expected"), align: "center", width: 58, minWidth: 55, sortable: true,
@@ -2665,15 +2672,26 @@ export default function LoadOperation() {
 
   // Same "Export" affordance Order Scan/Master View offer on their own items tables — a plain
   // client-side CSV of whatever's currently filtered/searched, not just the full unfiltered set.
-  function downloadLoadingItemsCsv() {
-    const headers = ["SKU", "Item Name", "Expected", "Loaded", "Extra", "Remaining", "Stock"];
-    const rows = filteredItems.map((it) => [it.barcode ?? "", it.itemName ?? "", it.expected, it.loaded, extraOf(it), it.remaining, it.stockAvailable ?? ""]);
-    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
-    a.download = `${slip?.orderNumber ?? "loading"}-items.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+  // CSV, Excel or PDF of the same filtered list, with the SAP code, the pallets beside the quantities and a Total row.
+  function exportLoadingItems(fmt: "CSV" | "Excel" | "PDF") {
+    const plt = (qty: number, ipp: number | null | undefined) => ((ipp ?? 0) > 0 ? qty / (ipp as number) : 0);
+    const f2 = (n: number) => n.toFixed(2);
+    const header = ["Sr", "Barcode", "Item Name", "SAP Code", "Expected", "Expected Pallets", "Loaded", "Loaded Pallets", "Extra", "Remaining", "Stock"];
+    const body = filteredItems.map((it) => [
+      it.srNo ?? "", it.barcode ?? "", it.itemName ?? "", it.sapCode ?? "", it.expected, f2(plt(it.expected, it.itemsPerPallet)),
+      it.loaded, f2(plt(it.loaded, it.itemsPerPallet)), extraOf(it), it.remaining, it.stockAvailable ?? "",
+    ]);
+    const sum = (pick: (it: (typeof filteredItems)[number]) => number) => filteredItems.reduce((x, it) => x + pick(it), 0);
+    const total = [
+      "TOTAL", "", "", "", sum((it) => it.expected), f2(sum((it) => plt(it.expected, it.itemsPerPallet))),
+      sum((it) => it.loaded), f2(sum((it) => plt(it.loaded, it.itemsPerPallet))), sum((it) => extraOf(it)), sum((it) => it.remaining), "",
+    ];
+    const rows = [header, ...body, total];
+    const base = `${slip?.orderNumber ?? "loading"}-items`;
+    const title = `Loading Items — ${slip?.orderNumber ?? ""}`;
+    if (fmt === "CSV") downloadCsv(`${base}.csv`, rows);
+    else if (fmt === "Excel") downloadExcel(`${base}.xlsx`, rows, "Loading Items");
+    else downloadPdf(`${base}.pdf`, title, rows, [slip?.partyName, slip?.plant].filter(Boolean).join(" · "));
   }
 
   // Column defs for the per-item scan history drill-down — a real DataTable (drag-to-resize,
@@ -4282,12 +4300,20 @@ export default function LoadOperation() {
                     </button>
                   )}
                   {items.length > 0 && (
-                    <button
-                      onClick={downloadLoadingItemsCsv}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 shadow-sm lg:px-2.5 lg:py-1.5 lg:text-xs hover:bg-gray-50"
-                    >
-                      <Download className="h-3.5 w-3.5" /> Export
-                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 shadow-sm lg:px-2.5 lg:py-1.5 lg:text-xs hover:bg-gray-50"
+                        >
+                          <Download className="h-3.5 w-3.5" /> Export <ChevronDown className="h-3 w-3 opacity-70" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-32">
+                        {(["CSV", "Excel", "PDF"] as const).map((f) => (
+                          <DropdownMenuItem key={f} onSelect={() => exportLoadingItems(f)}>{f}</DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                   <AddColumnFilterButton
                     columns={itemFilterColumns}

@@ -86,7 +86,7 @@ async function expectedPalletsByKey(lines: Array<{ key: string; plant: string | 
     byKey.set(l.key, g);
   }
   const out = new Map<string, number>();
-  for (const [key, g] of byKey) {
+  for (const [key, g] of Array.from(byKey)) {
     const sized = await withExpectedPallets(g.items, g.plant);
     out.set(key, Number(sized.reduce((x, i) => x + i.expectedPallets, 0).toFixed(2)));
   }
@@ -189,6 +189,7 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
     const { rows: orderRows } = await pool.query(
       `SELECT ps.order_number AS "orderNumber", ps.party_name AS "partyName", ps.plant,
               COALESCE(ps.vehicle_number, '') AS "vehicleNumber",
+              ps.loading_completed_at AS "completedAt",
               COALESCE((SELECT SUM(quantity) FROM proforma_slip_items WHERE proforma_slip_id = ps.id), 0)::int AS "expectedQty"
          FROM proforma_slips ps
         WHERE ps.order_date = $1::date ${clause}`,
@@ -224,7 +225,7 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
         ),
         pool.query(
             `SELECT order_number AS "groupKey", order_number AS "groupLabel",
-              barcode, item_name AS "itemName", total_qty AS "qty", pallets, stv,
+              barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv,
                   is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
                   COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
              FROM loading_scan_events
@@ -253,7 +254,8 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
         extraQty: Math.max(0, (ev?.actualQty ?? 0) - (ev?.regularQty ?? 0)),
         eventCount: ev?.eventCount ?? 0,
         startTime: ev?.startTime ?? null,
-        endTime: ev?.endTime ?? null,
+        // End = when the slip was marked Complete, not the last scan — a slip still being loaded has no end yet.
+        endTime: o.completedAt ?? null,
         expectedPallets: expectedPalletsByOrder.get(o.orderNumber) ?? 0,
         receivedPallets: Number(((ev?.regularPallets ?? 0) + (ev?.extraPallets ?? 0)).toFixed(2)),
         extraPallets: Number((ev?.extraPallets ?? 0).toFixed(2)),
@@ -305,7 +307,7 @@ router.get('/daily-reports/loading/slip', requirePageAccess('daily-reports'), as
         [order],
       ),
       pool.query(
-        `SELECT barcode, item_name AS "itemName", total_qty AS "qty", pallets, stv,
+        `SELECT barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv,
                 is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
                 COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
            FROM loading_scan_events WHERE order_number = $1 AND NOT COALESCE(hidden_in_history, false) ORDER BY scanned_at ASC`,
@@ -379,7 +381,7 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
         ),
         pool.query(
             `SELECT vehicle_number AS "groupKey", vehicle_number AS "groupLabel",
-              barcode, item_name AS "itemName", total_qty AS "qty", pallets, stv,
+              barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv,
                   is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
                   COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
              FROM unload_scan_events
@@ -397,7 +399,7 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
     for (const s of sessionRows) {
       const key = s.vehicleNumber || '—';
       const ev = eventsBySession.get(s.id);
-      const row = byVehicle.get(key) ?? {
+      const row: Row = byVehicle.get(key) ?? {
         key, label: key, plant: s.plant,
         orderCount: 0, expectedQty: 0, actualQty: 0, extraQty: 0, eventCount: 0, startTime: null, endTime: null,
       };
@@ -464,7 +466,7 @@ router.get('/daily-reports/unloading/vehicle', requirePageAccess('daily-reports'
         [sessionIds],
       ),
       pool.query(
-        `SELECT barcode, item_name AS "itemName", total_qty AS "qty", pallets, stv, is_extra AS "isExtra",
+        `SELECT barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv, is_extra AS "isExtra",
                 scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
                 COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
            FROM unload_scan_events WHERE session_id = ANY($1) AND NOT COALESCE(hidden_in_history, false)
@@ -573,7 +575,7 @@ router.get('/daily-reports/scan', requirePageAccess('daily-reports'), async (req
           [sessionIds],
         ),
         pool.query(
-          `SELECT barcode, item_name AS "itemName", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
+          `SELECT barcode, item_name AS "itemName", (SELECT i.sap_code FROM order_scan_items i WHERE i.id = order_scan_events.scan_item_id) AS "sapCode", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
                   scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
                   COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
              FROM order_scan_events WHERE session_id = ANY($1) AND NOT COALESCE(hidden_in_history, false)
@@ -643,7 +645,7 @@ router.get('/daily-reports/scan/csv', requirePageAccess('daily-reports'), async 
         [sessionIds],
       ),
       pool.query(
-        `SELECT barcode, item_name AS "itemName", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
+        `SELECT barcode, item_name AS "itemName", (SELECT i.sap_code FROM order_scan_items i WHERE i.id = order_scan_events.scan_item_id) AS "sapCode", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
                 scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
                 COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
            FROM order_scan_events WHERE session_id = ANY($1) AND NOT COALESCE(hidden_in_history, false)

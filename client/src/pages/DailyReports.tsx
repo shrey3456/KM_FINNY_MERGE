@@ -55,7 +55,7 @@ type ReportRow = {
 // `pallets` = pallets actually received (scanned); `expectedPallets` = expected qty / pallet size.
 type ItemTotal = { barcode: string; itemName: string | null; sapCode?: string | null; srNo?: string | null; expectedQty: number; expectedPallets?: number; actualQty: number; extraQty: number; pallets: number };
 type Activity = {
-  barcode: string; itemName: string | null; qty: number; pallets?: number; stv?: string | null;
+  barcode: string; itemName: string | null; sapCode?: string | null; qty: number; pallets?: number; stv?: string | null;
   isExtra: boolean; scannedByName: string | null; scannedAt: string;
   groupKey?: string | null; groupLabel?: string | null;
   // A voided scan stays in the activity list, clearly marked, so the report says the entry
@@ -270,9 +270,9 @@ export default function DailyReports() {
   // always resetting to Loading/Total Summary.
   const [tab, setTab] = usePersistentFilter<Tab>("dailyReports:tab", "loading");
   const [reportTab, setReportTab] = usePersistentFilter<"summary" | "activities" | "breakdown">("dailyReports:reportTab", "summary");
-  // The date always defaults to today (IST) on a fresh visit — it is not remembered, since
-  // "today" changing every day is exactly the point of that default.
-  const [date, setDate] = useState(todayIST());
+  // The date you picked is kept while the browser stays open (leave the page and come back to the same day); a fresh
+  // visit — a new browser session — starts on today (IST) again.
+  const [date, setDate] = usePersistentFilter<string>("dailyReports:date", todayIST());
   const [selectedPlant, setSelectedPlant] = usePersistentFilter("dailyReports:plant", "");
   const activeTab = TABS.find((t) => t.key === tab)!;
   // Every tab (Loading, Unloading, Scan) has the Total Summary + Activities Summary pair.
@@ -346,9 +346,9 @@ export default function DailyReports() {
     const rows: ExportRow[] = [
       ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime), "Total Time", fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)],
       [],
-      ["Time", "Barcode", "Item Name", "Qty", "Pallets", "Dispatch Directory", "Extra Qty", "Scanned By"],
+      ["Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Dispatch Directory", "Extra Qty", "Scanned By"],
       ...data.activities.map((a) => [
-        fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
+        fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
         a.isExtra ? a.qty : 0, a.scannedByName ?? "",
       ]),
     ];
@@ -378,7 +378,8 @@ export default function DailyReports() {
     },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
     { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.expectedPallets ?? 0), 0).toFixed(2) },
-    { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra, cellClassName: "tabular-nums font-medium text-emerald-600", render: (r) => qtyWithPallets(receivedIncludingExtra(r), r.pallets) },
+    { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "pallets", header: "Received Pallets", align: "right", accessor: (r) => r.pallets, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets.toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + r.pallets, 0).toFixed(2) },
     {
       id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty,
       render: (r) => <span className={r.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}>{r.extraQty}</span>,
@@ -399,6 +400,7 @@ export default function DailyReports() {
         </>
       ),
     },
+    { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
     { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, cellClassName: "tabular-nums font-medium text-emerald-600", render: qtyCellFor },
     { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? null, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets?.toFixed(2) ?? "—" },
     { id: "stv", header: "Dispatch Directory", width: 100, accessor: (r) => r.stv, totalable: false, cellClassName: "text-gray-500", render: (r) => r.stv || "—" },
@@ -428,7 +430,8 @@ export default function DailyReports() {
     { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
     { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.expectedPallets ?? 0), 0).toFixed(2) },
-    { id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600", render: (r) => qtyWithPallets(r.actualQty, r.receivedPallets), total: (rows) => qtyWithPallets(rows.reduce((x, r) => x + r.actualQty, 0), rows.reduce((x, r) => x + (r.receivedPallets ?? 0), 0)) },
+    { id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "receivedPallets", header: "Received Pallets", align: "right", accessor: (r) => r.receivedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.receivedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.receivedPallets ?? 0), 0).toFixed(2) },
     {
       id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty ?? 0,
       render: (r) => <span className={(r.extraQty ?? 0) > 0 ? "tabular-nums font-medium text-amber-600" : "text-gray-400"}>{r.extraQty ?? 0}</span>,
@@ -910,7 +913,8 @@ const summaryColumnsForDetail: DataTableColumn<ItemTotal>[] = [
   { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
   { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty },
   { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.expectedPallets ?? 0), 0).toFixed(2) },
-  { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra, render: (r) => qtyWithPallets(receivedIncludingExtra(r), r.pallets) },
+  { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra },
+  { id: "pallets", header: "Received Pallets", align: "right", accessor: (r) => r.pallets, render: (r) => r.pallets.toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + r.pallets, 0).toFixed(2) },
   { id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty },
 ];
 
@@ -931,6 +935,7 @@ const activitiesColumnsForDetail: DataTableColumn<Activity>[] = [
   { id: "scannedAt", header: "Time", width: 150, accessor: (r) => r.scannedAt, totalable: false, render: (r) => fmtIST(r.scannedAt) },
   { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
   { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => <>{r.itemName || "—"}<VoidedBadge a={r} /></> },
+  { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
   { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, render: qtyCellFor },
   { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? 0, render: (r) => r.pallets?.toFixed(2) ?? "—" },
   { id: "scannedByName", header: "By", accessor: (r) => r.scannedByName, totalable: false, render: (r) => r.scannedByName || "—" },
@@ -971,8 +976,8 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "Extra Qty", "Scanned By"],
-          ...detail.activities.map((a) => [fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.isExtra ? a.qty : 0, a.scannedByName ?? ""]),
+          ["Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Extra Qty", "Scanned By"],
+          ...detail.activities.map((a) => [fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.isExtra ? a.qty : 0, a.scannedByName ?? ""]),
         ];
     const suffix = detailTab === "items" ? "items" : "activities";
     exportRows(fmt, `unloading-${detail.vehicle}-${suffix}-${detail.date}`, `Unloading — ${detail.vehicle} — ${detailTab === "items" ? "Item-wise Total" : "Activity Report"} — ${detail.date}`, rows);
@@ -1090,9 +1095,9 @@ function CsvDetailDialog({ date, plant, csv, initialTab, onClose }: { date: stri
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra Qty", "Scanned By"],
+          ["Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "STV", "Extra Qty", "Scanned By"],
           ...detail.activities.map((a) => [
-            fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
+            fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
             a.isExtra ? a.qty : 0, a.scannedByName ?? "",
           ]),
         ];

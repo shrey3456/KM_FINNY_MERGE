@@ -1,3 +1,4 @@
+import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -5,7 +6,7 @@ import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import { useSidebarContext } from "@/lib/sidebarContext";
@@ -574,6 +575,29 @@ export default function Unloading() {
   // later callback, so the ref must already be initialized by this point or it's a TDZ error.
   const itemScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
   const scanItemRef = useRef<SessionItem | null>(null);
+
+  // CSV, Excel or PDF of the vehicle's items (what the filter and search leave), with SAP code, pallets beside the quantities and a Total row.
+  const exportUnloadItems = (fmt: "CSV" | "Excel" | "PDF") => {
+    const plt = (qty: number, ipp: number | null | undefined) => ((ipp ?? 0) > 0 ? qty / (ipp as number) : 0);
+    const f2 = (n: number) => n.toFixed(2);
+    const header = ["Sr", "Barcode", "Item Name", "SAP Code", "Expected", "Expected Pallets", "Received", "Received Pallets", "Extra", "Remaining"];
+    const list = filteredItems;
+    const body = list.map((it) => [
+      it.srNo ?? "", it.barcode ?? "", it.itemName ?? "", it.sapCode ?? "", it.expected, f2(plt(it.expected, it.itemsPerPallet)),
+      it.scanned, f2(plt(it.scanned, it.itemsPerPallet)), Math.max(0, it.scanned - it.expected), it.remaining,
+    ]);
+    const sum = (pick: (it: SessionItem) => number) => list.reduce((x, it) => x + pick(it), 0);
+    const total = [
+      "TOTAL", "", "", "", sum((it) => it.expected), f2(sum((it) => plt(it.expected, it.itemsPerPallet))),
+      sum((it) => it.scanned), f2(sum((it) => plt(it.scanned, it.itemsPerPallet))), sum((it) => Math.max(0, it.scanned - it.expected)), sum((it) => it.remaining), 
+    ];
+    const vehicle = detail?.session?.vehicleNumber ?? "vehicle";
+    const base = `unloading-${vehicle}-${detail?.session?.orderDate ?? ""}-items`;
+    const rows = [header, ...body, total];
+    if (fmt === "CSV") downloadCsv(`${base}.csv`, rows);
+    else if (fmt === "Excel") downloadExcel(`${base}.xlsx`, rows, "Unloading Items");
+    else downloadPdf(`${base}.pdf`, `Unloading Items — ${vehicle}`, rows, [detail?.session?.plant, detail?.session?.orderDate].filter(Boolean).join(" · "));
+  };
 
   const filteredItems = (detail?.items ?? [])
     .filter((item) => {
@@ -1169,11 +1193,17 @@ export default function Unloading() {
         <div>
           <p className="font-medium text-gray-900 whitespace-normal break-words leading-tight text-xs">{row.itemName ?? "—"}</p>
           <p className="text-gray-400 font-mono whitespace-normal break-words leading-tight text-[10px]">
-            {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+            {row.barcode ?? "—"}
           </p>
           {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold leading-tight text-[10px]">{row.itemsPerPallet} per pallet</p>}
         </div>
       ),
+    },
+    {
+      id: "sapCode", header: "SAP Code", align: "center", width: 96, minWidth: 70, sortable: true, totalable: false,
+      accessor: (row) => row.sapCode ?? "",
+      cellClassName: "font-mono text-xs text-gray-600",
+      render: (row) => row.sapCode || <span className="text-gray-300">—</span>,
     },
     {
       id: "exp", header: "Exp", align: "right", width: 80, minWidth: 60, sortable: true,
@@ -2246,6 +2276,23 @@ export default function Unloading() {
                     >
                       <Search className="h-3.5 w-3.5" />
                     </button>
+                    {filteredItems.length > 0 && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            title="Export the items"
+                            className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                          >
+                            <Download className="h-3.5 w-3.5" /> Export <ChevronDown className="h-3 w-3 opacity-70" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-32">
+                          {(["CSV", "Excel", "PDF"] as const).map((f) => (
+                            <DropdownMenuItem key={f} onSelect={() => exportUnloadItems(f)}>{f}</DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                     {itemSearchOpen && (
                       <div className="relative w-full sm:w-64">
                         <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
