@@ -213,6 +213,13 @@ async function slipItemSap(slipId: number | null | undefined, product: any): Pro
   return anyStateSap(product);
 }
 
+// A table whose id counter fell behind its rows (rows loaded with explicit ids) fails every insert with a duplicate key on the primary key. This moves the
+// counter to the highest id so the next insert works; the create routes below use it once, then try again.
+async function resyncIdSequence(table: "plants" | "plant_stvs") {
+  await pool.query(`SELECT setval(pg_get_serial_sequence($1, 'id'), COALESCE((SELECT MAX(id) FROM ${table}), 0) + 1, false)`, [table]);
+}
+const isPrimaryKeyDuplicate = (e: any) => e?.code === "23505" && /_pkey$/.test(String(e?.constraint ?? ""));
+
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes and middleware
   setupAuth(app);
@@ -7863,7 +7870,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ message: "Invalid plant data" });
     }
     try {
-      const newPlant = await storage.createPlant(data); // Ensure this method exists in storage.ts
+      let newPlant;
+      try {
+        newPlant = await storage.createPlant(data); // Ensure this method exists in storage.ts
+      } catch (error) {
+        if (!isPrimaryKeyDuplicate(error)) throw error;
+        await resyncIdSequence("plants");
+        newPlant = await storage.createPlant(data);
+      }
       res.status(201).json(newPlant);
     } catch (error) {
       // The insert may have already committed before this throws (e.g. a slow/dropped
@@ -7936,15 +7950,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         stv: z.string().min(1, "Dispatch Directory is required"),
       });
 
-      const payload = payloadSchema.parse(req.body);
-      const newStv = await storage.createPlantStv({
-        plantId,
-        stv: payload.stv.trim(),
-      });
+      const parsed = payloadSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: "Invalid Dispatch Directory data" });
+      const values = { plantId, stv: parsed.data.stv.trim() };
+      let newStv;
+      try {
+        newStv = await storage.createPlantStv(values);
+      } catch (error) {
+        if (!isPrimaryKeyDuplicate(error)) throw error;
+        await resyncIdSequence("plant_stvs");
+        newStv = await storage.createPlantStv(values);
+      }
 
       res.status(201).json(newStv);
     } catch (error) {
-      res.status(400).json({ message: "Invalid Dispatch Directory data" });
+      // Only a bad payload is a 400 (above); a database failure used to be reported as "Invalid Dispatch Directory data" too, which hid the real cause.
+      console.error("Create Dispatch Directory error:", error);
+      res.status(500).json({ message: "Failed to create the Dispatch Directory" });
     }
   });
 

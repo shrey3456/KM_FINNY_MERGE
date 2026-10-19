@@ -1,6 +1,5 @@
 import { drawPdfHeader, drawPdfFooter, greenTotalRow, setPdfProperties } from "@/lib/pdfBranding";
 import { PlantBadge } from "@/components/PlantBadge";
-import { PageScrollButtons } from "@/components/PageScrollButtons";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -451,7 +450,6 @@ export default function DailyReports() {
 
   return (
     <div ref={rootRef} className="container-fluid max-w-full space-y-5 overflow-x-hidden px-3 py-6 sm:px-4 md:px-6">
-      <PageScrollButtons />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="flex items-center text-2xl font-bold tracking-tight">
           <FileBarChart className="mr-2 h-6 w-6 text-[#001d6e]" />
