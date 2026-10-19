@@ -83,6 +83,7 @@ export function scanTypeLabel(row: {
 type ScanHistoryItem = {
   id: number;
   barcode: string | null;
+  sapCode?: string | null;
   itemName: string | null;
   pallets: number | null;
   totalQty: number;
@@ -627,6 +628,7 @@ const ScanHistory = () => {
   // filter these two, so only the Condition tab shows for them.
   const filterableColumns: FilterableColumn<ScanHistoryItem>[] = useMemo(() => [
     { id: "barcode", label: "Barcode", filterType: "text", options: filterValues.barcode ?? [], accessor: (r) => r.barcode },
+    { id: "sapCode", label: "SAP Code", filterType: "text", options: filterValues.sapCode ?? [], accessor: (r) => r.sapCode },
     { id: "qty", label: "Qty", filterType: "number", options: [], disableValues: true, accessor: (r) => r.totalQty },
     { id: "pallets", label: "Pallets", filterType: "number", options: [], disableValues: true, accessor: (r) => r.pallets },
     { id: "stv", label: "Dispatch Directory", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
@@ -962,13 +964,14 @@ const ScanHistory = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Party Name", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "SAP Code", "Order No.", "Party Name", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
     ...src.map((h) => [
       h.srNo ?? "",
       h.scannedByName ?? "",
       h.scannedByCode ?? "",
       h.itemName ?? "",
       h.barcode ?? "",
+      h.sapCode ?? "",
       h.orderName ?? "",
       h.partyName ?? "",
       h.orderDate ?? "",
@@ -1049,6 +1052,16 @@ const ScanHistory = () => {
       totalable: false,
       cellClassName: "font-mono text-gray-500",
       render: (row) => row.barcode ?? dash,
+    },
+    {
+      // The SAP code of the line scanned — what tells two products that share one barcode apart.
+      id: "sapCode",
+      header: columnHeader("sapCode", "SAP Code"),
+      width: 110,
+      accessor: (row) => row.sapCode ?? "",
+      totalable: false,
+      cellClassName: "font-mono text-gray-500",
+      render: (row) => row.sapCode || dash,
     },
     {
       // Which order this entry belongs to — the receiving CSV/session name for a Scan History
