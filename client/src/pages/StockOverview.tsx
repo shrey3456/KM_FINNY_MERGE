@@ -8,7 +8,7 @@ import { format } from "date-fns";
 import { X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { LayoutList, CalendarDays, Boxes, History, ShoppingCart, RotateCw, Loader2, Scale, Pencil, Plus, Search, ChevronLeft, ChevronDown, FileDown, Trash2 } from "lucide-react";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { scanTypeLabel } from "./Scanning/ScanHistory";
@@ -97,6 +97,14 @@ const withPallets = (r: Row, f: (x: Row) => number, node: React.ReactNode) => {
 
 const totalPO = (r: Row) => r.openingStock + r.purchaseQty + r.adjustQty + r.transferIn - r.transferOut;
 
+// The figure columns that show pallets under the quantity on screen. In an export each of them becomes two columns, "<name> (qty)" and "<name> (plt)",
+// side by side. The pallets are worked out the same way as on screen (each plant's boxes over that plant's pallet size).
+const PALLET_FIGURES: Record<string, (r: Row) => number> = {
+  opening: (r) => r.openingStock, expectedPurchase: (r) => r.expectedPurchase, purchase: (r) => r.purchaseQty, extra: (r) => r.extraPurchaseQty,
+  adjust: (r) => r.adjustQty, transferIn: (r) => r.transferIn, transferOut: (r) => r.transferOut, totalPO: (r) => totalPO(r),
+  expectedSale: (r) => r.expectedSale, sale: (r) => r.saleQty, extraSale: (r) => r.extraSaleQty, closing: (r) => r.closingStock, stock: (r) => r.stock,
+};
+
 export default function StockOverview() {
   const { user } = useAuth();
   // Same rule as the Stock Overview: only an admin sees the delete icon (the server checks it too).
@@ -110,6 +118,8 @@ export default function StockOverview() {
   const [extraOnly, setExtraOnly] = usePersistentFilter<boolean>("stockOverview:extraOnly", false);
   const [pageIndex, setPageIndex] = usePersistentFilter<number>("stockOverview:page", 0);
   const [pageSize, setPageSize] = usePersistentFilter<number>("stockOverview:pageSize", 50);
+  // Export: a pallet column beside each quantity column (on by default).
+  const [exportPallets, setExportPallets] = usePersistentFilter<boolean>("stockOverview:exportPallets", true);
   // Same encoding as the Stock Overview: "d:YYYY-MM-DD" (one day) or "r:YYYY-MM-DD:YYYY-MM-DD" (a range).
   const [dateValue, setDateValue] = usePersistentFilter<string>("stockOverview:date", "");
   const { from, to } = useMemo(() => {
@@ -353,7 +363,7 @@ export default function StockOverview() {
   // with the visible columns in their current order, and a Total row like the table's.
   // `onlyPicked` (the PDF): exactly the columns ticked in the Columns button — the always-shown Sr No / Item / Plant are left out
   // unless nothing is ticked, so a PDF of 5 picked columns has 5 columns.
-  const exportRows = (onlyPicked = false): Array<Array<string | number>> => {
+  const exportRows = (onlyPicked = false, withPallets = true): Array<Array<string | number>> => {
     const picked = baseColumns.filter((c) => c.id !== "actions" && (c as any).hideable !== false && visibleSet.has(c.id));
     const cols = onlyPicked && picked.length > 0
       ? picked
@@ -374,13 +384,33 @@ export default function StockOverview() {
         });
       }
     }
-    const head = ordered.map((c) => String(c.header).replace(/ /g, " "));
-    const body = list.map((r) => ordered.map((c) => { const v = (c as any).accessor?.(r); return v == null ? "" : v; }));
-    const totals = ordered.map((c, i) => (i === 0 ? "Total" : (c as any).total ? String((c as any).total(list)) : ""));
+    // A figure column is followed by its pallet column (number, two decimals; blank when no plant has a pallet size set for the item).
+    type ExportCol = { qty: any; pallets?: (r: Row) => number };
+    const exportCols: ExportCol[] = ordered.map((c) => ({ qty: c, pallets: withPallets ? PALLET_FIGURES[c.id] : undefined }));
+    const palletCell = (r: Row, f: (r: Row) => number): number | string => { const p = palletsOf(r, f); return p == null ? "" : Math.round(p * 100) / 100; };
+    const head: string[] = [];
+    exportCols.forEach(({ qty, pallets }) => {
+      const name = String(qty.header).replace(/ /g, " ");
+      if (pallets) { head.push(`${name} (qty)`, `${name} (plt)`); } else head.push(name);
+    });
+    const body = list.map((r) => exportCols.flatMap(({ qty, pallets }) => {
+      const v = qty.accessor?.(r);
+      const cells: Array<string | number> = [v == null ? "" : v];
+      if (pallets) cells.push(palletCell(r, pallets));
+      return cells;
+    }));
+    const totals = exportCols.flatMap(({ qty, pallets }, i) => {
+      const cells: Array<string | number> = [i === 0 ? "Total" : qty.total ? String(qty.total(list)) : ""];
+      if (pallets) {
+        const parts = list.map((r) => palletsOf(r, pallets)).filter((p): p is number => p != null);
+        cells.push(parts.length ? Math.round(parts.reduce((s, p) => s + p, 0) * 100) / 100 : "");
+      }
+      return cells;
+    });
     return [head, ...body, totals];
   };
   const exportAs = (fmt: "CSV" | "Excel" | "PDF") => {
-    const data = exportRows(fmt === "PDF");
+    const data = exportRows(fmt === "PDF", exportPallets);
     const stamp = `${state || "all"}${plant ? "-" + plant : ""}-${format(new Date(), "yyyy-MM-dd")}`;
     if (fmt === "CSV") {
       const csv = data.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -399,7 +429,7 @@ export default function StockOverview() {
       const startY = drawPdfHeader(doc, { title: "Stock Overview Report", subtitle, margin: 10, generated: format(new Date(), "d MMM yyyy, HH:mm") });
       autoTable(doc, {
         head: [data[0].map(String)], body: data.slice(1).map((r) => r.map(String)), startY, theme: "grid",
-        styles: { fontSize: 7, cellPadding: 2, lineColor: [210, 210, 210], lineWidth: 0.15 },
+        styles: { fontSize: data[0].length > 16 ? 5.5 : 7, cellPadding: data[0].length > 16 ? 1.2 : 2, lineColor: [210, 210, 210], lineWidth: 0.15 },
         headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold" }, alternateRowStyles: { fillColor: [245, 247, 251] }, margin: { left: 10, right: 10 }, didParseCell: greenTotalRow,
       });
       drawPdfFooter(doc, 10);
@@ -528,12 +558,16 @@ export default function StockOverview() {
                   <FileDown className="mr-1 h-3.5 w-3.5" /> Export <ChevronDown className="ml-1 h-3.5 w-3.5 opacity-70" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-36">
+              <DropdownMenuContent align="end" className="w-52">
                 {(["CSV", "Excel", "PDF"] as const).map((f) => (
                   <DropdownMenuItem key={f} onSelect={() => exportAs(f)}>
                     <FileDown className="mr-2 h-3.5 w-3.5 opacity-70" /> {f}
                   </DropdownMenuItem>
                 ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuCheckboxItem checked={exportPallets} onCheckedChange={(on) => setExportPallets(on === true)} onSelect={(e) => e.preventDefault()}>
+                  Include pallet columns
+                </DropdownMenuCheckboxItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </>
