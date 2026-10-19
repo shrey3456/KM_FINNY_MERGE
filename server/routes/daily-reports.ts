@@ -227,7 +227,8 @@ router.get('/daily-reports/loading', requirePageAccess('daily-reports'), async (
             `SELECT order_number AS "groupKey", order_number AS "groupLabel",
               barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv,
                   is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-                  COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
+                  COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt",
+                COALESCE(is_adjust, false) AS "isAdjust", adjusted_at AS "adjustedAt"
              FROM loading_scan_events
             WHERE order_number = ANY($1) AND NOT COALESCE(hidden_in_history, false)
             ORDER BY scanned_at ASC`,
@@ -309,7 +310,8 @@ router.get('/daily-reports/loading/slip', requirePageAccess('daily-reports'), as
       pool.query(
         `SELECT barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv,
                 is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-                COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
+                COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt",
+                COALESCE(is_adjust, false) AS "isAdjust", adjusted_at AS "adjustedAt"
            FROM loading_scan_events WHERE order_number = $1 AND NOT COALESCE(hidden_in_history, false) ORDER BY scanned_at ASC`,
         [order],
       ),
@@ -383,7 +385,8 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
             `SELECT vehicle_number AS "groupKey", vehicle_number AS "groupLabel",
               barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv,
                   is_extra AS "isExtra", scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-                  COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
+                  COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt",
+                COALESCE(is_adjust, false) AS "isAdjust", adjusted_at AS "adjustedAt"
              FROM unload_scan_events
             WHERE session_id = ANY($1) AND NOT COALESCE(hidden_in_history, false)
             ORDER BY scanned_at ASC`,
@@ -468,7 +471,8 @@ router.get('/daily-reports/unloading/vehicle', requirePageAccess('daily-reports'
       pool.query(
         `SELECT barcode, item_name AS "itemName", sap_code AS "sapCode", total_qty AS "qty", pallets, stv, is_extra AS "isExtra",
                 scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-                COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
+                COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt",
+                COALESCE(is_adjust, false) AS "isAdjust", adjusted_at AS "adjustedAt"
            FROM unload_scan_events WHERE session_id = ANY($1) AND NOT COALESCE(hidden_in_history, false)
           ORDER BY scanned_at ASC`,
         [sessionIds],
@@ -577,7 +581,8 @@ router.get('/daily-reports/scan', requirePageAccess('daily-reports'), async (req
         pool.query(
           `SELECT barcode, item_name AS "itemName", (SELECT i.sap_code FROM order_scan_items i WHERE i.id = order_scan_events.scan_item_id) AS "sapCode", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
                   scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-                  COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
+                  COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt",
+                COALESCE(is_adjust, false) AS "isAdjust", adjusted_at AS "adjustedAt"
              FROM order_scan_events WHERE session_id = ANY($1) AND NOT COALESCE(hidden_in_history, false)
             ORDER BY scanned_at ASC`,
           [sessionIds],
@@ -647,7 +652,8 @@ router.get('/daily-reports/scan/csv', requirePageAccess('daily-reports'), async 
       pool.query(
         `SELECT barcode, item_name AS "itemName", (SELECT i.sap_code FROM order_scan_items i WHERE i.id = order_scan_events.scan_item_id) AS "sapCode", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
                 scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
-                COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt"
+                COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt",
+                COALESCE(is_adjust, false) AS "isAdjust", adjusted_at AS "adjustedAt"
            FROM order_scan_events WHERE session_id = ANY($1) AND NOT COALESCE(hidden_in_history, false)
           ORDER BY scanned_at ASC`,
         [sessionIds],

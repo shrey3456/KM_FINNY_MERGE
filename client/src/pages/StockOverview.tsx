@@ -53,6 +53,7 @@ const cellBorder = "border-r border-gray-300";
 const headerBorder = "border-r border-[#001d6e]/30";
 const FILTERS_KEY = "stockV2:filters";
 const VISIBLE_KEY = "stockV2:visibleColumnIds";
+const DEFAULT_HIDDEN_COLUMNS = ["closing"];
 const ORDER_KEY = "stockV2:columnOrder";
 const PILL_ON = "rounded-full bg-[#001d6e] px-3.5 py-1.5 text-xs font-semibold text-white ring-2 ring-[#001d6e]/30";
 const PILL_OFF = "rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50";
@@ -351,9 +352,10 @@ export default function StockOverview() {
     headerClassName: `${(c as any).headerClassName ?? ""} whitespace-nowrap text-center ${headerBorder}`.trim(),
     cellClassName: `${c.cellClassName ?? ""} ${cellBorder}`.trim(),
   }));
-  const visibleSet = visibleColumnIds ?? new Set(baseColumns.map((c) => c.id));
+  // Until someone picks their own columns, Closing starts hidden (tick it in Columns to show it; once a choice is saved it is never overridden).
+  const visibleSet = visibleColumnIds ?? new Set(baseColumns.filter((c) => !DEFAULT_HIDDEN_COLUMNS.includes(c.id)).map((c) => c.id));
   const toggleColumn = (id: string) => setVisibleColumnIds((prev) => {
-    const next = new Set(prev ?? baseColumns.map((c) => c.id));
+    const next = new Set(prev ?? baseColumns.filter((c) => !DEFAULT_HIDDEN_COLUMNS.includes(c.id)).map((c) => c.id));
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });

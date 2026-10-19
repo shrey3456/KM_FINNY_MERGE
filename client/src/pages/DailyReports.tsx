@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   Download, FileBarChart, Truck, Clock, Loader2, ChevronDown,
-  Package, ListChecks, CalendarClock, FileSpreadsheet, Eye,
+  Package, ListChecks, CalendarClock, FileSpreadsheet, Eye, RotateCw,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -62,6 +62,8 @@ type Activity = {
   // happened and was cancelled; totals/item-wise figures already exclude it server-side. An
   // entry someone REMOVED from Scan History is dropped by the server and never arrives here.
   voided?: boolean; voidReason?: string | null; voidedAt?: string | null;
+  // A quantity correction (Adjust), saved as its own entry; adjustedAt = when the correction was made.
+  isAdjust?: boolean; adjustedAt?: string | null;
 };
 type ReportData = {
   date: string;
@@ -141,6 +143,43 @@ function dailyReportPlantsFromUser(): string[] | null {
   } catch {
     return [];
   }
+}
+
+// What an activity entry IS: a regular scan, an Extra, or an Adjust (a quantity correction); and whether it was voided afterwards. A voided Extra stays an Extra
+// (and Voided), so it is never mistaken for an ordinary received entry.
+const entryKind = (a: { isExtra?: boolean; isAdjust?: boolean }): string => (a.isExtra ? "Extra" : a.isAdjust ? "Adjust" : "Regular");
+const entryTypeText = (a: { isExtra?: boolean; isAdjust?: boolean; voided?: boolean }): string => (a.voided ? `Voided (${entryKind(a)})` : entryKind(a));
+function EntryTypeBadges({ a }: { a: Activity }) {
+  const kind = a.isExtra ? "Extra" : a.isAdjust ? "Adjust" : null;
+  if (!kind && !a.voided) return null;
+  const tone = kind === "Extra" ? (a.voided ? "bg-amber-50 text-amber-400" : "bg-amber-100 text-amber-700") : (a.voided ? "bg-sky-50 text-sky-400" : "bg-sky-100 text-sky-700");
+  return (
+    <span className="ml-1.5 inline-flex flex-wrap items-center gap-1 align-middle">
+      {kind && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${tone}`}>{kind}</span>}
+      {a.voided && (
+        <span title={a.voidReason ?? undefined} className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">Voided</span>
+      )}
+    </span>
+  );
+}
+
+// The Activities rows of every download (main report, vehicle and CSV popups): the Type of each entry, and for a voided one its void reason and time. A voided
+// entry stays in the file with its original quantity, marked "Voided (...)", and is left out of the Total row, so the file's total matches the screen.
+// `stvHeader` = the Dispatch Directory column's heading (null = the file has no such column).
+function activityExportRows(list: Activity[], stvHeader: string | null): ExportRow[] {
+  const header: ExportRow = ["Time", "Barcode", "Item Name", "Type", "SAP Code", "Qty", "Pallets", ...(stvHeader ? [stvHeader] : []), "Extra Qty", "Scanned By", "Void Reason", "Voided At"];
+  const body: ExportRow[] = list.map((a) => [
+    fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", entryTypeText(a), a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "",
+    ...(stvHeader ? [a.stv ?? ""] : []),
+    a.isExtra ? a.qty : 0, a.scannedByName ?? "", a.voided ? (a.voidReason ?? "") : "", a.voided && a.voidedAt ? fmtIST(a.voidedAt) : "",
+  ]);
+  const counted = list.filter((a) => !a.voided);
+  const total: ExportRow = [
+    "Total", "", "", "", "", counted.reduce((s, a) => s + a.qty, 0), counted.reduce((s, a) => s + (a.pallets ?? 0), 0).toFixed(2),
+    ...(stvHeader ? [""] : []),
+    counted.reduce((s, a) => s + (a.isExtra ? a.qty : 0), 0), "", "", "",
+  ];
+  return [header, ...body, total];
 }
 
 // Same CSV/Excel/PDF export mechanism the existing per-order Reports dialog uses
@@ -322,37 +361,39 @@ export default function DailyReports() {
       }
       return res.json() as Promise<ReportData>;
     },
+    // A void or an Adjust made after Complete must show here: re-read on open, every 30 seconds, and before a download.
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const data = reportQuery.data;
 
-  const handleExportSummaryReport = (fmt: Fmt) => {
-    if (!data?.itemTotals) return;
-    const totals = data.itemTotals.reduce(
+  const handleExportSummaryReport = async (fmt: Fmt) => {
+    // Re-read first, so the file always has the latest voids and adjustments.
+    const fresh = (await reportQuery.refetch()).data ?? data;
+    if (!fresh?.itemTotals) return;
+    const totals = fresh.itemTotals.reduce(
       (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, expectedPallets: acc.expectedPallets + (i.expectedPallets ?? 0), pallets: acc.pallets + i.pallets }),
       { expectedQty: 0, actualQty: 0, extraQty: 0, expectedPallets: 0, pallets: 0 },
     );
     const rows: ExportRow[] = [
-      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime), "Total Time", fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)],
+      ["Start", fmtIST(fresh.activitySummary.startTime), "End", fmtIST(fresh.activitySummary.endTime), "Total Time", fmtTotalTime(fresh.activitySummary.startTime, fresh.activitySummary.endTime)],
       [],
       ["Barcode", "Item Name", "SAP Code", "Expected Qty", "Expected Pallets", "Received Qty", "Extra Qty", "Received Pallets"],
-      ...data.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.sapCode ?? "", i.expectedQty, (i.expectedPallets ?? 0).toFixed(2), receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
+      ...fresh.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.sapCode ?? "", i.expectedQty, (i.expectedPallets ?? 0).toFixed(2), receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
       ["TOTAL", "", "", totals.expectedQty, totals.expectedPallets.toFixed(2), totals.actualQty, totals.extraQty, totals.pallets.toFixed(2)],
     ];
-    exportRows(fmt, `${tab}-summary-report-${data.date}`, `${activeTab.label} — Total Summary Report — ${data.date}`, rows);
+    exportRows(fmt, `${tab}-summary-report-${fresh.date}`, `${activeTab.label} — Total Summary Report — ${fresh.date}`, rows);
   };
 
-  const handleExportActivitiesReport = (fmt: Fmt) => {
-    if (!data?.activities) return;
+  const handleExportActivitiesReport = async (fmt: Fmt) => {
+    // Re-read first, so the file always has the latest voids and adjustments.
+    const fresh = (await reportQuery.refetch()).data ?? data;
+    if (!fresh?.activities) return;
     const rows: ExportRow[] = [
-      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime), "Total Time", fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)],
+      ["Start", fmtIST(fresh.activitySummary.startTime), "End", fmtIST(fresh.activitySummary.endTime), "Total Time", fmtTotalTime(fresh.activitySummary.startTime, fresh.activitySummary.endTime)],
       [],
-      ["Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Dispatch Directory", "Extra Qty", "Scanned By"],
-      ...data.activities.map((a) => [
-        fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
-        a.isExtra ? a.qty : 0, a.scannedByName ?? "",
-      ]),
+      ...activityExportRows(fresh.activities, "Dispatch Directory"),
     ];
-    exportRows(fmt, `${tab}-activities-report-${data.date}`, `${activeTab.label} — Activities Report — ${data.date}`, rows);
+    exportRows(fmt, `${tab}-activities-report-${fresh.date}`, `${activeTab.label} — Activities Report — ${fresh.date}`, rows);
   };
 
   const summaryTotals = data?.itemTotals?.reduce(
@@ -393,13 +434,10 @@ export default function DailyReports() {
       id: "itemName", header: "Item Name", accessor: (r) => r.itemName, totalable: false,
       cellClassName: "text-gray-900",
       render: (r) => (
-        <>
-          {r.itemName || "—"}
-          {r.isExtra && !r.voided && <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Extra</span>}
-          <VoidedBadge a={r} />
-        </>
+        <>{r.itemName || "—"}</>
       ),
     },
+    { id: "entryType", header: "Type", width: 150, accessor: (r) => entryTypeText(r), totalable: false, render: (r) => <EntryTypeBadges a={r} /> },
     { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
     { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, cellClassName: "tabular-nums font-medium text-emerald-600", render: qtyCellFor },
     { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? null, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets?.toFixed(2) ?? "—" },
@@ -469,6 +507,9 @@ export default function DailyReports() {
             </SelectContent>
           </Select>
           <DateInput value={date} onChange={setDate} clearable={false} />
+          <Button type="button" variant="outline" size="icon" className="h-9 w-9" title="Refresh the report" aria-label="Refresh the report" onClick={() => reportQuery.refetch()} disabled={reportQuery.isFetching}>
+            <RotateCw className={`h-4 w-4 ${reportQuery.isFetching ? "animate-spin" : ""}`} />
+          </Button>
         </div>
       </div>
 
@@ -586,6 +627,7 @@ export default function DailyReports() {
 
           {effectiveReportTab === "summary" && (tab === "loading" || tab === "unloading") ? (
             <TableCard
+              key={`rpt-summary-rows-${tab}`}
               icon={tab === "unloading" ? Truck : FileSpreadsheet}
               title={tab === "unloading" ? "Vehicle Summary" : "Loading Slip Summary"}
               subtitle={
@@ -620,6 +662,7 @@ export default function DailyReports() {
             </TableCard>
           ) : effectiveReportTab === "summary" && tab === "scan" ? (
             <TableCard
+              key={`rpt-scan-summary-${tab}`}
               icon={FileSpreadsheet}
               title="Total Summary Report"
               subtitle={`${data.itemTotals?.length ?? 0} merged item${(data.itemTotals?.length ?? 0) === 1 ? "" : "s"} across all CSVs for ${data.date}`}
@@ -663,6 +706,7 @@ export default function DailyReports() {
             </TableCard>
           ) : effectiveReportTab === "activities" && tab === "scan" ? (
             <TableCard
+              key={`rpt-scan-activities-${tab}`}
               icon={ListChecks}
               title="Activities Report"
               subtitle={`${data.activities?.length ?? 0} merged events across all CSVs for ${data.date}`}
@@ -690,7 +734,7 @@ export default function DailyReports() {
                 {(data.activities ?? []).map((activity, index) => (
                   <div key={`${activity.barcode}-${index}`} className={`rounded-lg border p-3 text-sm ${activity.voided ? "border-red-200 bg-red-50/60 text-gray-400" : "border-gray-200"}`}>
                     <div className="flex justify-between gap-3">
-                      <span className={activity.voided ? "text-base font-semibold text-gray-400" : "text-base font-semibold text-gray-900"}>{activity.itemName || "—"}<VoidedBadge a={activity} /></span>
+                      <span className={activity.voided ? "text-base font-semibold text-gray-400" : "text-base font-semibold text-gray-900"}>{activity.itemName || "—"}<EntryTypeBadges a={activity} /></span>
                       <span className={activity.voided ? "text-lg font-bold text-gray-400 line-through" : "text-lg font-bold text-emerald-600"}>{activity.qty}</span>
                     </div>
                     <p className="mt-1 break-all font-mono text-gray-500">{activity.barcode}</p>
@@ -701,6 +745,7 @@ export default function DailyReports() {
             </TableCard>
           ) : effectiveReportTab === "activities" ? (
             <TableCard
+              key={`rpt-rows-activities-${tab}`}
               icon={ListChecks}
               title="Activities Report"
               subtitle={`${data.breakdown.length} ${tab === "unloading" ? "vehicle" : tab === "loading" ? "slip" : "CSV"}${data.breakdown.length === 1 ? "" : "s"}`}
@@ -726,6 +771,7 @@ export default function DailyReports() {
             </TableCard>
           ) : (
             <TableCard
+              key={`rpt-breakdown-${tab}`}
               icon={Truck}
               title={`${activeTab.breakdownLabel} Breakdown`}
               subtitle={`${data.breakdown.length} row${data.breakdown.length === 1 ? "" : "s"}`}
@@ -796,7 +842,7 @@ function DetailLists({ detailTab, itemTotals, activities, maxHeight }: { detailT
         {activities.map((a, index) => (
           <div key={`${a.barcode}-${index}`} className={`rounded-lg border px-3 py-2 text-xs ${a.voided ? "border-red-200 bg-red-50/60 text-gray-400" : "border-gray-200"}`}>
             <div className="flex justify-between gap-3">
-              <span className={`text-sm font-semibold leading-snug ${a.voided ? "text-gray-400" : "text-gray-900"}`}>{a.itemName || "—"}<VoidedBadge a={a} /></span>
+              <span className={`text-sm font-semibold leading-snug ${a.voided ? "text-gray-400" : "text-gray-900"}`}>{a.itemName || "—"}<EntryTypeBadges a={a} /></span>
               <span className={`text-base font-bold ${a.voided ? "text-gray-400 line-through" : "text-emerald-600"}`}>{a.qty}</span>
             </div>
             <p className="break-all font-mono text-gray-500">{a.barcode}</p>
@@ -857,6 +903,7 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
       }
       return res.json() as Promise<LoadingSlipDetail>;
     },
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const detail = detailQuery.data;
 
@@ -919,22 +966,15 @@ const summaryColumnsForDetail: DataTableColumn<ItemTotal>[] = [
 ];
 
 // Voided scans stay listed (so the report shows the entry existed and was cancelled) but are
-// greyed out with a badge; the server already leaves them out of every total.
+// greyed out with a Voided badge (see EntryTypeBadges); the server already leaves them out of every total.
 const voidedRowClass = (r: Activity) => (r.voided ? "bg-red-50/60 text-gray-400" : undefined);
-function VoidedBadge({ a }: { a: Activity }) {
-  if (!a.voided) return null;
-  return (
-    <span title={a.voidReason ?? undefined} className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
-      Voided
-    </span>
-  );
-}
 const qtyCellFor = (r: Activity) => (r.voided ? <span className="text-gray-400 line-through">{r.qty}</span> : r.qty);
 
 const activitiesColumnsForDetail: DataTableColumn<Activity>[] = [
   { id: "scannedAt", header: "Time", width: 150, accessor: (r) => r.scannedAt, totalable: false, render: (r) => fmtIST(r.scannedAt) },
   { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
-  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => <>{r.itemName || "—"}<VoidedBadge a={r} /></> },
+  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => <>{r.itemName || "—"}</> },
+  { id: "entryType", header: "Type", width: 150, accessor: (r) => entryTypeText(r), totalable: false, render: (r) => <EntryTypeBadges a={r} /> },
   { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
   { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, render: qtyCellFor },
   { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? 0, render: (r) => r.pallets?.toFixed(2) ?? "—" },
@@ -959,6 +999,7 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
       }
       return res.json() as Promise<VehicleDetail>;
     },
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const detail = detailQuery.data;
 
@@ -976,8 +1017,7 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "Extra Qty", "Scanned By"],
-          ...detail.activities.map((a) => [fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.isExtra ? a.qty : 0, a.scannedByName ?? ""]),
+          ...activityExportRows(detail.activities, null),
         ];
     const suffix = detailTab === "items" ? "items" : "activities";
     exportRows(fmt, `unloading-${detail.vehicle}-${suffix}-${detail.date}`, `Unloading — ${detail.vehicle} — ${detailTab === "items" ? "Item-wise Total" : "Activity Report"} — ${detail.date}`, rows);
@@ -1078,6 +1118,7 @@ function CsvDetailDialog({ date, plant, csv, initialTab, onClose }: { date: stri
       }
       return res.json() as Promise<CsvDetail>;
     },
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const detail = detailQuery.data;
 
@@ -1095,11 +1136,7 @@ function CsvDetailDialog({ date, plant, csv, initialTab, onClose }: { date: stri
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "SAP Code", "Qty", "Pallets", "STV", "Extra Qty", "Scanned By"],
-          ...detail.activities.map((a) => [
-            fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
-            a.isExtra ? a.qty : 0, a.scannedByName ?? "",
-          ]),
+          ...activityExportRows(detail.activities, "STV"),
         ];
     const suffix = detailTab === "items" ? "items" : "activities";
     exportRows(fmt, `scan-${detail.csv}-${suffix}-${detail.date}`, `Scan Operations — ${detail.csv} — ${detailTab === "items" ? "Item-wise Total" : "Activity Report"} — ${detail.date}`, rows);
