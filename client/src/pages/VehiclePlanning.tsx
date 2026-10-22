@@ -691,7 +691,7 @@ export default function VehiclePlanning() {
   function renderNotFree(ask: NotFreeAsk | null, setAsk: (a: NotFreeAsk | null) => void, pending: boolean, run: (o: { force?: boolean; sameTripAs?: string }) => void, forceLabel: string, allowShare = true) {
     return (
       <Dialog open={!!ask} onOpenChange={(open) => { if (!open && !pending) setAsk(null); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-1.5"><AlertTriangle className="h-4 w-4 text-amber-500" /> Vehicle is not free yet</DialogTitle>
             <DialogDescription>{ask?.message}</DialogDescription>
@@ -699,12 +699,12 @@ export default function VehiclePlanning() {
           {ask && canWrite && ((allowShare && ask.overlapping.length > 0) || ask.blocking?.canMarkArrived) && (
             <div className="space-y-2">
               {ask.blocking?.canMarkArrived && (
-                <Button className="w-full justify-start text-left" variant="outline" disabled={pending} onClick={() => markBlockingArrivedThen(ask, () => setAsk(null), () => run({}))}>
+                <Button className="h-auto w-full justify-start whitespace-normal py-2 text-left" variant="outline" disabled={pending} onClick={() => markBlockingArrivedThen(ask, () => setAsk(null), () => run({}))}>
                   Mark #{ask.blocking.orderNumber} arrived on {dayLabel(ask.blocking.suggestedArrival)} and continue
                 </Button>
               )}
               {allowShare && ask.overlapping.map((o) => (
-                <Button key={o.orderNumber} className="w-full justify-start text-left" variant="outline" disabled={pending} onClick={() => run({ sameTripAs: o.orderNumber })}>
+                <Button key={o.orderNumber} className="h-auto w-full justify-start whitespace-normal py-2 text-left" variant="outline" disabled={pending} onClick={() => run({ sameTripAs: o.orderNumber })}>
                   Same trip as #{o.orderNumber}{o.partyName ? ` (${o.partyName})` : ""} - shared load
                 </Button>
               ))}
@@ -1108,14 +1108,14 @@ export default function VehiclePlanning() {
                   ))}
                   </div>
                   <div data-track className="relative flex-1" style={{ minHeight: 10 + laneCount * LANE_HEIGHT }}>
-                    {/* One continuous area — no per-day cell borders (that read as a boxed
-                        grid); just a faint tint marking today, for date alignment. */}
+                    {/* One continuous area. A thin, light vertical line at each day (a little firmer at the start of a week, Monday) lines the bars up
+                        with the dates in the header without turning it into a boxed grid; today keeps its faint tint. */}
                     <div className="absolute inset-0 flex">
                       {days.map((d, i) => (
                         <div
                           key={i}
                           style={{ width: `${100 / windowDays}%`, minWidth: DAY_COL_MIN_WIDTH }}
-                          className={`shrink-0 ${isSameDay(d, today) ? "bg-[#001d6e]/[0.04]" : ""}`}
+                          className={`shrink-0 border-l ${d.getDay() === 1 ? "border-gray-300" : "border-gray-200/70"} ${isSameDay(d, today) ? "bg-[#001d6e]/[0.04]" : ""}`}
                         />
                       ))}
                     </div>
@@ -1244,7 +1244,7 @@ export default function VehiclePlanning() {
       <SyncProgressDialog open={syncMutation.isPending} title="Refreshing from Notion…" />
 
       <Dialog open={!!assignTarget} onOpenChange={(open) => { if (!open) setAssignTarget(null); }}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           {(() => {
             const data = availableOrdersQuery.data;
             const info = data?.vehicle;
@@ -1356,7 +1356,7 @@ export default function VehiclePlanning() {
 
       {/* A trip bar was clicked: its details, and Arrived / Undo arrival. */}
       <Dialog open={!!tripTarget} onOpenChange={(open) => { if (!open) setTripTarget(null); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           {tripTarget && (() => {
             const { vehicle: v, trip: t } = tripTarget;
             const inConflict = (v.conflicts ?? []).find((c) => c.orderNumber === t.orderNumber);
@@ -1429,7 +1429,7 @@ export default function VehiclePlanning() {
 
       {/* Arrived: the day the vehicle really came back (default today). It is free from the next day. */}
       <Dialog open={!!arrivalTarget} onOpenChange={(open) => { if (!open) setArrivalTarget(null); }}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4 text-emerald-600" /> Vehicle arrived</DialogTitle>
             <DialogDescription>
@@ -1464,7 +1464,7 @@ export default function VehiclePlanning() {
 
       {/* A stretch that runs into the next trip. Nothing is blocked: the planner decides. */}
       <Dialog open={!!stretchAsk} onOpenChange={(open) => { if (!open && !expectedEndMutation.isPending) setStretchAsk(null); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-1.5"><AlertTriangle className="h-4 w-4 text-red-500" /> Vehicle not back in time</DialogTitle>
             <DialogDescription>
@@ -1514,7 +1514,7 @@ export default function VehiclePlanning() {
 
       {/* Change plan: move to another vehicle, change the driver, or take the vehicle off. Loading's own orders are refused by the server. */}
       <Dialog open={!!changeTarget} onOpenChange={(open) => { if (!open) setChangeTarget(null); }}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           {changeTarget && (() => {
             const { vehicle: v, trip: t } = changeTarget;
             const q = moveSearch.trim().toLowerCase();
@@ -1551,8 +1551,8 @@ export default function VehiclePlanning() {
                         key={x.id} type="button" onClick={() => setMoveDest(x)}
                         className={`flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-1.5 text-left text-xs ${moveDest?.id === x.id ? "border-[#001d6e] bg-[#001d6e]/5" : "border-gray-200 hover:bg-[#001d6e]/5"}`}
                       >
-                        <span className="font-semibold text-[#001d6e]">{x.vehicleNumber}<span className="ml-2 font-normal text-gray-500">{x.driver ?? ""}</span></span>
-                        {busyUntil ? <span className="text-amber-600">Busy until {dayLabel(busyUntil)}</span> : <span className="text-emerald-600">Free</span>}
+                        <span className="min-w-0 truncate font-semibold text-[#001d6e]">{x.vehicleNumber}<span className="ml-2 font-normal text-gray-500">{x.driver ?? ""}</span></span>
+                        {busyUntil ? <span className="shrink-0 text-amber-600">Busy until {dayLabel(busyUntil)}</span> : <span className="text-emerald-600">Free</span>}
                       </button>
                     ))}
                     {candidates.length === 0 && <p className="py-3 text-center text-xs text-gray-400">No vehicles found.</p>}
@@ -1610,7 +1610,7 @@ export default function VehiclePlanning() {
 
       {/* The vehicle came back earlier than planned. */}
       <Dialog open={!!earlyAsk} onOpenChange={(open) => { if (!open) setEarlyAsk(null); }}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> {earlyAsk?.vehicle.vehicleNumber} is free early</DialogTitle>
             <DialogDescription>
@@ -1626,7 +1626,7 @@ export default function VehiclePlanning() {
 
       {/* Review: every vehicle's latest order, with whether our system has its slip. Only the ticked ones are created. */}
       <Dialog open={reviewOpen} onOpenChange={(open) => { if (!open && !(reviewRun && !reviewRun.finished)) setReviewOpen(false); }}>
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="sm:max-w-2xl max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           {(() => {
             const items = reviewQuery.data?.items ?? [];
             const missing = items.filter((i) => !i.inSystem);
@@ -1655,7 +1655,7 @@ export default function VehiclePlanning() {
                     ))}
                   </div>
                 ) : (
-                  <div className="max-h-[50vh] overflow-y-auto rounded-lg border border-gray-200">
+                  <div className="max-h-[50vh] overflow-auto rounded-lg border border-gray-200">
                     {reviewQuery.isLoading ? <SectionSkeleton lines={4} /> : items.length === 0 ? (
                       <p className="py-8 text-center text-sm text-gray-400">No orders yet. Press Refresh from Notion first.</p>
                     ) : (
@@ -1721,7 +1721,7 @@ export default function VehiclePlanning() {
       </Dialog>
 
       <Dialog open={!!mismatchTarget} onOpenChange={(open) => { if (!open) setMismatchTarget(null); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-1.5">
               <AlertTriangle className="h-4 w-4 text-amber-500" /> Vehicle mismatch
@@ -1762,7 +1762,7 @@ export default function VehiclePlanning() {
       {/* Order history — every past order this vehicle has carried, newest first. Fetched on
           demand (clicking the row's label columns), not bundled into the main fleet list. */}
       <Dialog open={!!historyTarget} onOpenChange={(open) => { if (!open) setHistoryTarget(null); }}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-1.5">
               <History className="h-4 w-4" /> {historyTarget?.vehicleNumber} — order history

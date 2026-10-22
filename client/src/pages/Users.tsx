@@ -548,6 +548,7 @@ const Users = () => {
                 <FormControl>
                   <Input placeholder="Enter user code" {...field} />
                 </FormControl>
+                {isEdit && <p className="text-[11px] text-gray-500">Changing the User Code updates it everywhere (activity, scans, loads) and keeps the user signed in.</p>}
                 <FormMessage />
               </FormItem>
             )} />
