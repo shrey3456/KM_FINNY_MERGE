@@ -114,6 +114,9 @@ const DAY_COL_MIN_WIDTH = 42; // px per day, so the whole thing scrolls horizont
 // and single-day buttons stay as a discoverable fallback for anyone who'd rather click than
 // scroll/use the keyboard.
 const SCROLL_STEP_DAYS = 1;
+// Sideways swipe / wheel over the board: pixels of travel for each day the dates move, and the most days one wheel event may move.
+const WHEEL_PX_PER_DAY = 140;
+const WHEEL_MAX_DAYS_PER_EVENT = 2;
 
 // Notion's "Trip Complets on" formula prints as "DD/MM/YYYY" (confirmed live against the
 // database) — not ISO, so it needs its own parse rather than `new Date(...)`.
@@ -128,10 +131,10 @@ function parseTripDate(raw: string | null): Date | null {
 }
 
 // Is the vehicle free on `day`? Not when a trip covers that day: it starts on or before it and does not free the vehicle until after it (a trip frees the vehicle on
-// its last day). `confirmedOnly`: also not when an earlier trip has no arrival recorded yet (its return is only planned).
-function isAvailableOn(v: VehicleRow, day: string, confirmedOnly: boolean): boolean {
+// its last day). A vehicle planned to be back, or arrived, by that day counts as available.
+function isAvailableOn(v: VehicleRow, day: string): boolean {
   const live = (v.trips ?? []).filter((t) => t.state !== "cancelled");
-  return !live.some((t) => (t.startDay <= day && day < t.freeFromDay) || (confirmedOnly && t.startDay <= day && !t.arrivedOn && t.state !== "closed"));
+  return !live.some((t) => t.startDay <= day && day < t.freeFromDay);
 }
 
 export default function VehiclePlanning() {
@@ -173,10 +176,8 @@ export default function VehiclePlanning() {
   const [changeDriverExtra, setChangeDriverExtra] = useState<NotionDriver | null>(null);
   const [removeSure, setRemoveSure] = useState(false);
   const [tripFilter, setTripFilter] = useState<"all" | "awaiting" | "conflicts">("all");
-  // "Available" filter: only the vehicles that are free on a chosen day. "" = off. With "only recorded arrivals" a vehicle whose earlier trip has no Arrived recorded
-  // yet is not counted (its return is only planned, not confirmed).
+  // "Available" filter: only the vehicles that are free on a chosen day (planned to be back or arrived by then). "" = off.
   const [availableOn, setAvailableOn] = usePersistentFilter<string>("vehiclePlanning:availableOn", "");
-  const [availableConfirmedOnly, setAvailableConfirmedOnly] = usePersistentFilter<boolean>("vehiclePlanning:availableConfirmedOnly", false);
   const [availableOpen, setAvailableOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [showNoHistory, setShowNoHistory] = useState(false);
@@ -240,9 +241,12 @@ export default function VehiclePlanning() {
       if (delta === 0) return;
       e.preventDefault();
       wheelAccum.current += delta;
-      const days = Math.trunc(wheelAccum.current / DAY_COL_MIN_WIDTH);
-      if (days === 0) return;
-      wheelAccum.current -= days * DAY_COL_MIN_WIDTH;
+      // One day per WHEEL_PX_PER_DAY of finger travel (a column is only 42 px wide, which made a sideways swipe race through dates), and never more than
+      // WHEEL_MAX_DAYS_PER_EVENT days from one wheel event, so even a hard flick stays controllable.
+      const raw = Math.trunc(wheelAccum.current / WHEEL_PX_PER_DAY);
+      if (raw === 0) return;
+      const days = Math.max(-WHEEL_MAX_DAYS_PER_EVENT, Math.min(WHEEL_MAX_DAYS_PER_EVENT, raw));
+      wheelAccum.current = raw === days ? wheelAccum.current - days * WHEEL_PX_PER_DAY : 0;
       setWindowStart((d) => addDays(d, days));
     };
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -598,7 +602,7 @@ export default function VehiclePlanning() {
       if (driverFilter.length > 0 && !driverFilter.includes(v.driver ?? "")) return false;
       if (tripFilter === "awaiting" && v.vehicleState !== "awaiting") return false;
       if (tripFilter === "conflicts" && !(v.conflicts?.length)) return false;
-      if (availableOn && !isAvailableOn(v, availableOn, availableConfirmedOnly)) return false;
+      if (availableOn && !isAvailableOn(v, availableOn)) return false;
       return showNoHistory || v.hasHistory || !!v.showAlways || !!searchLower;
     })
     .sort((a, b) => {
@@ -863,13 +867,9 @@ export default function VehiclePlanning() {
               <button type="button" className={chipCls(availableOn === format(new Date(), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(new Date(), "yyyy-MM-dd"))}>Today</button>
               <button type="button" className={chipCls(availableOn === format(addDays(new Date(), 1), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(addDays(new Date(), 1), "yyyy-MM-dd"))}>Tomorrow</button>
             </div>
-            <label className="flex items-start gap-2 text-xs text-gray-700">
-              <Checkbox checked={availableConfirmedOnly} onCheckedChange={(on) => setAvailableConfirmedOnly(on === true)} className="mt-0.5" />
-              <span>Only vehicles whose arrival is recorded (leave out the ones that are only planned to be back)</span>
-            </label>
             <div className="flex items-center justify-between border-t pt-2 text-xs">
               <span className="text-gray-500">
-                {availableOn ? `${allVehicles.filter((v) => isAvailableOn(v, availableOn, availableConfirmedOnly) && (showNoHistory || v.hasHistory || !!v.showAlways)).length} vehicle(s) free` : "Pick a day to filter"}
+                {availableOn ? `${allVehicles.filter((v) => isAvailableOn(v, availableOn) && (showNoHistory || v.hasHistory || !!v.showAlways)).length} vehicle(s) free` : "Pick a day to filter"}
               </span>
               {availableOn && <button type="button" className="text-gray-400 hover:text-red-500" onClick={() => { setAvailableOn(""); setAvailableOpen(false); }}>Clear</button>}
             </div>
