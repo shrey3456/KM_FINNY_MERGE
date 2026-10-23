@@ -359,13 +359,20 @@ export default function TollVoucher() {
     
     // Pick the largest font whose wrapped lines fit the Order Details box. The print runs in a hidden
     // iframe (no layout), so the fit is estimated: box ~410pt wide x ~78pt tall, bold caps ~0.64em/char.
-    const partyEntries = partyText.split("\n").filter((l) => l.trim());
-    let partyFontPt = 7;
-    for (let size = 16; size >= 7; size -= 0.5) {
+    // Entries print as one comma-separated paragraph without their order numbers (those are already
+    // in the voucher-number cell), so the text wraps to fill the box instead of one entry per line.
+    const partyLine = partyText
+      .split("\n")
+      .map((l) => l.trim().replace(/^\d+\s+/, ""))
+      .filter(Boolean)
+      .join(", ");
+    let partyFontPt = 4;
+    for (let size = 16; size >= 4; size -= 0.5) {
       const charsPerLine = Math.floor(410 / (size * 0.64));
-      const wrapped = partyEntries.reduce((n, l) => n + Math.max(1, Math.ceil(l.length / charsPerLine)), 0);
-      if (wrapped * size * 1.15 <= 78) { partyFontPt = size; break; }
+      const lines = Math.max(1, Math.ceil(partyLine.length / charsPerLine));
+      if (lines * size * 1.15 <= 78) { partyFontPt = size; break; }
     }
+    const partyHtml = partyLine || "N/A";
     let logoDataUrl = "";
     try {
       const response = await fetch(logoPath);
@@ -437,7 +444,8 @@ export default function TollVoucher() {
             .flex-col { display: flex; flex-direction: column; }
             .flex-grow { flex-grow: 1; }
             
-            .order-details-content { font-size: ${partyFontPt}pt; font-weight: bold; text-align: center; width: 100%; margin: 0; line-height: 1.1; white-space: pre-line; }
+            .order-details-content { font-size: ${partyFontPt}pt; font-weight: bold; text-align: center; width: 100%; margin: 0; line-height: 1.15; }
+            .tax-words { font-size: 11pt; font-weight: 600; text-align: center; }
             
             .w-2-1-a { width: 66.66%; }
             .w-2-1-b { width: 33.33%; }
@@ -501,7 +509,7 @@ export default function TollVoucher() {
                 <span class="label-text" style="font-size: 18pt;">Order Details:</span>
               </div>
               <div class="col w-1-2-b" style="overflow: hidden; position: relative;">
-                <p id="order-details-content" class="order-details-content">${partyText || 'N/A'}</p>
+                <div id="order-details-content" class="order-details-content">${partyHtml}</div>
               </div>
             </div>
 
@@ -513,7 +521,7 @@ export default function TollVoucher() {
                 <span class="value-text" style="color: #dc2626;">₹${voucher.tollTax.toFixed(2)}</span>
               </div>
               <div class="col w-tax-c">
-                <span class="label-text" style="font-weight: 600;">${voucher.tollTaxInWords}</span>
+                <span class="tax-words">${voucher.tollTaxInWords}</span>
               </div>
             </div>
           </div>
@@ -529,8 +537,8 @@ export default function TollVoucher() {
               // Ensure we start applying from this size
               element.style.fontSize = size + 'pt';
               
-              // Allow shrinking further if it still overflows, down to 5pt
-              while ((element.scrollHeight + 8 > parent.clientHeight || element.scrollWidth > parent.clientWidth) && size > 6) {
+              // Shrink further if the estimate still overflows, down to 4pt
+              while ((element.scrollHeight + 8 > parent.clientHeight || element.scrollWidth > parent.clientWidth) && size > 4) {
                 size -= 0.5;
                 element.style.fontSize = size + 'pt';
               }
@@ -542,7 +550,8 @@ export default function TollVoucher() {
 
     try {
       const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
+      // Kept off-screen rather than display:none so it gets layout and the fit script can measure.
+      iframe.style.cssText = "position:fixed;left:-10000px;top:0;width:900px;height:500px;border:0;";
       document.body.appendChild(iframe);
 
       const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
