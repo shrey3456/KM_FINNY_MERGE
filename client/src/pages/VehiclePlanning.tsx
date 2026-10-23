@@ -127,6 +127,13 @@ function parseTripDate(raw: string | null): Date | null {
   }
 }
 
+// Is the vehicle free on `day`? Not when a trip covers that day: it starts on or before it and does not free the vehicle until after it (a trip frees the vehicle on
+// its last day). `confirmedOnly`: also not when an earlier trip has no arrival recorded yet (its return is only planned).
+function isAvailableOn(v: VehicleRow, day: string, confirmedOnly: boolean): boolean {
+  const live = (v.trips ?? []).filter((t) => t.state !== "cancelled");
+  return !live.some((t) => (t.startDay <= day && day < t.freeFromDay) || (confirmedOnly && t.startDay <= day && !t.arrivedOn && t.state !== "closed"));
+}
+
 export default function VehiclePlanning() {
   const { toast } = useToast();
   const canWrite = hasPageWriteAccess("vehicle-planning");
@@ -166,6 +173,11 @@ export default function VehiclePlanning() {
   const [changeDriverExtra, setChangeDriverExtra] = useState<NotionDriver | null>(null);
   const [removeSure, setRemoveSure] = useState(false);
   const [tripFilter, setTripFilter] = useState<"all" | "awaiting" | "conflicts">("all");
+  // "Available" filter: only the vehicles that are free on a chosen day. "" = off. With "only recorded arrivals" a vehicle whose earlier trip has no Arrived recorded
+  // yet is not counted (its return is only planned, not confirmed).
+  const [availableOn, setAvailableOn] = usePersistentFilter<string>("vehiclePlanning:availableOn", "");
+  const [availableConfirmedOnly, setAvailableConfirmedOnly] = usePersistentFilter<boolean>("vehiclePlanning:availableConfirmedOnly", false);
+  const [availableOpen, setAvailableOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [showNoHistory, setShowNoHistory] = useState(false);
   const [search, setSearch] = useState("");
@@ -586,6 +598,7 @@ export default function VehiclePlanning() {
       if (driverFilter.length > 0 && !driverFilter.includes(v.driver ?? "")) return false;
       if (tripFilter === "awaiting" && v.vehicleState !== "awaiting") return false;
       if (tripFilter === "conflicts" && !(v.conflicts?.length)) return false;
+      if (availableOn && !isAvailableOn(v, availableOn, availableConfirmedOnly)) return false;
       return showNoHistory || v.hasHistory || !!v.showAlways || !!searchLower;
     })
     .sort((a, b) => {
@@ -666,7 +679,9 @@ export default function VehiclePlanning() {
   // The label over a trip's bar: one party, or for a shared load both names when there is room ("Party A + Party B") and the first with "+1" when there is not.
   function barLabel(t: Trip, labelDays: number): string {
     if (t.members.length <= 1) return t.partyName ?? "—";
-    const names = t.members.map((m) => m.partyName ?? "—");
+    // Slips of different lengths on one trip show their days ("Party A (4d) + Party B (2d)"); equal lengths need no numbers.
+    const sameLength = t.members.every((m) => m.tripDays === t.members[0].tripDays);
+    const names = t.members.map((m) => `${m.partyName ?? "—"}${sameLength ? "" : ` (${m.tripDays}d)`}`);
     return labelDays * DAY_COL_MIN_WIDTH >= 200 ? names.join(" + ") : `${names[0]} +${names.length - 1}`;
   }
 
@@ -832,6 +847,34 @@ export default function VehiclePlanning() {
             </PopoverContent>
           </Popover>
         ))}
+
+        {/* Available: the vehicles that are free on a day you pick (by their arrival / trip end). */}
+        <Popover open={availableOpen} onOpenChange={setAvailableOpen}>
+          <PopoverTrigger asChild>
+            <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${availableOn ? "border-emerald-500 bg-emerald-50 text-emerald-800" : ""}`}>
+              <Truck className="mr-1.5 h-3.5 w-3.5" />
+              {availableOn ? `Available on ${dayLabel(availableOn)}` : "Available"}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-72 space-y-3" align="start">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Vehicles free on</div>
+            <Input type="date" value={availableOn || format(new Date(), "yyyy-MM-dd")} onChange={(e) => setAvailableOn(e.target.value)} className="h-9" />
+            <div className="flex flex-wrap gap-1.5">
+              <button type="button" className={chipCls(availableOn === format(new Date(), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(new Date(), "yyyy-MM-dd"))}>Today</button>
+              <button type="button" className={chipCls(availableOn === format(addDays(new Date(), 1), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(addDays(new Date(), 1), "yyyy-MM-dd"))}>Tomorrow</button>
+            </div>
+            <label className="flex items-start gap-2 text-xs text-gray-700">
+              <Checkbox checked={availableConfirmedOnly} onCheckedChange={(on) => setAvailableConfirmedOnly(on === true)} className="mt-0.5" />
+              <span>Only vehicles whose arrival is recorded (leave out the ones that are only planned to be back)</span>
+            </label>
+            <div className="flex items-center justify-between border-t pt-2 text-xs">
+              <span className="text-gray-500">
+                {availableOn ? `${allVehicles.filter((v) => isAvailableOn(v, availableOn, availableConfirmedOnly) && (showNoHistory || v.hasHistory || !!v.showAlways)).length} vehicle(s) free` : "Pick a day to filter"}
+              </span>
+              {availableOn && <button type="button" className="text-gray-400 hover:text-red-500" onClick={() => { setAvailableOn(""); setAvailableOpen(false); }}>Clear</button>}
+            </div>
+          </PopoverContent>
+        </Popover>
 
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
@@ -1139,6 +1182,17 @@ export default function VehiclePlanning() {
                               className={`h-full w-full rounded-full shadow-sm ${tripBarClass(t.state, l.conflict)}`}
                               title={`#${t.members.map((m) => m.orderNumber).join(" + #")} · ${t.members.map((m) => m.partyName ?? "—").join(" + ")} · ${dayLabel(t.startDay)} to ${dayLabel(t.lastBusyDay)} · ${l.conflict ? "Vehicle not back yet" : stateText[t.state]}${t.notionNote ? " · Notion not updated" : ""}`}
                             />
+                            {/* A shared load whose slips end on different days: a notch on the bar at each shorter slip's last day. */}
+                            {t.members.length > 1 && endIdx > l.startIdx && t.members.filter((m) => m.plannedLastDay < t.lastBusyDay).map((m) => {
+                              const pos = (dayIdx(m.plannedLastDay) + 1 - l.startIdx) / (endIdx - l.startIdx);
+                              if (!(pos > 0 && pos < 1)) return null;
+                              return (
+                                <span key={m.orderNumber} className="absolute top-[-2px] z-[1] h-[calc(100%+4px)] w-2 -translate-x-1/2" style={{ left: `${pos * 100}%` }}
+                                  title={`#${m.orderNumber} ${m.partyName ?? ""} ends ${dayLabel(m.plannedLastDay)} (${m.tripDays} day${m.tripDays === 1 ? "" : "s"})`}>
+                                  <span className="mx-auto block h-full w-0.5 rounded bg-white" />
+                                </span>
+                              );
+                            })}
                             {t.notionNote && <AlertTriangle className="pointer-events-none absolute -top-3 right-0 h-3 w-3 text-amber-500" />}
                             {canStretch && (
                               <div
@@ -1376,7 +1430,13 @@ export default function VehiclePlanning() {
                   {t.members.length > 1 && (
                     <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
                       <div className="mb-1 font-semibold">Shared load - {t.members.length} orders on one trip</div>
-                      {t.members.map((m) => <div key={m.orderNumber}>#{m.orderNumber} · {m.partyName ?? "—"}{m.plant ? ` · ${m.plant}` : ""}</div>)}
+                      {t.members.map((m) => (
+                        <div key={m.orderNumber} className="flex flex-wrap justify-between gap-x-3">
+                          <span>#{m.orderNumber} · {m.partyName ?? "—"}{m.plant ? ` · ${m.plant}` : ""}</span>
+                          <span className="whitespace-nowrap text-sky-800">{m.tripDays} day{m.tripDays === 1 ? "" : "s"} · ends {dayLabel(m.plannedLastDay)}</span>
+                        </div>
+                      ))}
+                      <div className="mt-1 border-t border-sky-200 pt-1 font-medium">Vehicle free from {dayLabel(t.freeFromDay)} (when the last party is done)</div>
                     </div>
                   )}
                   {t.notionNote && (
@@ -1394,6 +1454,7 @@ export default function VehiclePlanning() {
                     <span className="text-gray-500">Order date</span><span>{dayLabel(t.startDay)}</span>
                     <span className="text-gray-500">Trip days</span><span>{t.tripDays}</span>
                     <span className="text-gray-500">Planned last day</span><span>{dayLabel(t.plannedLastDay)}</span>
+                    {t.members.length <= 1 && <><span className="text-gray-500">Vehicle free from</span><span>{dayLabel(t.freeFromDay)}</span></>}
                     {t.expectedEnd && <><span className="text-gray-500">Expected last day</span><span>{dayLabel(t.expectedEnd)}</span></>}
                     {t.arrivedOn && <><span className="text-gray-500">Arrived on</span><span>{dayLabel(t.arrivedOn)}{t.freeSameDay ? " (free the same day)" : ""}</span></>}
                     <span className="text-gray-500">Driver</span><span>{t.driver ?? "—"}</span>

@@ -8,7 +8,9 @@ import type { VehiclePlanningOrderEntry } from '@shared/schema';
 //   arrivedOn    - a person recorded the real arrival (the Arrived button)
 //   expectedEnd  - a person stretched the bar to a new expected last day
 //   planned      - from Notion's trip days
-// The vehicle's last busy day is the strongest one that exists, and it is FREE FROM THE NEXT DAY.
+// The vehicle's last busy day is the strongest one that exists, and the vehicle is AVAILABLE ON THAT DAY ITSELF (a 4-day trip from day 1 frees it on day 4): it
+// comes back that day, so an order starting then does not clash. Two exceptions hold the vehicle until the NEXT day: a ONE-day trip that has no arrival recorded
+// (it goes out and comes back the same day, so that day is taken), and an arrival recorded with "can go out again the same day" UNTICKED.
 
 export type TripState = 'planned' | 'on_trip' | 'awaiting' | 'arrived' | 'closed' | 'cancelled';
 
@@ -137,7 +139,12 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
     else if (lastBusyDay >= today) state = 'on_trip';
     else if (daysBetween(lastBusyDay, today) > ASSUMED_AFTER_DAYS) { state = 'closed'; assumed = true; }
     else state = 'awaiting';
-    const freeSameDay = !!arrivedOn && (primary.e.freeSameDay ?? all.find((b) => b.e.freeSameDay != null)?.e.freeSameDay) === true;
+    // Free on the last day, unless an arrival was recorded with the same-day box explicitly unticked.
+    const heldTillNextDay = !!arrivedOn && (primary.e.freeSameDay ?? all.find((b) => b.e.freeSameDay != null)?.e.freeSameDay) === false;
+    const freeSameDay = !heldTillNextDay;
+    // A one-day trip (it starts and ends on the same day) keeps the vehicle busy that whole day, so it is free the next day - unless an arrival is recorded, which
+    // then follows the same-day box.
+    const oneDayTrip = !arrivedOn && startDay >= lastBusyDay;
     const members: TripMember[] = [...used]
       .sort((a, b) => Number(b.e.orderNumber === primaryNo) - Number(a.e.orderNumber === primaryNo) || a.p.start.localeCompare(b.p.start))
       .map((b) => ({
@@ -146,7 +153,7 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
         startDay: b.p.start, plannedLastDay: b.p.last, tripDays: b.p.days,
       }));
     trips.push({
-      orderNumber: head.orderNumber, members, freeSameDay, freeFromDay: addDays(lastBusyDay, arrivedOn && freeSameDay ? 0 : 1),
+      orderNumber: head.orderNumber, members, freeSameDay, freeFromDay: addDays(lastBusyDay, heldTillNextDay || oneDayTrip ? 1 : 0),
       proformaSlipId: head.proformaSlipId ?? null, partyName: head.partyName ?? null, plant: head.plant ?? null,
       status: head.status ?? null, driver: head.driver ?? null, driverNotionId: head.driverNotionId ?? null,
       notionNote: members.find((m) => m.notionNote)?.notionNote ?? null,

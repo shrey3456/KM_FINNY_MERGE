@@ -12,6 +12,8 @@ import { PortalRotationProvider, type PortalRotation } from '@/lib/portalRotatio
 interface LayoutProps {
   children: React.ReactNode;
   onLogout?: () => void;
+  // A thin bar shown at the bottom of the content column (beside the sidebar, never over it) - the install bar.
+  bottomBar?: React.ReactNode;
 }
 
 interface CurrentUser {
@@ -30,7 +32,7 @@ const HEADER_HIDEABLE_PATHS = ['/scan', '/unloading', '/loading'];
 // opens. Its own localStorage key, since the two groups of pages want different defaults.
 const HEADER_HIDDEN_BY_DEFAULT_PATHS = ['/vehicle-planning'];
 
-const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
+const Layout: React.FC<LayoutProps> = ({ children, onLogout, bottomBar }) => {
   const [location] = useLocation();
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(true);
@@ -324,7 +326,9 @@ const Layout: React.FC<LayoutProps> = ({ children, onLogout }) => {
             <PortalRotationProvider rotation={portalRotation}>{children}</PortalRotationProvider>
           </div>
         </main>
-        
+
+        {bottomBar}
+
         {/* Mobile Navigation - shown on home, messages, and profile pages */}
         {(location === '/' || location === '/messages' || location === '/profile') && <MobileNavigation onLogout={onLogout} />}
       </div>

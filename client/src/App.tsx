@@ -64,6 +64,11 @@ function Router() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isStandalone, setIsStandalone] = useState(false);
+  // "Not now" is remembered for 7 days, so people are not asked at every login.
+  const INSTALL_SNOOZE_KEY = 'installPromptDismissedAt';
+  const [installSnoozed, setInstallSnoozed] = useState(() => {
+    try { const at = Number(localStorage.getItem(INSTALL_SNOOZE_KEY) ?? 0); return !!at && Date.now() - at < 7 * 24 * 3600 * 1000; } catch { return false; }
+  });
   const [, navigate] = useLocation();
   const { toast } = useToast();
 
@@ -92,46 +97,20 @@ function Router() {
 
     setIsStandalone(isInStandaloneMode());
 
-    // The install offer is the BROWSER's own dialog now — nothing is drawn inside the app.
-    // The browser fires this event when it decides the app is installable (on a fresh load, so
-    // on a hard refresh and after logging in); taking it over with preventDefault() and calling
-    // prompt() right away is what makes that native "Install KM Finny?" window appear by itself
-    // instead of only a small icon in the address bar.
-    //
-    // Some browsers refuse prompt() unless the person has just interacted with the page. When
-    // that happens the event is kept and fired on their very next click or key press, so the
-    // dialog still comes up instead of being lost.
-    let promptEvent: any = null;
-    const openInstallDialog = async () => {
-      if (!promptEvent) return;
-      const e = promptEvent;
-      promptEvent = null;
-      try {
-        await e.prompt();
-        await e.userChoice;
-        setDeferredPrompt(null);
-      } catch {
-        // Needs a gesture (or was already used) — retry on the next interaction.
-        promptEvent = e;
-        window.addEventListener('pointerdown', onFirstInteraction, { once: true });
-        window.addEventListener('keydown', onFirstInteraction, { once: true });
-      }
-    };
-    const onFirstInteraction = () => { void openInstallDialog(); };
-
+    // The install offer is the bar at the bottom of the app (InstallPromptBanner below), not an automatic dialog: the browser tells us when the app can be
+    // installed, we keep that event, and the browser's own "Install" box opens only when the person presses Install on the bar.
     const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();          // we show it ourselves, immediately, via the browser's dialog
-      promptEvent = e;
-      setDeferredPrompt(e);        // kept so an in-app Install button could still trigger it
-      void openInstallDialog();
+      e.preventDefault();          // no automatic mini-bar / dialog; the bar below is the offer
+      setDeferredPrompt(e);
     };
+    const handleInstalled = () => { setDeferredPrompt(null); setIsStandalone(true); };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleInstalled);
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('pointerdown', onFirstInteraction);
-      window.removeEventListener('keydown', onFirstInteraction);
+      window.removeEventListener('appinstalled', handleInstalled);
     };
   }, []);
 
@@ -264,8 +243,23 @@ function Router() {
     setDeferredPrompt(null);
   };
 
+  const dismissInstall = () => {
+    try { localStorage.setItem(INSTALL_SNOOZE_KEY, String(Date.now())); } catch { /* storage unavailable */ }
+    setInstallSnoozed(true);
+  };
+
   return (
-    <Layout onLogout={handleLogout}>
+    <Layout
+      onLogout={handleLogout}
+      bottomBar={
+        <InstallPromptBanner
+          deferredPrompt={installSnoozed ? null : deferredPrompt}
+          isStandalone={isStandalone}
+          onInstallClick={handleInstallClick}
+          onDismiss={dismissInstall}
+        />
+      }
+    >
       <Switch>
         <Route path="/" component={Home} />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requiredPage="notion-inventory" />
@@ -317,6 +311,31 @@ function Router() {
     </Layout>
   );
 }
+
+// Install bar at the bottom of the app (a small rounded box, only as wide as its content): shown only when the browser says the app can be installed and it is not installed yet. Install opens the browser's own
+// confirmation box; the X hides the bar for 7 days.
+const InstallPromptBanner = ({
+  deferredPrompt, isStandalone, onInstallClick, onDismiss,
+}: {
+  deferredPrompt: any; isStandalone: boolean; onInstallClick: () => void; onDismiss: () => void;
+}) => {
+  if (isStandalone || !deferredPrompt) return null;
+  return (
+    <div className="flex shrink-0 justify-center px-3 pb-3 pt-1">
+      <div className="flex w-fit max-w-full items-center gap-3 rounded-xl bg-[#001d6e] px-3 py-2 text-white shadow-lg">
+        <img src="/icons/icon-192-v2.png" alt="" className="h-9 w-9 shrink-0 rounded-lg bg-white p-0.5" />
+        <div className="min-w-0">
+          <p className="text-sm font-semibold leading-tight">Install KM Finny</p>
+          <p className="truncate text-xs text-white/75">Add it to your device for quick access</p>
+        </div>
+        <button type="button" onClick={onInstallClick} className="shrink-0 rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-[#001d6e] hover:bg-gray-100">Install</button>
+        <button type="button" onClick={onDismiss} aria-label="Not now" title="Not now" className="shrink-0 rounded p-1 text-white/70 hover:bg-white/10 hover:text-white">
+          <span aria-hidden className="block px-1 text-lg leading-none">×</span>
+        </button>
+      </div>
+    </div>
+  );
+};
 
 // Offline banner component to indicate when the app is offline
 const OfflineBanner = ({ isOnline }: { isOnline: boolean }) => {
