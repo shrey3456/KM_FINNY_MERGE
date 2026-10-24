@@ -41,6 +41,7 @@ type ReportRow = {
   label: string;
   partyName?: string | null;
   plant: string | null;
+  stockPlant?: string | null;   // unloading: where the stock lands, when it differs from the purchase plant
   orderCount: number;
   expectedQty: number;
   actualQty: number;
@@ -76,7 +77,7 @@ type ReportData = {
   activities?: Activity[];
 };
 type VehicleDetail = {
-  date: string; vehicle: string; plant: string | null;
+  date: string; vehicle: string; plant: string | null; stockPlant?: string | null;
   startTime: string | null; endTime: string | null;
   itemTotals: ItemTotal[]; activities: Activity[];
 };
@@ -90,6 +91,18 @@ type CsvDetail = {
   startTime: string | null; endTime: string | null;
   itemTotals: ItemTotal[]; activities: Activity[];
 };
+
+// Purchase plant, and - when the stock lands at a different plant - "RAJKOT -> VALSAD" (purchase -> stock).
+function PlantRoute({ plant, stockPlant, className }: { plant: string | null; stockPlant?: string | null; className?: string }) {
+  if (!plant) return null;
+  const differs = !!stockPlant && stockPlant.toUpperCase() !== plant.toUpperCase();
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <PlantBadge plant={plant} className={className} />
+      {differs && (<><span className="text-gray-400">→</span><PlantBadge plant={stockPlant} className={className} /></>)}
+    </span>
+  );
+}
 
 // "Today" in IST, not the browser's own local date — matching the app-wide Asia/Kolkata
 // convention, so the default date shown here agrees with every other page.
@@ -464,7 +477,7 @@ export default function DailyReports() {
     ...(tab === "loading"
       ? [{ id: "partyName", header: "Party Name", width: 220, accessor: (r: ReportRow) => r.partyName ?? "", totalable: false, cellClassName: "text-gray-800", render: (r: ReportRow) => r.partyName || "—" } as DataTableColumn<ReportRow>]
       : []),
-    { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => (r.plant ? <PlantBadge plant={r.plant} /> : "—") },
+    { id: "plant", header: "Plant", width: 210, accessor: (r) => (r.stockPlant && r.stockPlant !== r.plant ? `${r.plant} → ${r.stockPlant}` : r.plant), totalable: false, render: (r) => (r.plant ? <PlantRoute plant={r.plant} stockPlant={r.stockPlant} /> : "—") },
     { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
     { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.expectedPallets ?? 0), 0).toFixed(2) },
@@ -1007,7 +1020,7 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
   // both combined — matches the tab you're actually looking at, not an "everything" file.
   const handleExport = (fmt: Fmt) => {
     if (!detail) return;
-    const header: ExportRow = ["Vehicle", detail.vehicle, "Plant", detail.plant ?? ""];
+    const header: ExportRow = ["Vehicle", detail.vehicle, "Plant", detail.stockPlant && detail.stockPlant !== detail.plant ? `${detail.plant} → ${detail.stockPlant}` : detail.plant ?? ""];
     const timing: ExportRow = ["Start", fmtIST(detail.startTime), "End", fmtIST(detail.endTime), "Total Time", fmtTotalTime(detail.startTime, detail.endTime)];
     const rows: ExportRow[] = detailTab === "items"
       ? [
@@ -1030,7 +1043,7 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
           <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
             <Truck className="h-5 w-5" /> {vehicle}
           </DialogTitle>
-          <DialogDescription>{detail?.plant ? <PlantBadge plant={detail.plant} className="px-2 py-0 text-[11px]" /> : ""} · {date}</DialogDescription>
+          <DialogDescription>{detail?.plant ? <PlantRoute plant={detail.plant} stockPlant={detail.stockPlant} className="px-2 py-0 text-[11px]" /> : ""} · {date}</DialogDescription>
         </DialogHeader>
 
         {detailQuery.isLoading ? (
@@ -1242,7 +1255,7 @@ function ReportRowCards({ rows, tab, onOpen }: { rows: ReportRow[]; tab: Tab; on
             )}
           </div>
           <div className="mt-1.5 grid grid-cols-3 items-center gap-x-2 gap-y-1 text-xs text-gray-600">
-            <span className="flex items-center">{row.plant ? <PlantBadge plant={row.plant} className="px-1.5 py-0 text-[11px]" /> : <strong className="text-gray-900">—</strong>}</span>
+            <span className={`flex items-center ${row.stockPlant && row.stockPlant !== row.plant ? "col-span-3" : ""}`}>{row.plant ? <PlantRoute plant={row.plant} stockPlant={row.stockPlant} className="px-1.5 py-0 text-[11px]" /> : <strong className="text-gray-900">—</strong>}</span>
             <span>Orders: <strong className="text-sm text-gray-900">{row.orderCount}</strong></span>
             <span>Events: <strong className="text-sm text-gray-900">{row.eventCount}</strong></span>
             <span>Expected: <strong className="text-sm text-gray-900">{row.expectedQty.toLocaleString()}</strong></span>

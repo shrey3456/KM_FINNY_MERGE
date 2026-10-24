@@ -623,8 +623,21 @@ export default function StockOverview() {
 function LineActions({ row: top }: { row: Row }) {
   const { toast } = useToast();
   const parts = (top.parts && top.parts.length ? top.parts : [top]).filter((p) => p.id != null);
+  // Every plant can be adjusted, not only the plants this product already has a stock line at: a plant with no line yet is listed at 0 and its line is made when the
+  // adjustment is saved. (With the Plant pills on one plant, the other plants are still here.)
+  const { data: allPlants } = useQuery<{ name: string }[]>({
+    queryKey: ["/api/plants", "adjust-dialog"],
+    queryFn: async () => (await apiRequest("GET", "/api/plants")).json(),
+    staleTime: 60000,
+  });
+  const options: Row[] = (() => {
+    const byPlant = new Map(parts.map((p) => [p.plant.trim().toLowerCase(), p] as const));
+    const names = Array.from(new Set([...(allPlants ?? []).map((p) => String(p.name ?? "").trim()).filter(Boolean), ...parts.map((p) => p.plant)]));
+    const list = names.map((n) => byPlant.get(n.toLowerCase()) ?? ({ ...(parts[0] ?? top), id: null, plant: n, stock: 0 } as Row));
+    return list.sort((a, b) => Number(b.id != null) - Number(a.id != null) || a.plant.localeCompare(b.plant));
+  })();
   const [pick, setPick] = useState(0);
-  const row = parts[Math.min(pick, parts.length - 1)] ?? top;
+  const row = options[Math.min(pick, options.length - 1)] ?? top;
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<"add" | "remove" | "set">("add");
   const [qty, setQty] = useState("");
@@ -635,7 +648,9 @@ function LineActions({ row: top }: { row: Row }) {
   const close = () => { setOpen(false); setQty(""); setReason(""); setMode("add"); };
   const refresh = () => queryClient.invalidateQueries({ predicate: (qq) => String(qq.queryKey[0] ?? "").startsWith("/api/stock-v2") || String(qq.queryKey[0] ?? "").startsWith("/api/scan-sessions") });
   const run = useMutation({
-    mutationFn: () => apiRequest("POST", `/api/stock-v2/line/${row.id}/adjust`, { mode, qty: q, expectedCurrentQty: row.stock, reason: reason.trim() || undefined }, false, true),
+    mutationFn: () => row.id != null
+      ? apiRequest("POST", `/api/stock-v2/line/${row.id}/adjust`, { mode, qty: q, expectedCurrentQty: row.stock, reason: reason.trim() || undefined }, false, true)
+      : apiRequest("POST", `/api/stock-v2/adjust-at-plant`, { plant: row.plant, barcode: row.barcode, productId: row.productId ?? top.productId ?? parts[0]?.productId ?? undefined, mode, qty: q, expectedCurrentQty: 0, reason: reason.trim() || undefined }, false, true),
     onSuccess: () => {
       toast({ title: "Stock adjusted", description: `${row.itemName} at ${row.plant}` });
       refresh(); close();
@@ -651,9 +666,9 @@ function LineActions({ row: top }: { row: Row }) {
             <DialogTitle>Adjust stock</DialogTitle>
             <DialogDescription>{row.itemName} · {row.barcode} · {row.plant} · Stock now <b>{num(row.stock)}</b></DialogDescription>
           </DialogHeader>
-          {parts.length > 1 && (
+          {options.length > 1 && (
             <div className="flex flex-wrap gap-1.5">
-              {parts.map((p, i) => <button key={p.id} type="button" onClick={() => setPick(i)} className={tabCls(i === pick)}>{p.plant} · {num(p.stock)}</button>)}
+              {options.map((p, i) => <button key={p.plant} type="button" onClick={() => setPick(i)} className={tabCls(i === pick)} title={p.id == null ? "No stock line at this plant yet - it is made when you save" : undefined}>{p.plant} · {num(p.stock)}{p.id == null ? " (new)" : ""}</button>)}
             </div>
           )}
           <div className="space-y-3">

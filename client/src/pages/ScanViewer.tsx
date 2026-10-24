@@ -2958,7 +2958,7 @@ function UnloadingViewerSection({
   const [uDate, setUDate] = useState(() => readSavedUnloadingViewerFilters().date ?? getLocalISODate());
   // Set the moment the user picks a date themselves (including clearing it to "All") — once
   // true, the today-has-nothing auto-resolve effect below never overrides their own choice
-  // again. Re-armed on a plant change (see the plant Select's onValueChange). Starts true when
+  // again. A plant change keeps a date that was picked (it only re-snaps to today while untouched). Starts true when
   // a date was restored from the last sitting, for the same reason: that was a deliberate pick.
   const uDateTouchedRef = useRef(readSavedUnloadingViewerFilters().date !== undefined);
   const [uSessionId, setUSessionId] = useState<number | null>(() => readSavedUnloadingViewerFilters().sessionId ?? null);
@@ -2998,11 +2998,11 @@ function UnloadingViewerSection({
   const uFiltersReady = !!uPlant;
 
   const uSessionsQuery = useQuery<{ sessions: UnloadingSessionOption[]; total: number }>({
-    queryKey: ["/api/unloading/sessions", "scan-viewer", uPlant, uDate],
+    queryKey: ["/api/unloading/sessions", "scan-viewer", uPlant, uDate, "purchase"],
     queryFn: () =>
       apiRequest(
         "GET",
-        `/api/unloading/sessions?plant=${encodeURIComponent(uPlant)}${uDate ? `&orderDate=${encodeURIComponent(uDate)}` : ""}&limit=50`,
+        `/api/unloading/sessions?plant=${encodeURIComponent(uPlant)}&plantBy=purchase${uDate ? `&orderDate=${encodeURIComponent(uDate)}` : ""}&limit=50`,
       ).then((r) => r.json()),
     enabled: uFiltersReady,
   });
@@ -3032,9 +3032,9 @@ function UnloadingViewerSection({
   // has touched the date themselves.
   const uTodayEmpty = !uSessionsQuery.isLoading && !!uDate && uSessionOptions.length === 0;
   const uActiveQuery = useQuery<{ sessions: UnloadingSessionOption[] }>({
-    queryKey: ["/api/unloading/sessions", "scan-viewer-active", uPlant],
+    queryKey: ["/api/unloading/sessions", "scan-viewer-active", uPlant, "purchase"],
     queryFn: () =>
-      apiRequest("GET", `/api/unloading/sessions?plant=${encodeURIComponent(uPlant)}&status=available&limit=50`)
+      apiRequest("GET", `/api/unloading/sessions?plant=${encodeURIComponent(uPlant)}&plantBy=purchase&status=available&limit=50`)
         .then((r) => r.json()),
     enabled: !!uPlant && !uDateTouchedRef.current && uTodayEmpty,
   });
@@ -3103,9 +3103,10 @@ function UnloadingViewerSection({
   const [uItemStatusFilter, setUItemStatusFilter] = useState<"" | "done" | "remaining" | "extra">("");
 
   const uHistoryQuery = useQuery<{ items: UnloadingHistoryEvent[] }>({
-    queryKey: ["/api/scan-sessions/reports/unloading-history", uHistoryBarcode, uPlant],
+    queryKey: ["/api/scan-sessions/reports/unloading-history", uHistoryBarcode, uSelectedSession?.plant ?? uPlant],
     queryFn: () =>
-      apiRequest("GET", `/api/scan-sessions/reports/unloading-history?barcode=${encodeURIComponent(uHistoryBarcode!)}&plant=${encodeURIComponent(uPlant)}`)
+      // The batch's own (stock) plant: its scans are recorded there, while the list above is grouped under the purchase plant.
+      apiRequest("GET", `/api/scan-sessions/reports/unloading-history?barcode=${encodeURIComponent(uHistoryBarcode!)}&plant=${encodeURIComponent(uSelectedSession?.plant ?? uPlant)}`)
         .then((r) => r.json()),
     enabled: !!uHistoryBarcode && !!uPlant,
   });
@@ -3377,10 +3378,9 @@ function UnloadingViewerSection({
               onValueChange={(p) => {
                 setUPlant(p);
                 setUSessionId(null);
-                // Re-arm the today-has-nothing auto-resolve for the newly picked plant, same as
-                // the Order Scan side's own selectPlant snapping to whatever's actually live.
-                uDateTouchedRef.current = false;
-                setUDate(getLocalISODate());
+                // A date the person picked (or one restored from the last sitting) STAYS when the plant is switched. Only while the date has never been picked is
+                // it re-snapped for the new plant: today, then the date that actually has a batch there.
+                if (!uDateTouchedRef.current) setUDate(getLocalISODate());
               }}
             >
               <SelectTrigger
@@ -3416,14 +3416,14 @@ function UnloadingViewerSection({
             )}
             {uSessionOptions.length > 0 && (
               <Select value={uSessionId ? String(uSessionId) : ""} onValueChange={(v) => setUSessionId(Number(v))}>
-                <SelectTrigger className="h-7 w-56 rounded-full text-xs"><SelectValue placeholder="Select vehicle…" /></SelectTrigger>
+                <SelectTrigger className="h-8 w-auto min-w-[16rem] max-w-full justify-between gap-2 rounded-full px-3 text-xs"><SelectValue placeholder="Select vehicle…" /></SelectTrigger>
                 <SelectContent>
                   {uSessionOptions.map((so) => (
                     <SelectItem key={so.id} value={String(so.id)}>
-                      <span className="flex items-center gap-1.5">
-                        <span>
+                      <span className="flex items-center gap-1.5 whitespace-nowrap">
+                        <span className="whitespace-nowrap">
                           {so.vehicleNumber}{so.partIndex && so.partIndex > 1 ? ` (Batch ${so.partIndex})` : ""}
-                          {so.purchasePlant && so.purchasePlant.toLowerCase() !== (so.plant ?? "").toLowerCase() ? ` · ${so.purchasePlant} → ${so.plant}` : ""}
+                          {so.purchasePlant && so.purchasePlant.toLowerCase() !== (so.plant ?? "").toLowerCase() ? <span className="ml-1.5 text-[11px] text-gray-500">· {so.purchasePlant} → {so.plant}</span> : ""}
                           {!uDate ? ` · ${fmtOrderDate(so.orderDate)}` : ""}
                         </span>
                         {uSessionStatusBadge(so.scanStatus)}
@@ -3433,7 +3433,6 @@ function UnloadingViewerSection({
                 </SelectContent>
               </Select>
             )}
-            {uSelectedSession?.scanStatus && uSessionStatusBadge(uSelectedSession.scanStatus)}
             {uSessionId != null && <StvReadout stvs={uStvs} />}
           </div>
           {uSessionId != null && uItems.length > 0 && (

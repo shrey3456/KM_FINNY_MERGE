@@ -3,7 +3,7 @@ import { pool } from '../db';
 import { storage } from '../storage';
 import { requireAdminRole, requirePageAccess } from '../lib/pageAccess';
 import { getUserPlants } from './order-scan';
-import { getOpeningState, startFresh, setOpening, postAdjust, lockLineStock, todayIst } from '../lib/stockV2';
+import { getOpeningState, startFresh, setOpening, postAdjust, lockLineStock, todayIst, findLineForProduct } from '../lib/stockV2';
 import { resolveLineProduct } from '../lib/productSap';
 
 // Stock - the report behind the Stock page, the line drill-down, and the admin actions on one line (Adjust, Clear, Delete). Writes from the
@@ -248,23 +248,22 @@ const actorOf = (req: Request) => { const u = req.user as any; return { userCode
 //   add / remove: qty is a positive amount; set: qty is the new Stock. expectedCurrentQty is the Stock the dialog showed - if it moved since
 //   (someone scanned meanwhile) the change is refused with 409 instead of applying a different one than previewed.
 //   Written as an 'adjust' correction on the book (shows in the Adjust column and as a Stock Adjust row in Scan History).
-router.post('/stock-v2/line/:id/adjust', requireAdminRole, async (req: Request, res: Response) => {
-  const id = Number(req.params.id);
+async function handleAdjust(req: Request, res: Response, findLine: (client: any) => Promise<any>) {
   const mode: 'add' | 'remove' | 'set' = req.body?.mode === 'add' || req.body?.mode === 'remove' ? req.body.mode : 'set';
   const qty = Math.round(Number(req.body?.qty));
   const rawExpected = req.body?.expectedCurrentQty;
   const expected = rawExpected === undefined || rawExpected === null || rawExpected === '' ? null : Math.round(Number(rawExpected));
   const reason = (typeof req.body?.reason === 'string' ? req.body.reason.trim() : '') || 'Manual adjustment (Stock)';
-  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid line' });
   if (!Number.isFinite(qty) || qty < 0) return res.status(400).json({ message: 'Quantity must be a non-negative number' });
   if (mode !== 'set' && qty === 0) return res.status(400).json({ message: 'Enter a quantity greater than 0' });
   const { userCode, userName } = actorOf(req);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const got: any = await lockedLine(client, req, id);
+    const got: any = await findLine(client);
     if (got.error) { await client.query('ROLLBACK'); return res.status(got.error.status).json({ message: got.error.message }); }
     const { line } = got;
+    const id = Number(line.id);
     const current = await lockLineStock(client, id);
     if (expected !== null && Number.isFinite(expected) && expected !== current) {
       await client.query('ROLLBACK');
@@ -288,6 +287,28 @@ router.post('/stock-v2/line/:id/adjust', requireAdminRole, async (req: Request, 
     console.error('[Stock] adjust failed:', e);
     res.status(500).json({ message: 'Failed to adjust stock' });
   } finally { client.release(); }
+}
+
+router.post('/stock-v2/line/:id/adjust', requireAdminRole, (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Invalid line' });
+  return handleAdjust(req, res, (client) => lockedLine(client, req, id));
+});
+
+// POST /api/stock-v2/adjust-at-plant — admin. Adjust a product's stock at ANY plant, including one where the product has no stock line yet (the line is made, at 0,
+// in the same transaction as the adjustment). body: { plant, barcode, productId?, mode, qty, expectedCurrentQty?, reason? }
+router.post('/stock-v2/adjust-at-plant', requireAdminRole, (req: Request, res: Response) => {
+  const plant = String(req.body?.plant ?? '').trim();
+  const barcode = String(req.body?.barcode ?? '').trim();
+  const productId = req.body?.productId != null && req.body.productId !== '' ? Number(req.body.productId) : null;
+  if (!plant || !barcode) return res.status(400).json({ message: 'plant and barcode are required' });
+  const allowed = getUserPlants(req.user);
+  if (allowed !== null && !allowed.includes(plant.toLowerCase())) return res.status(403).json({ message: 'Access denied for this plant' });
+  return handleAdjust(req, res, async (client) => {
+    const line = await findLineForProduct(client, plant, barcode, Number.isFinite(productId as number) ? productId : null, true);
+    if (!line) return { error: { status: 404, message: `${barcode} is not in the Product Master, so it has no stock line at ${plant}.` } };
+    return lockedLine(client, req, line.id);
+  });
 });
 
 // ── Opening stock: only at a fresh start ──

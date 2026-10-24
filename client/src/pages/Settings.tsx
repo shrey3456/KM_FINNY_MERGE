@@ -80,9 +80,11 @@ function osTodayLocalDateStr(): string {
 }
 
 const osNormHeader = (h: string) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-const OS_COLUMN_CANDIDATES: Record<"barcode" | "itemName" | "quantity", string[]> = {
+const OS_COLUMN_CANDIDATES: Record<"barcode" | "itemName" | "sapCode" | "quantity", string[]> = {
   barcode: ["barcode", "itemcode", "sku", "ean", "productbarcode", "code"],
   itemName: ["itemname", "description", "productname", "item", "name", "material"],
+  // The SAP code tells apart two products that share a barcode (35GM / 37GM); optional.
+  sapCode: ["sapcode", "sap", "sapno", "sapcodes", "materialcode"],
   quantity: ["quantity", "qty", "openingstock", "openingqty", "stock", "instock"],
 };
 function osMatchColumn(headers: string[], key: keyof typeof OS_COLUMN_CANDIDATES): string | null {
@@ -99,16 +101,30 @@ function osMatchColumn(headers: string[], key: keyof typeof OS_COLUMN_CANDIDATES
 }
 
 const OS_SKIP = "__skip__";
-const OS_TARGET_FIELDS: { key: "barcode" | "itemName" | "quantity"; label: string }[] = [
+type OsRowResult = { barcode: string; itemName: string | null; sapCode: string | null; quantity: number; kind?: string; reason?: string };
+// Download the rows that were left out, in the same columns as the import file (plus the reason), so they can be fixed and imported again.
+function osDownloadSkipped(rows: OsRowResult[], plant: string) {
+  const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [["Barcode", "Item Name", "SAP Code", "Quantity", "Reason"].map(esc).join(",")]
+    .concat(rows.map((r) => [`="${r.barcode}"`, r.itemName ?? "", r.sapCode ?? "", r.quantity, r.reason ?? ""].map((v, i) => (i === 0 ? v : esc(v))).join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" }));
+  a.download = `opening-stock-skipped-${plant}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+const OS_TARGET_FIELDS: { key: "barcode" | "itemName" | "sapCode" | "quantity"; label: string }[] = [
   { key: "barcode", label: "Barcode / SKU" },
   { key: "itemName", label: "Item Name" },
+  { key: "sapCode", label: "SAP Code (optional)" },
   { key: "quantity", label: "Quantity" },
 ];
-type OsMapping = Record<"barcode" | "itemName" | "quantity", string>;
+type OsMapping = Record<"barcode" | "itemName" | "sapCode" | "quantity", string>;
 function osAutoMatch(headers: string[]): OsMapping {
   return {
     barcode: osMatchColumn(headers, "barcode") ?? OS_SKIP,
     itemName: osMatchColumn(headers, "itemName") ?? OS_SKIP,
+    sapCode: osMatchColumn(headers, "sapCode") ?? OS_SKIP,
     quantity: osMatchColumn(headers, "quantity") ?? OS_SKIP,
   };
 }
@@ -144,11 +160,12 @@ function cleanOsBarcodeCell(raw: string): { value: string; rejected: "scientific
 function buildOsRowsFromMapping(
   csvData: { headers: string[]; rows: Record<string, string>[] },
   mapping: OsMapping,
-): { rows: { barcode: string; itemName: string | null; quantity: number }[]; skipped: { raw: string; reason: string }[] } {
+): { rows: { barcode: string; itemName: string | null; sapCode: string | null; quantity: number }[]; skipped: { raw: string; reason: string }[] } {
   const barcodeCol = mapping.barcode;
   const itemNameCol = mapping.itemName;
   const qtyCol = mapping.quantity;
-  const rows: { barcode: string; itemName: string | null; quantity: number }[] = [];
+  const rows: { barcode: string; itemName: string | null; sapCode: string | null; quantity: number }[] = [];
+  const sapCol = mapping.sapCode;
   const skipped: { raw: string; reason: string }[] = [];
   for (const row of csvData.rows) {
     const rawBarcode = barcodeCol && barcodeCol !== OS_SKIP ? (row[barcodeCol] ?? "") : "";
@@ -165,6 +182,7 @@ function buildOsRowsFromMapping(
     rows.push({
       barcode,
       itemName: itemNameCol && itemNameCol !== OS_SKIP ? (row[itemNameCol] ?? "").trim() || null : null,
+      sapCode: sapCol && sapCol !== OS_SKIP ? (row[sapCol] ?? "").replace(/^="?|"$/g, "").trim() || null : null,
       quantity: qtyCol && qtyCol !== OS_SKIP ? osParseQty(row[qtyCol] ?? "0") : 0,
     });
   }
@@ -630,8 +648,10 @@ const Settings = () => {
   // "as of today".
   const [osAsOfDate, setOsAsOfDate] = useState(osTodayLocalDateStr());
   const [osFile, setOsFile] = useState<File | null>(null);
-  const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; quantity: number }[] | null>(null);
-  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number } | null>(null);
+  const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; sapCode: string | null; quantity: number }[] | null>(null);
+  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number; problemCount?: number; problems?: OsRowResult[] } | null>(null);
+  // What the last import did: the rows added, and the rows left out with why. Shown in a result box after the import.
+  const [osResult, setOsResult] = useState<{ plant: string; asOf: string; added: OsRowResult[]; failed: OsRowResult[] } | null>(null);
   const [osPreviewLoading, setOsPreviewLoading] = useState(false);
   const [osImporting, setOsImporting] = useState(false);
   const [osConfirmText, setOsConfirmText] = useState('');
@@ -640,7 +660,7 @@ const Settings = () => {
   // built, rather than silently accepting a guess or hard-failing when auto-match misses.
   const [showOsMappingDialog, setShowOsMappingDialog] = useState(false);
   const [osCsvData, setOsCsvData] = useState<{ name: string; headers: string[]; rows: Record<string, string>[] } | null>(null);
-  const [osMapping, setOsMapping] = useState<OsMapping>({ barcode: OS_SKIP, itemName: OS_SKIP, quantity: OS_SKIP });
+  const [osMapping, setOsMapping] = useState<OsMapping>({ barcode: OS_SKIP, itemName: OS_SKIP, sapCode: OS_SKIP, quantity: OS_SKIP });
 
   const handleOpeningStockDialogOpenChange = (open: boolean) => {
     setShowOpeningStockDialog(open);
@@ -721,7 +741,13 @@ const Settings = () => {
     setOsImporting(true);
     try {
       const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows, asOfDate: osAsOfDate }, false, true);
-      toast({ title: 'Opening stock added', description: `${data.rowsSet} barcode(s) added to current stock and Opening Stock for ${osPlant}.` });
+      const skipped: OsRowResult[] = Array.isArray(data.failed) ? data.failed : [];
+      toast({
+        title: skipped.length ? 'Opening stock added - some rows were NOT added' : 'Opening stock added',
+        description: `${data.rowsSet} barcode(s) added to current stock and Opening Stock for ${osPlant}.${skipped.length ? ` ${skipped.length} row(s) were not added - see the list.` : ''}`,
+        variant: skipped.length ? 'destructive' : undefined,
+      });
+      setOsResult({ plant: osPlant, asOf: osAsOfDate, added: Array.isArray(data.added) ? data.added : [], failed: skipped });
       queryClient.invalidateQueries({ queryKey: ['/api/products'] });
       queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
       handleOpeningStockDialogOpenChange(false);
@@ -1120,7 +1146,7 @@ const Settings = () => {
                     
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Opening Stock</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">Bulk-set a plant's baseline stock from a CSV (Barcode + Quantity) — overwrites whatever's currently there, admin only.</p>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">Add a plant's opening stock from a CSV (Barcode, Quantity, and optionally SAP Code to tell apart two products that share a barcode). It ADDS onto the stock already there; it does not replace it. Admin only.</p>
                       <Button
                         variant="outline" size="sm"
                         onClick={() => setShowOpeningStockDialog(true)}
@@ -1736,6 +1762,55 @@ const Settings = () => {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* After an opening-stock import: what was added, and what was NOT (with why), so nothing is skipped silently. */}
+      <AlertDialog open={!!osResult} onOpenChange={(open) => { if (!open) setOsResult(null); }}>
+        <AlertDialogContent className="max-w-3xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Opening stock - {osResult?.plant}</AlertDialogTitle>
+            <AlertDialogDescription>As of {osResult?.asOf}. Rows listed under "Not added" were left out; the rest of the file went in.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-3 text-sm">
+            <div className="rounded border border-green-200 bg-green-50 p-3">
+              <div className="font-semibold text-green-800">{osResult?.added.length ?? 0} item(s) added</div>
+              {(osResult?.added.length ?? 0) > 0 && (
+                <div className="mt-2 max-h-40 overflow-auto">
+                  <table className="w-full text-xs">
+                    <thead><tr className="text-left text-green-900"><th className="pr-3">Barcode</th><th className="pr-3">Item</th><th className="pr-3">SAP</th><th className="text-right">Qty</th></tr></thead>
+                    <tbody>
+                      {osResult!.added.map((r, i) => (
+                        <tr key={i}><td className="pr-3 font-mono">{r.barcode}</td><td className="pr-3">{r.itemName ?? '—'}</td><td className="pr-3 font-mono">{r.sapCode ?? '—'}</td><td className="text-right tabular-nums">{r.quantity}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            {(osResult?.failed.length ?? 0) > 0 && (
+              <div className="rounded border border-red-200 bg-red-50 p-3">
+                <div className="font-semibold text-red-800">{osResult?.failed.length} row(s) NOT added</div>
+                <div className="mt-2 max-h-48 overflow-auto">
+                  <table className="w-full text-xs">
+                    <thead><tr className="text-left text-red-900"><th className="pr-3">Barcode</th><th className="pr-3">Item</th><th className="pr-3">SAP</th><th className="pr-3 text-right">Qty</th><th>Why</th></tr></thead>
+                    <tbody>
+                      {osResult!.failed.map((r, i) => (
+                        <tr key={i} className="align-top"><td className="pr-3 font-mono">{r.barcode}</td><td className="pr-3">{r.itemName ?? '—'}</td><td className="pr-3 font-mono">{r.sapCode ?? '—'}</td><td className="pr-3 text-right tabular-nums">{r.quantity}</td><td>{r.reason}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-2 text-xs text-red-800">Fix these (add the product to the Product Master, or put the right SAP code on the row), then import just these rows again.</p>
+              </div>
+            )}
+          </div>
+          <AlertDialogFooter>
+            {(osResult?.failed.length ?? 0) > 0 && (
+              <Button variant="outline" onClick={() => osDownloadSkipped(osResult!.failed, osResult!.plant)}>Download the skipped rows (CSV)</Button>
+            )}
+            <AlertDialogCancel>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog open={showOpeningStockDialog} onOpenChange={handleOpeningStockDialogOpenChange}>
         <AlertDialogContent className="max-h-[90vh] overflow-y-auto">
           <AlertDialogHeader>
@@ -1797,6 +1872,15 @@ const Settings = () => {
                     <div className="text-muted-foreground">{osPreviewLoading ? '…' : osPreview?.totalQtyToSet ?? 0}</div>
                   </div>
                 </div>
+
+                {(osPreview?.problemCount ?? 0) > 0 && (
+                  <div className="p-3 rounded border border-red-200 bg-red-50 text-sm text-red-800">
+                    {osPreview?.problemCount} row(s) cannot be added and will be skipped:
+                    <ul className="mt-1 list-disc pl-5 text-xs">
+                      {(osPreview?.problems ?? []).map((p, i) => <li key={i}>{p.barcode}{p.itemName ? ` · ${p.itemName}` : ''}{p.sapCode ? ` · SAP ${p.sapCode}` : ''} — {p.reason}</li>)}
+                    </ul>
+                  </div>
+                )}
 
                 {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && (
                   <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">

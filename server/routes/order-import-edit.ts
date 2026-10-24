@@ -347,11 +347,18 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
           }
         }
       } else {
+        // The line's SAP is the product's SAP for this plant's state (GJ / MP / UP): when none was typed, or the typed one belongs to a twin product, the Product Master's
+        // own is used, so the CSV list shows the same SAP the scan item gets below.
+        let itemSap = sapCode;
+        if (barcode) {
+          const lpEarly = await resolveLineProduct(client, barcode, sapCode, await getPlantStateCode(client, session.plant));
+          if (lpEarly.productId && lpEarly.sap) itemSap = lpEarly.sap;
+        }
         const { rows: insertedRows } = await client.query(
           `INSERT INTO order_import_items (session_id, plant, barcode, item_name, sap_code, quantity, expected_pallets)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id`,
-          [id, session.plant, barcode, itemName, sapCode, quantity, expectedPallets],
+          [id, session.plant, barcode, itemName, itemSap, quantity, expectedPallets],
         );
         const newItemId = insertedRows[0].id;
 

@@ -55,6 +55,25 @@ function plantClause(req: Request, column: string, params: unknown[]): string {
   return clauses.length ? ` AND ${clauses.join(' AND ')}` : '';
 }
 
+// Unloading reports belong to the PURCHASE plant (the stock plant when a batch has no other one): the plant filter matches that, while which batches a user may
+// see is still decided by their own (stock) plants, as before.
+const UNLOAD_REPORT_PLANT = `COALESCE(NULLIF(uis.purchase_plant, ''), uis.plant)`;
+function unloadPlantClause(req: Request, params: unknown[]): string {
+  const userPlants = getUserPlants(req.user);
+  const requested = String(req.query.plant ?? '').trim().toLowerCase();
+  if (userPlants !== null && userPlants.length === 0) return ' AND FALSE';
+  const clauses: string[] = [];
+  if (userPlants !== null) {
+    params.push(userPlants);
+    clauses.push(`LOWER(uis.plant) = ANY($${params.length})`);
+  }
+  if (requested) {
+    params.push(requested);
+    clauses.push(`LOWER(${UNLOAD_REPORT_PLANT}) = $${params.length}`);
+  }
+  return clauses.length ? ` AND ${clauses.join(' AND ')}` : '';
+}
+
 // Expected pallets for each item = expected qty / the item's pallet size. The pallet size comes
 // from the Product Master for the plant's STATE (GJ/MP PLT — so it works for any plant, present
 // or future, once that plant has a state); with no size defined the whole expected qty counts as
@@ -129,6 +148,8 @@ type Row = {
   // Loading only — the slip's party (dealer / customer).
   partyName?: string | null;
   plant: string | null;
+  // Unloading only - the stock plant, when the batch was bought at a different plant (shown as purchase -> stock).
+  stockPlant?: string | null;
   orderCount: number;
   expectedQty: number;
   actualQty: number;
@@ -342,10 +363,10 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
   try {
     const date = parseDate(req);
     const params: unknown[] = [date];
-    const clause = plantClause(req, 'uis.plant', params);
+    const clause = unloadPlantClause(req, params);
 
     const { rows: sessionRows } = await pool.query(
-      `SELECT uis.id, uis.vehicle_number AS "vehicleNumber", uis.plant, uis.scan_completed_at AS "scanCompletedAt", uis.scan_activated_at AS "scanActivatedAt",
+      `SELECT uis.id, uis.vehicle_number AS "vehicleNumber", ${UNLOAD_REPORT_PLANT} AS plant, uis.plant AS "stockPlant", uis.scan_completed_at AS "scanCompletedAt", uis.scan_activated_at AS "scanActivatedAt",
               COALESCE((SELECT SUM(quantity) FROM unload_import_items WHERE session_id = uis.id), 0)::int AS "expectedQty"
          FROM unload_import_sessions uis
         WHERE uis.order_date = $1 AND NOT uis.is_deleted ${clause}`,
@@ -353,7 +374,8 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
     );
 
     const sessionIds = sessionRows.map((r) => r.id);
-    const sessionPlant = new Map<string, string | null>(sessionRows.map((r) => [String(r.id), r.plant ?? null]));
+    // Pallet sizes follow the STOCK plant's state (where the boxes end up), whichever plant the batch is shown under.
+    const sessionPlant = new Map<string, string | null>(sessionRows.map((r) => [String(r.id), r.stockPlant ?? r.plant ?? null]));
     const expectedPalletsBySession = sessionIds.length
       ? await expectedPalletsByKey((await pool.query(
           `SELECT session_id::text AS "key", barcode, SUM(quantity)::int AS "qty"
@@ -403,7 +425,7 @@ router.get('/daily-reports/unloading', requirePageAccess('daily-reports'), async
       const key = s.vehicleNumber || '—';
       const ev = eventsBySession.get(s.id);
       const row: Row = byVehicle.get(key) ?? {
-        key, label: key, plant: s.plant,
+        key, label: key, plant: s.plant, stockPlant: s.stockPlant ?? null,
         orderCount: 0, expectedQty: 0, actualQty: 0, extraQty: 0, eventCount: 0, startTime: null, endTime: null,
       };
       row.orderCount += 1;
@@ -440,9 +462,9 @@ router.get('/daily-reports/unloading/vehicle', requirePageAccess('daily-reports'
     if (!vehicle) return res.status(400).json({ message: 'A vehicle number is required' });
 
     const params: unknown[] = [date, vehicle];
-    const clause = plantClause(req, 'uis.plant', params);
+    const clause = unloadPlantClause(req, params);
     const { rows: sessionRows } = await pool.query(
-      `SELECT uis.id, uis.plant, uis.scan_completed_at AS "scanCompletedAt", uis.scan_activated_at AS "scanActivatedAt"
+      `SELECT uis.id, ${UNLOAD_REPORT_PLANT} AS plant, uis.plant AS "stockPlant", uis.scan_completed_at AS "scanCompletedAt", uis.scan_activated_at AS "scanActivatedAt"
          FROM unload_import_sessions uis
         WHERE uis.order_date = $1 AND uis.vehicle_number = $2 AND NOT uis.is_deleted ${clause}`,
       params,
@@ -452,6 +474,7 @@ router.get('/daily-reports/unloading/vehicle', requirePageAccess('daily-reports'
     }
     const sessionIds = sessionRows.map((r) => r.id);
     const plant = sessionRows[0].plant;
+    const stockPlant = sessionRows[0].stockPlant ?? plant;   // pallet sizes follow the stock plant's state, whichever plant the batch is shown under
     const endTime = sessionRows.reduce((acc: string | null, r) => maxDate(acc, r.scanCompletedAt), null as string | null);
 
     const [expectedRes, actualRes, activityRes] = await Promise.all([
@@ -486,11 +509,11 @@ router.get('/daily-reports/unloading/vehicle', requirePageAccess('daily-reports'
         barcode: r.barcode, itemName: r.itemName, sapCode: r.sapCode ?? null, expectedQty: r.expectedQty,
         actualQty: a.actualQty, extraQty: a.extraQty, pallets: a.pallets,
       };
-    }), plant);
+    }), stockPlant);
     const startTime = sessionRows.reduce((acc: string | null, r) => minDate(acc, r.scanActivatedAt ?? null), null as string | null)
       ?? activityRes.rows.find((r: any) => !r.voided)?.scannedAt ?? null;
 
-    res.json({ date, vehicle, plant, startTime, endTime, itemTotals, activities: activityRes.rows });
+    res.json({ date, vehicle, plant, stockPlant, startTime, endTime, itemTotals, activities: activityRes.rows });
   } catch (error) {
     console.error('[Daily Reports] unloading vehicle detail failed:', error);
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to build the vehicle report' });

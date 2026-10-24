@@ -33,6 +33,8 @@ interface EditableItem {
 // drive the Quantity <-> Pallets auto-calc in the Add Item dialog.
 type CatalogProduct = {
   id: number; name: string; barcode: string; sapCode?: string | null;
+  // SAP codes live per STATE on the Product Master (the generic sapCode is no longer used for matching or display).
+  gjSap?: string | null; mpSap?: string | null; upSap?: string | null;
   itemsPerPallet?: number | null; pallets?: number | null;
   gjPlt?: number | null; mpPlt?: number | null;
 };
@@ -51,6 +53,21 @@ function resolvePalletSize(product: CatalogProduct | null, plant: string | undef
   if (state === "GJ") return Number(product.gjPlt) || 0;
   if (state === "MP") return Number(product.mpPlt) || 0;
   return 0;
+}
+
+// The state (GJ / MP / UP) of a plant, from the plants list.
+function plantStateOf(plant: string | undefined, allPlants: any[] | undefined): string | null {
+  const plantName = (plant ?? "").trim().toLowerCase();
+  const match = allPlants?.find((p) => String(p.name ?? "").trim().toLowerCase() === plantName);
+  return match?.state ? String(match.state).trim().toUpperCase() : null;
+}
+
+// The product's SAP for the CSV's plant state (GJ SAP / MP SAP / UP SAP) - the same one the server uses. Blank when the product has none for that state.
+function resolveStateSap(product: CatalogProduct | null, plant: string | undefined, allPlants: any[] | undefined): string {
+  if (!product) return "";
+  const state = plantStateOf(plant, allPlants);
+  const v = state === "GJ" ? product.gjSap : state === "MP" ? product.mpSap : state === "UP" ? product.upSap : null;
+  return String(v ?? "").trim();
 }
 
 let tempKeyCounter = 0;
@@ -131,7 +148,7 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
     return products.filter((p) =>
       p.name?.toLowerCase().includes(q) ||
       p.barcode?.toLowerCase().includes(q) ||
-      p.sapCode?.toLowerCase().includes(q)
+      [p.gjSap, p.mpSap, p.upSap, p.sapCode].some((v) => String(v ?? "").toLowerCase().includes(q))
     );
   }, [products, addSearch]);
   const addMatches = useMemo(
@@ -158,7 +175,7 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
         key: newTempKey(),
         barcode: addPicked.barcode,
         itemName: addPicked.name,
-        sapCode: addPicked.sapCode ?? "",
+        sapCode: resolveStateSap(addPicked, session?.plant, allPlants),
         quantity: addQty || "0",
         expectedPallets: addPallets,
         scannedQty: 0,
@@ -247,6 +264,7 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
   // on its own change — never both from a shared effect — so rounding on one side can't fight
   // the other field while the operator is still typing it.
   const addPalletSize = resolvePalletSize(addPicked, session?.plant, allPlants);
+  const addSapForPicked = resolveStateSap(addPicked, session?.plant, allPlants);
   function handleAddQtyChange(value: string) {
     setAddQty(value);
     const n = Number(value);
@@ -482,7 +500,7 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
                 <div className="min-w-0">
                   <p className="truncate text-sm font-semibold text-gray-900">{addPicked.name}</p>
                   <p className="font-mono text-xs text-gray-500">
-                    {addPicked.barcode}{addPicked.sapCode ? ` · SAP ${addPicked.sapCode}` : ""}
+                    {addPicked.barcode}{addSapForPicked ? ` · SAP ${addSapForPicked}` : " · no SAP for this plant's state"}
                   </p>
                 </div>
                 <Button variant="ghost" size="sm" className="h-7 shrink-0 text-xs" onClick={() => setAddPicked(null)}>

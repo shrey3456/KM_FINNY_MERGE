@@ -328,11 +328,11 @@ export async function setOpening(db: Db, plant: string, barcode: string, qty: nu
 // and is kept as a ledger row; Purchase and Sale are not touched. `date` defaults to today.
 export async function v2Adjust(
   client: Db,
-  p: { plant: string; barcode: string; qty: number; kind: 'adjust' | 'clear' | 'exchange' | 'opening'; reason?: string | null; userCode?: string | null; date?: string | null; productId?: number | null },
+  p: { plant: string; barcode: string; qty: number; kind: 'adjust' | 'clear' | 'exchange' | 'opening'; reason?: string | null; userCode?: string | null; date?: string | null; productId?: number | null; sapCode?: string | null },
 ): Promise<void> {
   if (!p.qty) return;
   // The named product's line (twins sharing a barcode are separate lines); without one, the barcode's usual line.
-  const line = await findOrCreateLine(client, p.plant, p.barcode, null, p.productId ?? null);
+  const line = await findOrCreateLine(client, p.plant, p.barcode, p.sapCode ?? null, p.productId ?? null);
   if (!line) throw new Error(`"${p.barcode}" is not in the Product Master.`);
   await postAdjust(client, line.id, (p.date ? String(p.date).slice(0, 10) : '') || todayIst(), p.qty, { kind: p.kind, source: p.kind, origin: p.kind, reason: p.reason ?? null, userCode: p.userCode ?? null });
 }
