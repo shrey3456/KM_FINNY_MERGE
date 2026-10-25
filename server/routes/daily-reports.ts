@@ -602,7 +602,9 @@ router.get('/daily-reports/scan', requirePageAccess('daily-reports'), async (req
           [sessionIds],
         ),
         pool.query(
-          `SELECT barcode, item_name AS "itemName", (SELECT i.sap_code FROM order_scan_items i WHERE i.id = order_scan_events.scan_item_id) AS "sapCode", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
+          `SELECT (SELECT ois.csv_file_name FROM order_import_sessions ois WHERE ois.id = order_scan_events.session_id) AS "groupKey",
+                  (SELECT ois.csv_file_name FROM order_import_sessions ois WHERE ois.id = order_scan_events.session_id) AS "groupLabel",
+                  barcode, item_name AS "itemName", (SELECT i.sap_code FROM order_scan_items i WHERE i.id = order_scan_events.scan_item_id) AS "sapCode", total_qty AS "qty", (CASE WHEN COALESCE(items_per_pallet, 0) > 0 THEN total_qty::float / items_per_pallet ELSE pallets END)::real AS "pallets", stv, is_extra AS "isExtra",
                   scanned_by_name AS "scannedByName", scanned_at AS "scannedAt",
                   COALESCE(voided, false) AS "voided", void_reason AS "voidReason", voided_at AS "voidedAt",
                 COALESCE(is_adjust, false) AS "isAdjust", adjusted_at AS "adjustedAt"

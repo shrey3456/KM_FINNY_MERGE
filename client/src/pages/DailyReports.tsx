@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { TableCard } from "@/components/ui/table-card";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
@@ -140,6 +141,73 @@ function fmtTotalTime(start: string | null, end: string | null): string {
   if (d > 0) return `${d}d ${h}h ${m}m`;
   if (h > 0) return `${h}h ${m}m ${String(sec).padStart(2, "0")}s`;
   return `${m}m ${String(sec).padStart(2, "0")}s`;
+}
+
+// Hourly report: rolling 1-hour windows anchored to when scanning actually started (e.g. a 03:28 start gives
+// 03:28 – 04:28, 04:28 – 05:28 ...), not clock-hour boundaries - the same windows the per-order Reports dialog uses.
+// Voided entries are left out, matching every total on this page. Hours with no scans stay in the list so gaps show.
+type HourWindow = { idx: number; label: string; events: Activity[]; qty: number; pallets: number };
+const HOUR_MS = 3_600_000;
+
+const fmtClock = (ms: number) => new Date(ms).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true });
+
+function istHourOfDay(dt: string): number | null {
+  const d = new Date(dt);
+  if (isNaN(d.getTime())) return null;
+  return Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", hourCycle: "h23" }).format(d));
+}
+
+// Keeps only the entries scanned within [from, to] o'clock (IST, both hours inclusive: 9 to 17 = 09:00 up to 17:59).
+function withinHours(activities: Activity[], from: number, to: number): Activity[] {
+  if (from <= 0 && to >= 23) return activities;
+  return activities.filter((a) => {
+    const h = istHourOfDay(a.scannedAt);
+    return h !== null && h >= from && h <= to;
+  });
+}
+const hourOptionLabel = (h: number) => `${String(h).padStart(2, "0")}:00`;
+
+function buildHourWindows(activities: Activity[], startIso: string | null): HourWindow[] {
+  const real = activities.filter((a) => !a.voided && !isNaN(new Date(a.scannedAt).getTime()));
+  if (real.length === 0) return [];
+  const times = real.map((a) => new Date(a.scannedAt).getTime());
+  const startMs = startIso ? new Date(startIso).getTime() : NaN;
+  const anchor = Math.min(...times, ...(isNaN(startMs) ? [] : [startMs]));
+  const byIdx = new Map<number, Activity[]>();
+  let maxIdx = 0;
+  real.forEach((a, i) => {
+    const idx = Math.floor((times[i] - anchor) / HOUR_MS);
+    maxIdx = Math.max(maxIdx, idx);
+    byIdx.set(idx, [...(byIdx.get(idx) ?? []), a]);
+  });
+  const out: HourWindow[] = [];
+  for (let idx = 0; idx <= maxIdx; idx++) {
+    const events = (byIdx.get(idx) ?? []).slice().sort((x, y) => new Date(x.scannedAt).getTime() - new Date(y.scannedAt).getTime());
+    out.push({
+      idx, events,
+      label: `${fmtClock(anchor + idx * HOUR_MS)} – ${fmtClock(anchor + (idx + 1) * HOUR_MS)}`,
+      qty: events.reduce((n, e) => n + e.qty, 0),
+      pallets: events.reduce((n, e) => n + (e.pallets ?? 0), 0),
+    });
+  }
+  return out;
+}
+
+const hourlySourceHeader = (tab: Tab) => (tab === "scan" ? "CSV File" : tab === "loading" ? "Order / Slip" : "Vehicle");
+
+// Flat rows for a download: each window's scans, then its Subtotal, then one grand TOTAL.
+function hourlyExportRows(tab: Tab, windows: HourWindow[], meta: ExportRow): ExportRow[] {
+  const rows: ExportRow[] = [
+    meta, [],
+    ["Hour (IST)", "Time", hourlySourceHeader(tab), "Barcode", "Item Name", "SAP Code", "Type", "Scanned By", "Pallets", "Qty"],
+  ];
+  for (const w of windows) {
+    if (w.events.length === 0) { rows.push([w.label, "", "", "", "— no scans this hour —", "", "", "", 0, 0], []); continue; }
+    for (const e of w.events) rows.push([w.label, fmtIST(e.scannedAt), e.groupLabel ?? "", barcodeCell(e.barcode), e.itemName ?? "", e.sapCode ?? "", entryKind(e), e.scannedByName ?? "", (e.pallets ?? 0).toFixed(2), e.qty]);
+    rows.push(["", "", "", "", "Subtotal", "", "", "", w.pallets.toFixed(2), w.qty], []);
+  }
+  rows.push(["TOTAL", "", "", "", "", "", "", "", windows.reduce((n, w) => n + w.pallets, 0).toFixed(2), windows.reduce((n, w) => n + w.qty, 0)]);
+  return rows;
 }
 
 // An item's physical received quantity includes both its regular receipt and any extra receipt.
@@ -321,7 +389,7 @@ export default function DailyReports() {
   // (sessionStorage, same convention as every other page's filter/view state) rather than
   // always resetting to Loading/Total Summary.
   const [tab, setTab] = usePersistentFilter<Tab>("dailyReports:tab", "loading");
-  const [reportTab, setReportTab] = usePersistentFilter<"summary" | "activities" | "breakdown">("dailyReports:reportTab", "summary");
+  const [reportTab, setReportTab] = usePersistentFilter<"summary" | "activities" | "breakdown" | "hourly">("dailyReports:reportTab", "summary");
   // The date you picked is kept while the browser stays open (leave the page and come back to the same day); a fresh
   // visit — a new browser session — starts on today (IST) again.
   const [date, setDate] = usePersistentFilter<string>("dailyReports:date", todayIST());
@@ -356,11 +424,11 @@ export default function DailyReports() {
   const [openDetailTab, setOpenDetailTab] = useState<"items" | "activities">("items");
   const effectiveReportTab = tab === "scan"
     ? reportTab
-    : reportTab === "activities" ? "activities" : "summary";
+    : reportTab === "activities" || reportTab === "hourly" ? reportTab : "summary";
 
   const selectTab = (next: Tab) => {
     setTab(next);
-    if (next !== "scan") setReportTab("summary");
+    if (next !== "scan" && reportTab === "breakdown") setReportTab("summary");
   };
 
   const reportQuery = useQuery({
@@ -407,6 +475,25 @@ export default function DailyReports() {
       ...activityExportRows(fresh.activities, "Dispatch Directory"),
     ];
     exportRows(fmt, `${tab}-activities-report-${fresh.date}`, `${activeTab.label} — Activities Report — ${fresh.date}`, rows);
+  };
+
+  const [hourFrom, setHourFrom] = usePersistentFilter<number>("dailyReports:hourFrom", 0);
+  const [hourTo, setHourTo] = usePersistentFilter<number>("dailyReports:hourTo", 23);
+  const hourSpanLabel = `${hourOptionLabel(hourFrom)} – ${String(hourTo).padStart(2, "0")}:59`;
+  const hourWindowsFor = (d: ReportData) => {
+    const inSpan = withinHours(d.activities ?? [], hourFrom, hourTo);
+    // The anchor is the real start of scanning; with a span chosen it is the first scan inside the span instead.
+    return buildHourWindows(inSpan, hourFrom <= 0 && hourTo >= 23 ? d.activitySummary.startTime : null);
+  };
+  const hourWindows = data ? hourWindowsFor(data) : [];
+  const hourTotals = hourWindows.reduce((acc, w) => ({ scans: acc.scans + w.events.length, qty: acc.qty + w.qty, pallets: acc.pallets + w.pallets }), { scans: 0, qty: 0, pallets: 0 });
+
+  const handleExportHourlyReport = async (fmt: Fmt) => {
+    // Re-read first, so the file always has the latest voids and adjustments.
+    const fresh = (await reportQuery.refetch()).data ?? data;
+    if (!fresh?.activities) return;
+    const meta: ExportRow = ["Date", fresh.date, "Plant", selectedPlant || "All plants", "Hours", hourSpanLabel];
+    exportRows(fmt, `${tab}-hourly-report-${fresh.date}`, `${activeTab.label} — Hourly Report — ${fresh.date}`, hourlyExportRows(tab, hourWindowsFor(fresh), meta));
   };
 
   const summaryTotals = data?.itemTotals?.reduce(
@@ -625,6 +712,17 @@ export default function DailyReports() {
             >
               Activities Report
             </button>
+            <button
+              type="button"
+              onClick={() => setReportTab("hourly")}
+              className={
+                effectiveReportTab === "hourly"
+                  ? "rounded-full bg-[#001d6e] px-4 py-1.5 text-sm font-semibold text-white ring-2 ring-[#001d6e]/30"
+                  : "rounded-full border border-gray-200 bg-white px-4 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
+              }
+            >
+              Hourly Report
+            </button>
             {tab === "scan" && <button
               type="button"
               onClick={() => setReportTab("breakdown")}
@@ -638,7 +736,96 @@ export default function DailyReports() {
             </button>}
           </div>
 
-          {effectiveReportTab === "summary" && (tab === "loading" || tab === "unloading") ? (
+          {effectiveReportTab === "hourly" ? (
+            <TableCard
+              key={`rpt-hourly-${tab}`}
+              icon={Clock}
+              title="Hourly Report"
+              subtitle={`${hourWindows.length} hour window${hourWindows.length === 1 ? "" : "s"} · ${hourTotals.scans} scan${hourTotals.scans === 1 ? "" : "s"} · ${hourTotals.qty} item(s) · ${hourTotals.pallets.toFixed(2)} plt for ${data.date}`}
+              className="rounded-xl border-gray-300 shadow-none"
+              headerActions={<DownloadMenu onExport={handleExportHourlyReport} />}
+            >
+              <div className="flex flex-wrap items-center justify-end gap-1.5 border-b border-gray-200 px-3 py-2 text-xs text-gray-500">
+                Hours
+                <Select value={String(hourFrom)} onValueChange={(v) => { const n = Number(v); setHourFrom(n); if (n > hourTo) setHourTo(n); }}>
+                  <SelectTrigger className="h-8 w-[5.5rem] text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>{Array.from({ length: 24 }, (_, h) => <SelectItem key={h} value={String(h)}>{hourOptionLabel(h)}</SelectItem>)}</SelectContent>
+                </Select>
+                to
+                <Select value={String(hourTo)} onValueChange={(v) => { const n = Number(v); setHourTo(n); if (n < hourFrom) setHourFrom(n); }}>
+                  <SelectTrigger className="h-8 w-[5.5rem] text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>{Array.from({ length: 24 }, (_, h) => <SelectItem key={h} value={String(h)}>{`${String(h).padStart(2, "0")}:59`}</SelectItem>)}</SelectContent>
+                </Select>
+                {(hourFrom !== 0 || hourTo !== 23) && (
+                  <button type="button" className="text-[#001d6e] underline" onClick={() => { setHourFrom(0); setHourTo(23); }}>All day</button>
+                )}
+              </div>
+              {hourWindows.length === 0 ? (
+                <p className="p-4 text-sm text-gray-400">No scans recorded</p>
+              ) : (
+                <div className="max-h-[560px] overflow-auto px-2">
+                  <Accordion type="multiple">
+                    {hourWindows.map((w) => (
+                      <AccordionItem key={w.idx} value={String(w.idx)}>
+                        <AccordionTrigger className="py-2.5 text-sm hover:no-underline">
+                          <span className="font-medium">{w.label}</span>
+                          <span className="mr-2 text-xs font-normal text-gray-500">
+                            {w.events.length === 0
+                              ? "no scans"
+                              : `${w.events.length} scan${w.events.length === 1 ? "" : "s"} · ${w.qty} item(s) · ${w.pallets.toFixed(2)} plt`}
+                          </span>
+                        </AccordionTrigger>
+                        <AccordionContent className="pb-3">
+                          {w.events.length === 0 ? (
+                            <p className="text-xs text-gray-400">No scans in this hour.</p>
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <div className="mb-2 flex justify-end">
+                                <DownloadMenu onExport={(fmt) => exportRows(
+                                  fmt,
+                                  `${tab}-hourly-${w.label.replace(/[^\w]+/g, "_")}-${data.date}`,
+                                  `${activeTab.label} — ${w.label} — ${data.date}`,
+                                  hourlyExportRows(tab, [w], ["Date", data.date, "Plant", selectedPlant || "All plants"]),
+                                )} />
+                              </div>
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="text-left text-gray-400">
+                                    <th className="py-1 pr-3 font-medium">Time</th>
+                                    <th className="py-1 pr-3 font-medium">{hourlySourceHeader(tab)}</th>
+                                    <th className="py-1 pr-3 font-medium">Barcode</th>
+                                    <th className="py-1 pr-3 font-medium">Item Name</th>
+                                    <th className="py-1 pr-3 font-medium">SAP Code</th>
+                                    <th className="py-1 pr-3 font-medium">Scanned By</th>
+                                    <th className="py-1 pr-3 text-right font-medium">Pallets</th>
+                                    <th className="py-1 pr-3 text-right font-medium">Qty</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {w.events.map((e, i) => (
+                                    <tr key={i} className="border-t border-gray-100">
+                                      <td className="whitespace-nowrap py-1 pr-3 text-gray-500">{fmtIST(e.scannedAt)}</td>
+                                      <td className="py-1 pr-3">{e.groupLabel || "—"}</td>
+                                      <td className="py-1 pr-3 font-mono">{e.barcode || "—"}</td>
+                                      <td className="py-1 pr-3">{e.itemName || "—"}<EntryTypeBadges a={e} /></td>
+                                      <td className="py-1 pr-3 font-mono">{e.sapCode || "—"}</td>
+                                      <td className="py-1 pr-3">{e.scannedByName || "—"}</td>
+                                      <td className="py-1 pr-3 text-right">{(e.pallets ?? 0).toFixed(2)}</td>
+                                      <td className="py-1 pr-3 text-right">{e.qty}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </AccordionContent>
+                      </AccordionItem>
+                    ))}
+                  </Accordion>
+                </div>
+              )}
+            </TableCard>
+          ) : effectiveReportTab === "summary" && (tab === "loading" || tab === "unloading") ? (
             <TableCard
               key={`rpt-summary-rows-${tab}`}
               icon={tab === "unloading" ? Truck : FileSpreadsheet}
