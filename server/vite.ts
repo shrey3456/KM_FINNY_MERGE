@@ -45,13 +45,16 @@ export async function setupVite(app: Express, server: Server) {
 
   app.use(vite.middlewares);
   app.use("*", async (req, res, next) => {
-    const url = req.originalUrl;
+    // The path without its query string: Vite builds its inline-<style> module id from this URL, so a ".json" at the end of either part (a path like /x.json, or a query
+    // like /?file=x.json) sends the style through its JSON loader.
+    const url = req.originalUrl.split("?")[0];
 
     // A request for a .json file that does not exist (an installed app or an old service worker
     // still asking for a retired manifest such as /manifest-final.json) must be a plain 404. Fed
     // to transformIndexHtml, the ".json" in its URL makes Vite run the page's inline <style> through
     // its JSON loader, which throws "Failed to parse JSON file" on every such request.
-    if (/\.json$/i.test(req.path)) {
+    // (req.path is "/" inside app.use("*"), so the check reads the URL itself - it never matched before.)
+    if (/\.json$/i.test(url)) {
       return res.status(404).json({ message: "Not found" });
     }
 

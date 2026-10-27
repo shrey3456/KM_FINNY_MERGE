@@ -2611,9 +2611,9 @@ export default function ScanViewer() {
                         const ipp = item.itemsPerPallet;
                         const status = item.isExtraOnly ? "extra" : received >= exp && exp > 0 ? "complete" : received > 0 ? "partial" : "pending";
                         const plt = (q: number) => mvPltQty(q, ipp).toFixed(2);
-                        const isOpen = historyItem?.barcode === item.barcode;
+                        const isOpen = historyItem?.barcode === item.barcode && (historyItem?.productId ?? null) === (item.productId ?? null);
                         return (
-                          <Fragment key={item.barcode ?? item.itemName}>
+                          <Fragment key={`${item.barcode ?? item.itemName}|${item.productId ?? ""}|${item.sapCode ?? ""}`}>
                             <tr className={`border-b border-gray-200 ${
                               status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
                             }`}>
@@ -2693,7 +2693,7 @@ export default function ScanViewer() {
                       const leftPlt = mvPltQty(left, ipp).toFixed(2);
                       return (
                         <div
-                          key={item.barcode ?? item.itemName}
+                          key={`${item.barcode ?? item.itemName}|${item.productId ?? ""}|${item.sapCode ?? ""}`}
                           className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 ${
                             status === "extra" ? "bg-orange-50/40" : status === "complete" ? "bg-emerald-50/40" : status === "partial" ? "bg-amber-50/30" : ""
                           }`}
@@ -2739,7 +2739,7 @@ export default function ScanViewer() {
                                 </>
                               )}
                             </p>
-                            {historyItem?.barcode === item.barcode && <div className="mt-2">{historyPanel}</div>}
+                            {historyItem?.barcode === item.barcode && (historyItem?.productId ?? null) === (item.productId ?? null) && <div className="mt-2">{historyPanel}</div>}
                           </div>
                           <span className="shrink-0">
                             <span className={`inline-block rounded-full px-2.5 py-1 text-xs font-semibold ${

@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { pool } from '../db';
 import { requirePageAccess, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
-import { getUserPlants, getPlantStateCode, getPalletSize } from './order-scan';
+import { getUserPlants, getPlantStateCode, getPalletSize, resolvePalletSizeOrQty } from './order-scan';
 import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 
 // Sort Slip — godown picking.
@@ -195,7 +195,7 @@ const SORT_SLIP_FILTER_COLUMNS: Record<string, SqlFilterColumn> = {
 // A supervisor sees every slip in their plants; a loader sees only the slips they are on. That
 // scoping is done here, not in the page, so a loader cannot ask for someone else's list.
 // Pallets for a page of slips: what the order asks for and what has been picked, in pallets. Pallet size follows the slip's plant state (the same rule the slip's own item
-// list uses); an item Product Master has no size for adds nothing, as it shows no pallet count there either.
+// list uses, including its fallback: an item with no size counts as one pallet of its own quantity).
 async function palletsForSlips(slipIds: number[]): Promise<Map<number, { totalPallets: number; pickedPallets: number }>> {
   const out = new Map<number, { totalPallets: number; pickedPallets: number }>();
   if (slipIds.length === 0) return out;
@@ -216,8 +216,7 @@ async function palletsForSlips(slipIds: number[]): Promise<Map<number, { totalPa
   for (const r of rows as any[]) {
     const plant = String(r.plant ?? '');
     if (!stateOf.has(plant)) stateOf.set(plant, await getPlantStateCode(pool, plant));
-    const size = getPalletSize({ gjPlt: r.gjPlt, mpPlt: r.mpPlt }, stateOf.get(plant) ?? null);
-    if (size <= 0) continue;
+    const size = resolvePalletSizeOrQty({ gjPlt: r.gjPlt, mpPlt: r.mpPlt }, stateOf.get(plant) ?? null, r.qty);
     const cur = out.get(r.slipId) ?? { totalPallets: 0, pickedPallets: 0 };
     cur.totalPallets += r.qty / size;
     cur.pickedPallets += r.picked / size;
@@ -621,13 +620,12 @@ router.get('/sort-slips/:orderNumber', requirePageAccess('sort-slip'), async (re
       ),
     ]);
 
-    // Pallet size per item, resolved once for this slip's plant. 0 when Product Master has no
-    // size for this state — the pick popup then asks for pieces only, rather than inventing a
-    // pallet count from a number nobody set.
+    // Pallet size per item, resolved once for this slip's plant, by the rule Order Scan and Loading use: the Product Master size for this plant's state, and when there is none
+    // (a state with no pallet column, or a product without a size) the item counts as ONE pallet of its own order quantity - so qty converts to pallets on every slip.
     const state = await getPlantStateCode(pool, slip.plant ?? '');
     const items = itemsRes.rows.map((row: any) => ({
       ...row,
-      palletSize: getPalletSize({ gjPlt: row.gjPlt, mpPlt: row.mpPlt }, state),
+      palletSize: resolvePalletSizeOrQty({ gjPlt: row.gjPlt, mpPlt: row.mpPlt }, state, row.expectedQty),
     }));
 
     res.json({

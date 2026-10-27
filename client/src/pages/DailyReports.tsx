@@ -889,8 +889,8 @@ export default function DailyReports() {
                 />
               </div>
               <div className={`space-y-2 p-3 ${cardBoxClass}`}>
-                {(data.itemTotals ?? []).map((item) => (
-                  <div key={item.barcode} className="rounded-lg border border-gray-200 p-3">
+                {(data.itemTotals ?? []).map((item, idx) => (
+                  <div key={`${item.barcode}|${item.sapCode ?? ""}|${idx}`} className="rounded-lg border border-gray-200 p-3">
                     <p className="text-base font-semibold text-gray-900">{item.itemName || "—"}</p>
                     <p className="mt-1 break-all font-mono text-sm text-gray-500">{item.barcode}</p>
                     <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm text-gray-600">
@@ -1017,8 +1017,8 @@ function DetailLists({ detailTab, itemTotals, activities, maxHeight }: { detailT
       if (itemTotals.length === 0) return <p className="py-6 text-center text-sm text-gray-400">No items</p>;
       return (
         <div className="space-y-2">
-          {itemTotals.map((item) => (
-            <div key={item.barcode} className="rounded-lg border border-gray-200 px-3 py-2">
+          {itemTotals.map((item, idx) => (
+            <div key={`${item.barcode}|${item.sapCode ?? ""}|${idx}`} className="rounded-lg border border-gray-200 px-3 py-2">
               <p className="text-sm font-semibold leading-snug text-gray-900">
                 {item.srNo && <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-xs font-bold text-gray-600">{item.srNo}</span>}
                 {item.itemName || "—"}

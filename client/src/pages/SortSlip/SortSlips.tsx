@@ -75,7 +75,7 @@ type SortSlipItem = {
   productId: number | null;
   hasBoxImage: boolean;
   hasProductImage: boolean;
-  /** Pieces per pallet at this slip's plant; 0 when Product Master has no size for it. */
+  /** Pieces per pallet at this slip's plant; with no size in Product Master the item counts as one pallet of its own order quantity. */
   palletSize: number;
 };
 
@@ -1463,6 +1463,8 @@ function SortSlipDetail({
   // The + / - beside an item's picked quantity (like Load Operation's): the item, which way, and how many.
   const [adjustTarget, setAdjustTarget] = useState<{ item: SortSlipItem; direction: "add" | "remove" } | null>(null);
   const [adjustQty, setAdjustQty] = useState(1);
+  // Search on the phone / tablet card list (the table has its own search box): matches the item name, barcode and Sr.
+  const [cardSearch, setCardSearch] = useState("");
   const openAdjust = (item: SortSlipItem, direction: "add" | "remove") => { setAdjustTarget({ item, direction }); setAdjustQty(1); };
   const [confirmVoidId, setConfirmVoidId] = useState<number | null>(null);
   const [pickQty, setPickQty] = useState("");
@@ -1544,6 +1546,8 @@ function SortSlipDetail({
     { expected: 0, picked: 0 },
   );
   const shortfall = totals.expected - totals.picked;
+  const cardTerm = cardSearch.trim().toLowerCase();
+  const cardItems = cardTerm ? items.filter((i) => (i.itemName ?? "").toLowerCase().includes(cardTerm) || (i.barcode ?? "").toLowerCase().includes(cardTerm) || (i.srNo ?? "").toLowerCase().includes(cardTerm)) : items;
   // The same totals in pallets, using each item's own pallet size (an item with none adds nothing).
   const palletTotals = items.reduce(
     (acc, i) => (i.palletSize > 0 ? { expected: acc.expected + i.expectedQty / i.palletSize, picked: acc.picked + i.pickedQty / i.palletSize } : acc),
@@ -2122,69 +2126,66 @@ function SortSlipDetail({
 
           {/* Phone / tablet — one card per item, nothing to scroll sideways for. */}
           <div className="lg:hidden">
+            <div className="relative border-b border-gray-100 p-2">
+              <Search className="absolute left-5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+              <Input value={cardSearch} onChange={(e) => setCardSearch(e.target.value)} placeholder="Search item or barcode…" className="h-9 pl-8 pr-8 text-sm" />
+              {cardSearch && (
+                <button type="button" onClick={() => setCardSearch("")} className="absolute right-5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600" aria-label="Clear search">
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
             {detailQuery.isLoading ? (
               <p className="py-10 text-center text-sm text-gray-400">Loading items…</p>
             ) : items.length === 0 ? (
               <p className="py-10 text-center text-sm text-gray-400">This order has no items.</p>
-            ) : items.map((item) => {
+            ) : cardItems.length === 0 ? (
+              <p className="py-10 text-center text-sm text-gray-400">No item matches “{cardSearch}”.</p>
+            ) : cardItems.map((item) => {
               const left = remainingOf(item);
               const picked = item.pickedQty > 0;
               return (
                 <div
                   key={item.id}
-                  className={`flex items-start gap-3 border-b border-gray-100 px-4 py-3 last:border-b-0 ${picked ? "bg-green-50" : ""}`}
+                  className={`flex items-center gap-2.5 border-b border-gray-100 px-3 py-2 last:border-b-0 ${picked ? "bg-green-50" : ""}`}
                 >
-                  <ItemPhoto item={item} size={48} />
+                  <ItemPhoto item={item} size={40} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
-                      <span className="text-[15px] font-semibold leading-snug text-gray-900">{item.itemName ?? "—"}</span>
-                      <span className="shrink-0 font-mono text-xs font-semibold text-gray-500">{item.srNo || "—"}</span>
+                      <span className="text-sm font-semibold leading-tight text-gray-900">{item.itemName ?? "—"}</span>
+                      <span className="shrink-0 font-mono text-[11px] font-semibold text-gray-500">{item.srNo || "—"}</span>
                     </div>
-                    <p className="mt-0.5 font-mono text-[13px] text-gray-500">{item.barcode ?? "—"}</p>
-                    {/* Pallet math right under the barcode — how much makes one pallet, and how
-                        many pallets are still needed for what's left. */}
-                    {item.palletSize > 0 && (
-                      <p className="mt-0.5 text-xs text-gray-400">{item.palletSize}/plt · {(left / item.palletSize).toFixed(2)} plt needed</p>
-                    )}
-                    {/* Pick on the left (bigger — the button IS the action, it gets the
-                        emphasis), Expected/Received/Remain on the right in a bigger font, using
-                        the row's spare width instead of sitting small and empty next to it. */}
-                    <div className="mt-2 flex items-center justify-between gap-3">
-                      {canPick && (
-                        <div className="flex shrink-0 flex-col items-start gap-1.5">
-                          {!isCompleted && (
-                            <Button
-                              size="sm"
-                              className="h-11 shrink-0 bg-[#001d6e] px-6 text-base font-semibold text-white hover:bg-[#00154b] disabled:bg-gray-200 disabled:text-gray-500"
-                              disabled={left === 0}
-                              onClick={() => { setPickTarget(item); setPickQty(""); setPickPallets(""); }}
-                            >
-                              {left === 0 ? "Done" : "Pick"}
-                            </Button>
-                          )}
-                          {picked && (
-                            <button type="button" className="text-xs font-medium text-red-600 underline decoration-dotted underline-offset-2" onClick={() => { setConfirmVoidId(null); setPicksTarget(item); }}>
-                              Picks / Remove
-                            </button>
-                          )}
+                    <p className="font-mono text-[11px] leading-tight text-gray-500">{item.barcode ?? "—"}{item.palletSize > 0 && ` · ${item.palletSize}/plt`}</p>
+                    {/* One row: Expected and Left (each with its pallets) on the left, and - [how much is picked] + on the right. The + / - open the quantity dialog (the same
+                        stepper as Load Operation); tapping the picked number lists the entries so a wrong one can be removed. */}
+                    <div className="mt-1 flex items-center justify-between gap-2 tabular-nums">
+                      <div className="flex items-start gap-4">
+                        <div className="text-[11px] leading-tight text-gray-500">
+                          Expected <strong className="text-sm text-gray-800">{item.expectedQty.toLocaleString()}</strong>
+                          {item.palletSize > 0 && <span className="block text-gray-400">{(item.expectedQty / item.palletSize).toFixed(2)} plt</span>}
                         </div>
-                      )}
-                      <div className="flex flex-1 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-right text-lg leading-none tabular-nums">
-                        <span className="text-gray-500">Expected <strong className="text-xl text-gray-800">{item.expectedQty.toLocaleString()}</strong>{item.palletSize > 0 && <span className="block text-xs font-normal text-gray-400">{(item.expectedQty / item.palletSize).toFixed(2)} plt</span>}</span>
-                        <span className="inline-flex items-center gap-1.5 text-gray-500">
-                          {canPick && !isCompleted && (
-                            <Button size="sm" variant="ghost" disabled={item.pickedQty <= 0} title="Take back from the picked quantity"
-                              className="h-9 w-9 shrink-0 rounded-full bg-red-100 p-0 text-xl font-bold leading-none text-red-700 hover:bg-red-200 disabled:opacity-40"
-                              onClick={() => openAdjust(item, "remove")}>−</Button>
-                          )}
-                          <span>Received <strong className={`text-xl ${picked ? "text-green-600" : "text-gray-400"}`}>{item.pickedQty.toLocaleString()}</strong>{item.palletSize > 0 && <span className="block text-xs font-normal text-gray-400">{(item.pickedQty / item.palletSize).toFixed(2)} plt</span>}</span>
-                          {canPick && !isCompleted && (
-                            <Button size="sm" variant="ghost" disabled={left <= 0} title="Add to the picked quantity"
-                              className="h-9 w-9 shrink-0 rounded-full bg-emerald-100 p-0 text-xl font-bold leading-none text-emerald-700 hover:bg-emerald-200 disabled:opacity-40"
-                              onClick={() => openAdjust(item, "add")}>+</Button>
-                          )}
-                        </span>
-                        <span className="text-gray-500">Remain <strong className={`text-xl ${left > 0 ? "text-amber-600" : "text-green-600"}`}>{left.toLocaleString()}</strong>{item.palletSize > 0 && <span className="block text-xs font-normal text-gray-400">{(left / item.palletSize).toFixed(2)} plt</span>}</span>
+                        <div className="text-[11px] leading-tight text-gray-500">
+                          Left <strong className={`text-sm ${left > 0 ? "text-amber-600" : "text-green-600"}`}>{left.toLocaleString()}</strong>
+                          {item.palletSize > 0 && <span className="block text-gray-400">{(left / item.palletSize).toFixed(2)} plt</span>}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {canPick && !isCompleted && (
+                          <Button size="sm" variant="ghost" disabled={item.pickedQty <= 0} title="Take back from the picked quantity" aria-label="Take back from the picked quantity"
+                            className="h-9 w-9 shrink-0 rounded-full bg-red-100 p-0 text-xl font-bold leading-none text-red-700 hover:bg-red-200 disabled:opacity-40"
+                            onClick={() => openAdjust(item, "remove")}>−</Button>
+                        )}
+                        <button type="button" disabled={!canPick || !picked} title={picked ? "See the entries (and remove a wrong one)" : undefined}
+                          className="min-w-[2.75rem] text-center leading-tight disabled:cursor-default"
+                          onClick={() => { setConfirmVoidId(null); setPicksTarget(item); }}>
+                          <span className={`block text-lg font-bold ${picked ? "text-green-600" : "text-gray-400"} ${canPick && picked ? "underline decoration-dotted underline-offset-2" : ""}`}>{item.pickedQty.toLocaleString()}</span>
+                          {item.palletSize > 0 && <span className="block text-[11px] text-gray-400">{(item.pickedQty / item.palletSize).toFixed(2)} plt</span>}
+                        </button>
+                        {canPick && !isCompleted && (
+                          <Button size="sm" variant="ghost" disabled={left <= 0} title="Add to the picked quantity" aria-label="Add to the picked quantity"
+                            className="h-9 w-9 shrink-0 rounded-full bg-emerald-100 p-0 text-xl font-bold leading-none text-emerald-700 hover:bg-emerald-200 disabled:opacity-40"
+                            onClick={() => openAdjust(item, "add")}>+</Button>
+                        )}
                       </div>
                     </div>
                   </div>

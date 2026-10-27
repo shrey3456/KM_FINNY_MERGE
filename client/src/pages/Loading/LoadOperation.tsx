@@ -4364,7 +4364,7 @@ export default function LoadOperation() {
                             : { bar: "bg-gray-300", edge: "border-l-gray-300", badge: "bg-gray-50 text-gray-500 ring-gray-200", label: "Pending" };
                         const expanded = !!row.barcode && expandedItemBarcode === row.barcode;
                         return (
-                          <div key={row.barcode ?? `row-${row.id}`} className={expanded ? "col-span-2" : undefined}>
+                          <div key={`${row.barcode ?? "row"}|${row.id}`} className={expanded ? "col-span-2" : undefined}>
                             <div
                               role={row.barcode ? "button" : undefined}
                               onClick={() => row.barcode && setExpandedItemBarcode((cur) => (cur === row.barcode ? null : row.barcode!))}
