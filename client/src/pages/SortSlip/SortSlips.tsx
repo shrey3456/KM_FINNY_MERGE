@@ -59,6 +59,9 @@ type SortSlipRow = {
   managedByCode: string | null;
   managedByName: string | null;
   assignees: Array<{ userCode: string; userName: string | null }>;
+  /** What the order asks for / what has been picked, in pallets (items with no pallet size in Product Master add nothing). */
+  totalPallets?: number;
+  pickedPallets?: number;
 };
 
 type SortSlipItem = {
@@ -87,6 +90,26 @@ type Loader = {
   plants: string | null;
   role: string | null;
 };
+
+// Designation "Loader" people the server left out of the list, with the reason (no Sort Slip page, no access to the order's plant) - shown when nobody can be picked.
+type ExcludedLoader = { userCode: string; name: string | null; reason: string };
+
+// The people a slip can be given to. Read fresh every time it is asked for (no cache, and again when the tab is focused): a designation, page or plant changed on
+// User Management a moment ago must show here without reloading the page.
+function useSortSlipLoaders(plant: string, enabled: boolean) {
+  const q = useQuery({
+    queryKey: ["/api/sort-slips/loaders", plant],
+    enabled,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/sort-slips/loaders?plant=${encodeURIComponent(plant)}`);
+      return res.json() as Promise<{ loaders: Loader[]; excluded: ExcludedLoader[] }>;
+    },
+  });
+  return { loaders: q.data?.loaders ?? [], excluded: q.data?.excluded ?? [], isLoading: q.isLoading, isFetching: q.isFetching, refetch: q.refetch, loaded: !!q.data };
+}
 
 // GET /sort-slips/supervisors' exact mirror of the loader shape, minus the "busy on one active
 // slip" fields that only make sense for a loader — a supervisor can manage any number of slips.
@@ -149,7 +172,7 @@ function fmtWhen(value: string | null) {
     : "—";
 }
 
-function ProgressBar({ picked, total }: { picked: number; total: number }) {
+function ProgressBar({ picked, total, pickedPlt, totalPlt }: { picked: number; total: number; pickedPlt?: number; totalPlt?: number }) {
   const pct = total > 0 ? Math.min(100, Math.round((picked / total) * 100)) : 0;
   return (
     <div className="flex items-center gap-2">
@@ -161,6 +184,7 @@ function ProgressBar({ picked, total }: { picked: number; total: number }) {
       </div>
       <span className="tabular-nums text-xs text-gray-600">
         {picked.toLocaleString()} / {total.toLocaleString()}
+        {!!totalPlt && totalPlt > 0 && <span className="ml-1.5 text-gray-400">· {(pickedPlt ?? 0).toFixed(2)} / {totalPlt.toFixed(2)} plt</span>}
       </span>
     </div>
   );
@@ -280,6 +304,8 @@ export default function SortSlips() {
   const supervisorsQuery = useQuery({
     queryKey: ["/api/sort-slips/supervisors"],
     enabled: !!transferSupRow,
+    staleTime: 0,
+    refetchOnMount: "always",
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/sort-slips/supervisors`);
       return res.json() as Promise<Supervisor[]>;
@@ -376,14 +402,11 @@ export default function SortSlips() {
     },
   });
 
-  const loadersQuery = useQuery({
-    queryKey: ["/api/sort-slips/loaders", pickedOrder?.plant ?? ""],
-    enabled: canWrite && createOpen && !!pickedOrder,
-    queryFn: async () => {
-      const res = await apiRequest("GET", `/api/sort-slips/loaders?plant=${encodeURIComponent(pickedOrder?.plant ?? "")}`);
-      return res.json() as Promise<Loader[]>;
-    },
-  });
+  const loadersQuery = useSortSlipLoaders(pickedOrder?.plant ?? "", canWrite && createOpen && !!pickedOrder);
+  // A loader picked earlier (or restored from the saved draft) who is no longer on the fresh list - their designation, page or plant changed - is dropped.
+  useEffect(() => {
+    if (loadersQuery.loaded && !loadersQuery.isFetching && pickedLoader && !loadersQuery.loaders.some((l) => l.userCode === pickedLoader)) setPickedLoader("");
+  }, [loadersQuery.loaded, loadersQuery.isFetching, loadersQuery.loaders, pickedLoader]);
 
   // The order's plant's STV list — same endpoint Loading's Create Operation dialog uses.
   const stvsQuery = useQuery({
@@ -411,7 +434,7 @@ export default function SortSlips() {
       return res.json();
     },
     onSuccess: (data: any) => {
-      const loaderName = loadersQuery.data?.find((l) => l.userCode === pickedLoader)?.name ?? pickedLoader;
+      const loaderName = loadersQuery.loaders.find((l) => l.userCode === pickedLoader)?.name ?? pickedLoader;
       toast({ title: "Sort slip created", description: `${data.orderNumber} · ${loaderName}` });
       setCreateOpen(false);
       clearDraft();
@@ -579,7 +602,7 @@ export default function SortSlips() {
                             ))}
                       </div>
                     </td>
-                    <td className="px-3 py-2"><ProgressBar picked={row.pickedQty} total={row.totalQty} /></td>
+                    <td className="px-3 py-2"><ProgressBar picked={row.pickedQty} total={row.totalQty} pickedPlt={row.pickedPallets} totalPlt={row.totalPallets} /></td>
                     <td className="px-3 py-2">
                       <Badge variant="outline" className={STATUS_STYLES[row.status] ?? ""}>
                         {STATUS_LABELS[row.status] ?? row.status}
@@ -660,7 +683,7 @@ export default function SortSlips() {
                 </div>
 
                 <div className="mt-2 flex items-center justify-between gap-3">
-                  <ProgressBar picked={row.pickedQty} total={row.totalQty} />
+                  <ProgressBar picked={row.pickedQty} total={row.totalQty} pickedPlt={row.pickedPallets} totalPlt={row.totalPallets} />
                   <div className="flex shrink-0 items-center gap-1.5">
                     {row.managedByCode === user?.userCode && row.status !== "completed" && (
                       <Button
@@ -898,7 +921,9 @@ export default function SortSlips() {
 
               <LoaderPicker
                 label="Assign a loader"
-                loaders={loadersQuery.data ?? []}
+                loaders={loadersQuery.loaders}
+                excluded={loadersQuery.excluded}
+                onRefresh={() => void loadersQuery.refetch()}
                 search={loaderSearch}
                 onSearch={setLoaderSearch}
                 selected={pickedLoader}
@@ -1204,14 +1229,17 @@ function SortSlipDeleteDialog({
 // changes hands by transfer. Same search-then-confirm shape as picking a vehicle on the Loading
 // page: type, pick from the floating list, and see who you picked as a line you can clear.
 //
-// The list the server sends already holds only people who can take this slip (view access to Sort
-// Slip, this plant, not a supervisor), so the only thing greyed out here is someone busy on
-// another slip.
+// The list the server sends already holds only people who can take this slip (designation Loader, view access to Sort
+// Slip, this plant), so the only thing greyed out here is someone busy on another slip. When it is empty, the people who
+// were left out are named with the reason, so it is clear what to fix on User Management.
 function LoaderPicker({
-  label, loaders, search, onSearch, selected, onSelect, plant, isLoading, excludeCode,
+  label, loaders, excluded = [], onRefresh, search, onSearch, selected, onSelect, plant, isLoading, excludeCode,
 }: {
   label: string;
   loaders: Loader[];
+  /** Designation "Loader" people left out by the server, with why. */
+  excluded?: ExcludedLoader[];
+  onRefresh?: () => void;
   search: string;
   onSearch: (value: string) => void;
   selected: string;
@@ -1273,11 +1301,20 @@ function LoaderPicker({
             {isLoading ? (
               <p className="px-4 py-3 text-xs text-gray-400">Loading loaders…</p>
             ) : shown.length === 0 ? (
-              <p className="px-4 py-3 text-xs text-gray-400">
-                {available.length === 0
-                  ? `Nobody can take a slip at ${plant ?? "this plant"} yet. On User Management give them view access to Sort Slip — write access makes someone a supervisor — and this plant.`
-                  : "No loader matches that name."}
-              </p>
+              <div className="space-y-1.5 px-4 py-3 text-xs text-gray-500">
+                {available.length === 0 ? (
+                  <>
+                    <p>Nobody can take a slip at {plant ?? "this plant"} yet. A loader needs the designation "Loader", the Sort Slip page (view access) and this plant, all set on User Management.</p>
+                    {excluded.length > 0 && (
+                      <ul className="list-disc space-y-0.5 pl-4 text-amber-700">
+                        {excluded.map((e) => <li key={e.userCode}>{e.name ?? e.userCode} ({e.userCode}) {e.reason}</li>)}
+                      </ul>
+                    )}
+                  </>
+                ) : (
+                  <p>No loader matches that name.</p>
+                )}
+              </div>
             ) : shown.map((loader, i) => (
               <button
                 key={loader.userCode}
@@ -1317,7 +1354,10 @@ function LoaderPicker({
           </button>
         </div>
       )}
-      <p className="text-xs text-gray-500">A loader can only be on one sort slip at a time.</p>
+      <p className="flex items-center justify-between gap-2 text-xs text-gray-500">
+        <span>A loader can only be on one sort slip at a time.</span>
+        {onRefresh && <button type="button" onClick={onRefresh} className="shrink-0 text-[#001d6e] underline decoration-dotted underline-offset-2 hover:text-[#0a2b7e]">Refresh list</button>}
+      </p>
     </div>
   );
 }
@@ -1418,6 +1458,13 @@ function SortSlipDetail({
 }) {
   const { toast } = useToast();
   const [pickTarget, setPickTarget] = useState<SortSlipItem | null>(null);
+  // The item whose picks are open in the Picks dialog (where a wrong entry is removed), and the entry waiting for its "Yes, remove".
+  const [picksTarget, setPicksTarget] = useState<SortSlipItem | null>(null);
+  // The + / - beside an item's picked quantity (like Load Operation's): the item, which way, and how many.
+  const [adjustTarget, setAdjustTarget] = useState<{ item: SortSlipItem; direction: "add" | "remove" } | null>(null);
+  const [adjustQty, setAdjustQty] = useState(1);
+  const openAdjust = (item: SortSlipItem, direction: "add" | "remove") => { setAdjustTarget({ item, direction }); setAdjustQty(1); };
+  const [confirmVoidId, setConfirmVoidId] = useState<number | null>(null);
   const [pickQty, setPickQty] = useState("");
   // The pallet box beside the quantity — kept in step with it both ways, as on Scan Operations.
   const [pickPallets, setPickPallets] = useState("");
@@ -1464,15 +1511,8 @@ function SortSlipDetail({
 
   // The people this slip can be given to — page access and this slip's plant, both applied by
   // the server, so anyone in this list can actually be assigned.
-  const loadersQuery = useQuery({
-    queryKey: ["/api/sort-slips/loaders", slipPlant],
-    enabled: canWrite && !!slipPlant,
-    queryFn: async () => {
-      const res = await apiRequest("GET", `/api/sort-slips/loaders?plant=${encodeURIComponent(slipPlant)}`);
-      return res.json() as Promise<Loader[]>;
-    },
-  });
-  const loaders = loadersQuery.data ?? [];
+  const loadersQuery = useSortSlipLoaders(slipPlant, canWrite && !!slipPlant);
+  const loaders = loadersQuery.loaders;
 
   // Which item's pick history is open, if any. Supervisors only: a loader sees their own entries
   // in the slip's History panel, but "who else touched this line" is a supervisor's question.
@@ -1481,7 +1521,7 @@ function SortSlipDetail({
   const historyQuery = useQuery({
     queryKey: ["/api/sort-slips", "history", slip?.id],
     // Loaded for the History panel and for an expanded row alike — one query serves both.
-    enabled: !!expandedItemId && !!slip?.id,
+    enabled: (!!expandedItemId || !!picksTarget) && !!slip?.id,
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/sort-slips/${slip.id}/history`);
       return res.json() as Promise<{ picks: any[]; handoffs: any[] }>;
@@ -1504,6 +1544,11 @@ function SortSlipDetail({
     { expected: 0, picked: 0 },
   );
   const shortfall = totals.expected - totals.picked;
+  // The same totals in pallets, using each item's own pallet size (an item with none adds nothing).
+  const palletTotals = items.reduce(
+    (acc, i) => (i.palletSize > 0 ? { expected: acc.expected + i.expectedQty / i.palletSize, picked: acc.picked + i.pickedQty / i.palletSize } : acc),
+    { expected: 0, picked: 0 },
+  );
 
   const pickMutation = useMutation({
     mutationFn: async () => {
@@ -1583,9 +1628,27 @@ function SortSlipDetail({
     onError: (err: any) => toast({ title: "Could not reopen", description: err.message, variant: "destructive" }),
   });
 
+  const adjustPickMutation = useMutation({
+    mutationFn: async () => {
+      if (!adjustTarget) throw new Error("Nothing to change");
+      const delta = adjustTarget.direction === "add" ? adjustQty : -adjustQty;
+      const res = await apiRequest("POST", `/api/sort-slips/${slip.id}/adjust-pick`, { itemId: adjustTarget.item.id, delta });
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: adjustTarget?.direction === "add" ? "Quantity added" : "Quantity removed",
+        description: `${adjustTarget?.item.itemName ?? adjustTarget?.item.barcode} · ${adjustTarget?.direction === "add" ? "+" : "−"}${adjustQty}`,
+      });
+      setAdjustTarget(null);
+      refresh();
+    },
+    onError: (err: any) => toast({ title: "Could not change the quantity", description: err.message, variant: "destructive" }),
+  });
+
   const voidMutation = useMutation({
     mutationFn: (pickId: number) => apiRequest("POST", `/api/sort-slips/picks/${pickId}/void`),
-    onSuccess: () => { toast({ title: "Entry removed" }); refresh(); },
+    onSuccess: () => { toast({ title: "Entry removed", description: "That quantity is open to pick again." }); setConfirmVoidId(null); refresh(); },
     onError: (err: any) => toast({ title: "Could not remove", description: err.message, variant: "destructive" }),
   });
 
@@ -1724,11 +1787,25 @@ function SortSlipDetail({
       render: (item) => qtyCell(item.expectedQty, item.palletSize, "text-gray-700"),
     },
     {
-      id: "pickedQty", header: "Picked", width: 88, minWidth: 72, align: "center", sortable: true, totalable: true,
+      id: "pickedQty", header: "Picked", width: 132, minWidth: 112, align: "center", sortable: true, totalable: true,
       accessor: (item) => item.pickedQty,
       headerClassName: headerBorder,
       cellClassName: `text-center ${cellBorder}`,
-      render: (item) => qtyCell(item.pickedQty, item.palletSize, item.pickedQty > 0 ? "font-semibold text-green-600" : "text-gray-300"),
+      render: (item) => (
+        <div className="flex items-center justify-center gap-1">
+          {canPick && !isCompleted && (
+            <Button size="sm" variant="ghost" disabled={item.pickedQty <= 0} title="Take back from the picked quantity"
+              className="h-7 w-7 shrink-0 rounded-full bg-red-100 p-0 text-sm font-bold text-red-700 hover:bg-red-200 hover:text-red-800 disabled:opacity-40"
+              onClick={(e) => { e.stopPropagation(); openAdjust(item, "remove"); }}>−</Button>
+          )}
+          {qtyCell(item.pickedQty, item.palletSize, item.pickedQty > 0 ? "font-semibold text-green-600" : "text-gray-300")}
+          {canPick && !isCompleted && (
+            <Button size="sm" variant="ghost" disabled={remainingOf(item) <= 0} title="Add to the picked quantity"
+              className="h-7 w-7 shrink-0 rounded-full bg-emerald-100 p-0 text-sm font-bold text-emerald-700 hover:bg-emerald-200 hover:text-emerald-800 disabled:opacity-40"
+              onClick={(e) => { e.stopPropagation(); openAdjust(item, "add"); }}>+</Button>
+          )}
+        </div>
+      ),
     },
     {
       id: "remaining", header: "Remaining", width: 92, minWidth: 76, align: "center", sortable: true, totalable: true,
@@ -1743,20 +1820,29 @@ function SortSlipDetail({
       },
     },
     {
-      id: "action", header: "Action", width: 84, minWidth: 76, align: "center", hideable: false, totalable: false,
+      id: "action", header: "Action", width: 104, minWidth: 96, align: "center", hideable: false, totalable: false,
       sortable: false, preventRowClick: true,
       headerClassName: headerBorder,
       cellClassName: cellBorder,
       render: (item) => (
-        canPick && !isCompleted ? (
-          <Button
-            size="sm"
-            className="h-8 bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b] disabled:bg-gray-200 disabled:text-gray-500"
-            disabled={remainingOf(item) === 0}
-            onClick={() => { setPickTarget(item); setPickQty(""); setPickPallets(""); }}
-          >
-            {remainingOf(item) === 0 ? "Done" : "Pick"}
-          </Button>
+        canPick ? (
+          <div className="flex flex-col items-center gap-1">
+            {!isCompleted && (
+              <Button
+                size="sm"
+                className="h-8 bg-[#001d6e] px-4 text-sm font-semibold text-white hover:bg-[#00154b] disabled:bg-gray-200 disabled:text-gray-500"
+                disabled={remainingOf(item) === 0}
+                onClick={() => { setPickTarget(item); setPickQty(""); setPickPallets(""); }}
+              >
+                {remainingOf(item) === 0 ? "Done" : "Pick"}
+              </Button>
+            )}
+            {item.pickedQty > 0 && (
+              <button type="button" className="text-[11px] font-medium text-red-600 underline decoration-dotted underline-offset-2 hover:text-red-700" onClick={() => { setConfirmVoidId(null); setPicksTarget(item); }}>
+                Picks / Remove
+              </button>
+            )}
+          </div>
         ) : null
       ),
     },
@@ -1798,7 +1884,7 @@ function SortSlipDetail({
                 {slip.completedAt && ` · completed by ${slip.completedByName ?? "—"}`}
               </p>
               <div className="flex w-full flex-wrap items-center gap-1.5 md:w-auto md:gap-2">
-                <ProgressBar picked={totals.picked} total={totals.expected} />
+                <ProgressBar picked={totals.picked} total={totals.expected} pickedPlt={palletTotals.picked} totalPlt={palletTotals.expected} />
 
                 {/* Icon-only below sm (label hidden, kept for a11y via title); flex-1 so the row
                     stretches edge-to-edge instead of a few small buttons sitting on the left
@@ -1999,7 +2085,7 @@ function SortSlipDetail({
                                 <span className={`inline-flex flex-col items-center justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${
                                   p.voided ? "bg-gray-100 text-gray-400 line-through" : "bg-[#001d6e]/10 text-[#001d6e]"
                                 }`}>
-                                  +{p.qty}
+                                  {p.qty < 0 ? "−" : "+"}{Math.abs(p.qty)}
                                 </span>
                                 {item.palletSize > 0 && (
                                   <div className="mt-0.5 text-[10px] tabular-nums text-gray-400">{(p.qty / item.palletSize).toFixed(2)} plt</div>
@@ -2064,20 +2150,41 @@ function SortSlipDetail({
                         emphasis), Expected/Received/Remain on the right in a bigger font, using
                         the row's spare width instead of sitting small and empty next to it. */}
                     <div className="mt-2 flex items-center justify-between gap-3">
-                      {canPick && !isCompleted && (
-                        <Button
-                          size="sm"
-                          className="h-11 shrink-0 bg-[#001d6e] px-6 text-base font-semibold text-white hover:bg-[#00154b] disabled:bg-gray-200 disabled:text-gray-500"
-                          disabled={left === 0}
-                          onClick={() => { setPickTarget(item); setPickQty(""); setPickPallets(""); }}
-                        >
-                          {left === 0 ? "Done" : "Pick"}
-                        </Button>
+                      {canPick && (
+                        <div className="flex shrink-0 flex-col items-start gap-1.5">
+                          {!isCompleted && (
+                            <Button
+                              size="sm"
+                              className="h-11 shrink-0 bg-[#001d6e] px-6 text-base font-semibold text-white hover:bg-[#00154b] disabled:bg-gray-200 disabled:text-gray-500"
+                              disabled={left === 0}
+                              onClick={() => { setPickTarget(item); setPickQty(""); setPickPallets(""); }}
+                            >
+                              {left === 0 ? "Done" : "Pick"}
+                            </Button>
+                          )}
+                          {picked && (
+                            <button type="button" className="text-xs font-medium text-red-600 underline decoration-dotted underline-offset-2" onClick={() => { setConfirmVoidId(null); setPicksTarget(item); }}>
+                              Picks / Remove
+                            </button>
+                          )}
+                        </div>
                       )}
                       <div className="flex flex-1 flex-wrap items-center justify-end gap-x-3 gap-y-1 text-right text-lg leading-none tabular-nums">
-                        <span className="text-gray-500">Expected <strong className="text-xl text-gray-800">{item.expectedQty.toLocaleString()}</strong></span>
-                        <span className="text-gray-500">Received <strong className={`text-xl ${picked ? "text-green-600" : "text-gray-400"}`}>{item.pickedQty.toLocaleString()}</strong></span>
-                        <span className="text-gray-500">Remain <strong className={`text-xl ${left > 0 ? "text-amber-600" : "text-green-600"}`}>{left.toLocaleString()}</strong></span>
+                        <span className="text-gray-500">Expected <strong className="text-xl text-gray-800">{item.expectedQty.toLocaleString()}</strong>{item.palletSize > 0 && <span className="block text-xs font-normal text-gray-400">{(item.expectedQty / item.palletSize).toFixed(2)} plt</span>}</span>
+                        <span className="inline-flex items-center gap-1.5 text-gray-500">
+                          {canPick && !isCompleted && (
+                            <Button size="sm" variant="ghost" disabled={item.pickedQty <= 0} title="Take back from the picked quantity"
+                              className="h-9 w-9 shrink-0 rounded-full bg-red-100 p-0 text-xl font-bold leading-none text-red-700 hover:bg-red-200 disabled:opacity-40"
+                              onClick={() => openAdjust(item, "remove")}>−</Button>
+                          )}
+                          <span>Received <strong className={`text-xl ${picked ? "text-green-600" : "text-gray-400"}`}>{item.pickedQty.toLocaleString()}</strong>{item.palletSize > 0 && <span className="block text-xs font-normal text-gray-400">{(item.pickedQty / item.palletSize).toFixed(2)} plt</span>}</span>
+                          {canPick && !isCompleted && (
+                            <Button size="sm" variant="ghost" disabled={left <= 0} title="Add to the picked quantity"
+                              className="h-9 w-9 shrink-0 rounded-full bg-emerald-100 p-0 text-xl font-bold leading-none text-emerald-700 hover:bg-emerald-200 disabled:opacity-40"
+                              onClick={() => openAdjust(item, "add")}>+</Button>
+                          )}
+                        </span>
+                        <span className="text-gray-500">Remain <strong className={`text-xl ${left > 0 ? "text-amber-600" : "text-green-600"}`}>{left.toLocaleString()}</strong>{item.palletSize > 0 && <span className="block text-xs font-normal text-gray-400">{(left / item.palletSize).toFixed(2)} plt</span>}</span>
                       </div>
                     </div>
                   </div>
@@ -2087,6 +2194,139 @@ function SortSlipDetail({
           </div>
         </Card>
       </div>
+
+      {/* + / - on an item's picked quantity - the same dialog Load Operation's +/- opens: a quantity box (and pallets when the item has a pallet size) with - and + steppers. */}
+      <Dialog open={!!adjustTarget} onOpenChange={(o) => { if (!o) setAdjustTarget(null); }}>
+        <DialogContent className="w-[calc(100%-2rem)] max-w-xl overflow-x-hidden rounded-2xl p-0 sm:max-w-2xl">
+          {adjustTarget && (() => {
+            const it = items.find((i) => i.id === adjustTarget.item.id) ?? adjustTarget.item;
+            const add = adjustTarget.direction === "add";
+            const max = add ? Math.max(0, it.expectedQty - it.pickedQty) : it.pickedQty;
+            const plt = it.palletSize;
+            const tooMany = adjustQty > max;
+            const clamp = (v: number) => Math.max(1, Math.min(max || 1, v));
+            return (
+              <div className="flex flex-col sm:flex-row">
+                <div className="flex shrink-0 items-center justify-center border-b border-gray-100 bg-gray-50 p-4 sm:w-56 sm:border-b-0 sm:border-r">
+                  <ItemPhoto item={it} className="h-28 w-28 sm:h-48 sm:w-48" />
+                </div>
+                <div className="min-w-0 flex-1 space-y-4 p-5 sm:p-6">
+                  <DialogHeader>
+                    <DialogTitle className={add ? "text-emerald-700" : "text-red-700"}>{add ? "Add to the picked quantity?" : "Take back from the picked quantity?"}</DialogTitle>
+                    <DialogDescription className="text-left">
+                      <span className="font-semibold text-gray-900">{it.itemName ?? it.barcode}</span>
+                      {" "}— picked <strong>{it.pickedQty.toLocaleString()}</strong> of {it.expectedQty.toLocaleString()}
+                      {plt > 0 && ` (${(it.pickedQty / plt).toFixed(2)} of ${(it.expectedQty / plt).toFixed(2)} plt)`}.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-1.5">
+                    <Label className="text-sm">Quantity <span className="font-normal text-gray-400">· up to {max.toLocaleString()}</span></Label>
+                    <div className={`flex items-stretch overflow-hidden rounded-xl border-2 bg-white ${tooMany ? "border-red-400" : "border-gray-300 focus-within:border-[#001d6e]"}`}>
+                      <Button type="button" variant="ghost" className="h-11 w-10 shrink-0 rounded-none border-r border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100" aria-label="Decrease"
+                        onClick={() => setAdjustQty((q) => clamp(q - 1))}>−</Button>
+                      <Input type="number" min={1} value={adjustQty === 0 ? "" : adjustQty}
+                        onFocus={() => setAdjustQty(0)}
+                        onChange={(e) => setAdjustQty(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                        onBlur={() => setAdjustQty((q) => Math.max(1, q))}
+                        className="h-11 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-lg font-bold focus-visible:ring-0 focus-visible:ring-offset-0" />
+                      <Button type="button" variant="ghost" className="h-11 w-10 shrink-0 rounded-none border-l border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100" aria-label="Increase"
+                        onClick={() => setAdjustQty((q) => clamp(q + 1))}>+</Button>
+                    </div>
+                    {plt > 1 && (
+                      <div className="space-y-1 pt-1">
+                        <Label className="text-sm">Pallets <span className="font-normal text-gray-400">· {plt}/pallet</span></Label>
+                        <div className="flex items-stretch overflow-hidden rounded-xl border-2 border-gray-300 bg-white focus-within:border-[#001d6e]">
+                          <Button type="button" variant="ghost" className="h-11 w-10 shrink-0 rounded-none border-r border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100" aria-label="Decrease by one pallet"
+                            onClick={() => setAdjustQty((q) => clamp(q - plt))}>−</Button>
+                          <Input type="number" min={0} step="0.01" value={adjustQty > 0 ? (adjustQty / plt).toFixed(2) : ""}
+                            onFocus={() => setAdjustQty(0)}
+                            onChange={(e) => { const pl = parseFloat(e.target.value); setAdjustQty(Number.isFinite(pl) ? Math.max(0, Math.round(pl * plt)) : 0); }}
+                            onBlur={() => setAdjustQty((q) => Math.max(1, q))}
+                            className="h-11 min-w-0 flex-1 rounded-none border-0 px-1 text-center text-lg font-bold focus-visible:ring-0 focus-visible:ring-offset-0" />
+                          <Button type="button" variant="ghost" className="h-11 w-10 shrink-0 rounded-none border-l border-gray-200 text-xl font-bold text-gray-500 hover:bg-gray-100" aria-label="Increase by one pallet"
+                            onClick={() => setAdjustQty((q) => clamp(q + plt))}>+</Button>
+                        </div>
+                      </div>
+                    )}
+                    {tooMany && <p className="text-xs text-red-600">{add ? `Only ${max.toLocaleString()} left to pick on this item.` : `Only ${max.toLocaleString()} is picked on this item.`}</p>}
+                  </div>
+                  <DialogFooter className="gap-2">
+                    <Button variant="outline" onClick={() => setAdjustTarget(null)} disabled={adjustPickMutation.isPending}>Cancel</Button>
+                    <Button className={add ? "bg-emerald-600 text-white hover:bg-emerald-700" : "bg-red-600 text-white hover:bg-red-700"}
+                      disabled={adjustPickMutation.isPending || adjustQty <= 0 || tooMany || max <= 0}
+                      onClick={() => adjustPickMutation.mutate()}>
+                      {adjustPickMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+                      {add ? `Add ${adjustQty}` : `Remove ${adjustQty}`}
+                    </Button>
+                  </DialogFooter>
+                </div>
+              </div>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
+      {/* Picks / Remove - every entry recorded on one item. A wrong entry is removed here (voided, so the history still shows it): a loader removes their own, a supervisor anyone's. */}
+      <Dialog open={!!picksTarget} onOpenChange={(o) => { if (!o) { setPicksTarget(null); setConfirmVoidId(null); } }}>
+        <DialogContent className="w-[calc(100%-2rem)] max-w-xl rounded-2xl">
+          {picksTarget && (() => {
+            const live = items.find((i) => i.id === picksTarget.id) ?? picksTarget;
+            const picks = (historyQuery.data?.picks ?? []).filter((p: any) => p.itemId === picksTarget.id);
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="text-lg text-[#001d6e]">Picks - {live.itemName || live.barcode}</DialogTitle>
+                  <DialogDescription>
+                    Picked {live.pickedQty.toLocaleString()} of {live.expectedQty.toLocaleString()}
+                    {live.palletSize > 0 && ` · ${(live.pickedQty / live.palletSize).toFixed(2)} of ${(live.expectedQty / live.palletSize).toFixed(2)} plt`}.
+                    {" "}Picked the wrong quantity? Remove that entry, then pick again.
+                  </DialogDescription>
+                </DialogHeader>
+                {isCompleted && <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">This sort slip is completed. Reopen it to remove an entry.</p>}
+                <div className="max-h-[50vh] overflow-y-auto rounded-md border border-gray-200">
+                  {historyQuery.isLoading ? (
+                    <p className="py-6 text-center text-sm text-gray-400">Loading…</p>
+                  ) : picks.length === 0 ? (
+                    <p className="py-6 text-center text-sm text-gray-400">Nothing picked on this line yet.</p>
+                  ) : picks.map((p: any) => {
+                    const mine = p.pickedByCode === currentUserCode;
+                    const removable = !p.voided && !isCompleted && (canWrite || mine);
+                    return (
+                      <div key={p.id} className={`flex items-center justify-between gap-3 border-b border-gray-100 px-3 py-2.5 last:border-b-0 ${p.voided ? "bg-gray-50 opacity-60" : ""}`}>
+                        <div className="min-w-0 text-sm">
+                          <div className={`font-semibold tabular-nums ${p.voided ? "text-gray-400 line-through" : "text-[#001d6e]"}`}>
+                            {p.qty < 0 ? "−" : "+"}{Math.abs(p.qty).toLocaleString()} pcs{p.qty < 0 && <span className="ml-1.5 text-xs font-normal text-red-500">taken back</span>}
+                            {live.palletSize > 0 && <span className="ml-1.5 text-xs font-normal text-gray-500">{(Math.abs(p.qty) / live.palletSize).toFixed(2)} plt</span>}
+                          </div>
+                          <div className="truncate text-xs text-gray-500">{p.pickedByName ?? p.pickedByCode} · {new Date(p.pickedAt).toLocaleString("en-IN")}</div>
+                        </div>
+                        {p.voided ? (
+                          <span className="shrink-0 text-xs font-medium text-red-500">Removed</span>
+                        ) : removable ? (
+                          confirmVoidId === p.id ? (
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <Button size="sm" variant="destructive" className="h-8 px-3 text-xs" disabled={voidMutation.isPending} onClick={() => voidMutation.mutate(p.id)}>
+                                {voidMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Yes, remove"}
+                              </Button>
+                              <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setConfirmVoidId(null)}>No</Button>
+                            </div>
+                          ) : (
+                            <Button size="sm" variant="outline" className="h-8 shrink-0 border-red-200 px-3 text-xs text-red-600 hover:bg-red-50" onClick={() => setConfirmVoidId(p.id)}>
+                              <Trash2 className="mr-1 h-3.5 w-3.5" /> Remove
+                            </Button>
+                          )
+                        ) : !p.voided && !isCompleted ? (
+                          <span className="shrink-0 text-[11px] text-gray-400">Not yours</span>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
 
       {/* Pick — the loader's one write, built like Scan Operations' confirmation: the picture
           filling one side, the item and its numbers on the other, and a big −/+ quantity box.
@@ -2281,6 +2521,8 @@ function SortSlipDetail({
               <LoaderPicker
                 label="Hand it to"
                 loaders={loaders}
+                excluded={loadersQuery.excluded}
+                onRefresh={() => void loadersQuery.refetch()}
                 search={transferSearch}
                 onSearch={setTransferSearch}
                 selected={transferTo}

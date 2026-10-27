@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { pool } from '../db';
-import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
+import { requirePageAccess, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { getUserPlants, getPlantStateCode, getPalletSize } from './order-scan';
 import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 
@@ -18,12 +18,12 @@ import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilt
 // says "this much has been brought to the platform"; loading says "this much went on the truck".
 // Counting one as the other would double-count the same cartons.
 //
-// Permissions, all enforced here rather than by hiding buttons:
-//   • write access on 'sort-slip'  → create, transfer, complete, reopen, delete, void
-//   • view access + being an ASSIGNEE of this slip → record a pick on it, void your own
-//   • view access alone → see only the slips you are assigned to
-// Who can be ASSIGNED is the same grant and nothing else — view access to this page. Department
-// and designation play no part.
+// Permissions, all enforced here rather than by hiding buttons. The DESIGNATION on User Management decides the role, and the page access backs it up:
+//   • SUPERVISOR = admin, or designation "Supervisor" WITH write access on 'sort-slip'
+//                  → create, assign, transfer, pause, complete, reopen, delete, void
+//   • LOADER     = designation "Loader" with view access on 'sort-slip' (write is not needed)
+//                  → sees only the slips assigned to them, records a pick on them, voids their own
+// Anyone else with write access but another designation (Manager, Head, Storekeeper...) is NOT a supervisor here and cannot create or assign slips.
 //
 // A slip holds exactly ONE loader at a time: it cannot be created without one, and the only way
 // the work changes hands is a supervisor's transfer. sort_slip_assignees stays a table rather
@@ -43,16 +43,30 @@ function isAdmin(req: Request): boolean {
   return WRITE_ADMIN_ROLES.includes(role);
 }
 
-// Write access to this page specifically — the supervisor test. Same rule requirePageWrite
-// applies, read here as a boolean so a single endpoint can serve both kinds of caller (the list
-// shows every slip to a supervisor and only their own to a loader).
+const isDesignation = (value: unknown, wanted: string) => String(value ?? '').trim().toLowerCase() === wanted;
+
+// The supervisor test: an admin, or the designation "Supervisor" together with write access to this page. Read here as a boolean so a single endpoint can serve both kinds
+// of caller (the list shows every slip to a supervisor and only their own to a loader). Named hasWrite because every gate below reads it that way.
 function hasWrite(req: Request): boolean {
   if (isAdmin(req)) return true;
+  const user = req.user as any;
+  if (!isDesignation(user?.designation, 'supervisor')) return false;
   try {
-    return (JSON.parse((req.user as any)?.pageWriteAccess || '[]') as string[]).includes('sort-slip');
+    return (JSON.parse(user?.pageWriteAccess || '[]') as string[]).includes('sort-slip');
   } catch {
     return false;
   }
+}
+
+// Route gate for everything a supervisor does (create, assign, transfer, pause, complete, reopen, delete, the loader and supervisor lists). Says which part is missing.
+function requireSupervisor(req: Request, res: Response, next: NextFunction) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ message: 'Not authenticated' });
+  if (hasWrite(req)) return next();
+  const user = req.user as any;
+  if (!isDesignation(user?.designation, 'supervisor')) {
+    return res.status(403).json({ message: 'Only a person with the designation "Supervisor" can do this' });
+  }
+  return res.status(403).json({ message: 'Write access to Sort Slip is required' });
 }
 
 const normalize = (value?: string | number | null) => String(value ?? '').trim().toLowerCase();
@@ -76,20 +90,17 @@ async function loaderCanAccessPlant(userCode: string, plant: string | null | und
   return allowed.includes(normalize(plant));
 }
 
-// Whether this person is a LOADER: view access to Sort Slip, no write access, not an admin —
-// the same definition the list above uses, so the server and the picker can never disagree.
-// Returns why they are not, for the message the page shows.
+// Whether this person is a LOADER: designation "Loader" with view access to Sort Slip (not an admin) — the same definition the list below uses, so the server and the picker can
+// never disagree. Returns why they are not, for the message the page shows. ('supervisor' = an admin, who assigns the work and is not given it.)
 async function loaderCheck(userCode: string): Promise<'ok' | 'access' | 'supervisor' | 'designation'> {
   const { rows } = await pool.query(
-    `SELECT role, designation, allowed_pages, page_write_access FROM users WHERE user_code = $1`, [userCode]);
+    `SELECT role, designation, allowed_pages FROM users WHERE user_code = $1`, [userCode]);
   if (!rows[0]) return 'access';
   if (WRITE_ADMIN_ROLES.includes(String(rows[0].role ?? '').toLowerCase())) return 'supervisor';
   const parse = (value: string | null) => {
     try { return JSON.parse(value || '[]') as string[]; } catch { return []; }
   };
   if (!parse(rows[0].allowed_pages).includes('sort-slip')) return 'access';
-  // Write access is what makes someone a supervisor. They assign the work; they are not given it.
-  if (parse(rows[0].page_write_access).includes('sort-slip')) return 'supervisor';
   // Only people whose designation is "Loader" can be given a sort slip.
   if (String(rows[0].designation ?? '').trim().toLowerCase() !== 'loader') return 'designation';
   return 'ok';
@@ -183,6 +194,39 @@ const SORT_SLIP_FILTER_COLUMNS: Record<string, SqlFilterColumn> = {
 // GET /sort-slips — the landing list.
 // A supervisor sees every slip in their plants; a loader sees only the slips they are on. That
 // scoping is done here, not in the page, so a loader cannot ask for someone else's list.
+// Pallets for a page of slips: what the order asks for and what has been picked, in pallets. Pallet size follows the slip's plant state (the same rule the slip's own item
+// list uses); an item Product Master has no size for adds nothing, as it shows no pallet count there either.
+async function palletsForSlips(slipIds: number[]): Promise<Map<number, { totalPallets: number; pickedPallets: number }>> {
+  const out = new Map<number, { totalPallets: number; pickedPallets: number }>();
+  if (slipIds.length === 0) return out;
+  const { rows } = await pool.query(
+    `SELECT s.id AS "slipId", s.plant, COALESCE(i.quantity, 0)::int AS qty, prod.gj_plt AS "gjPlt", prod.mp_plt AS "mpPlt",
+            COALESCE((SELECT SUM(p.qty) FROM sort_slip_picks p WHERE p.proforma_slip_item_id = i.id AND NOT p.voided), 0)::int AS picked
+       FROM sort_slips s
+       JOIN proforma_slip_items i ON i.proforma_slip_id = s.proforma_slip_id
+       LEFT JOIN LATERAL (
+         SELECT p.gj_plt, p.mp_plt FROM products p
+          WHERE p.id = i.product_id OR LOWER(p.barcode) = LOWER(i.barcode)
+          ORDER BY (p.id = i.product_id) DESC, (LOWER(COALESCE(p.plant, '')) = LOWER(s.plant)) DESC, p.id ASC LIMIT 1
+       ) prod ON TRUE
+      WHERE s.id = ANY($1::int[])`,
+    [slipIds],
+  );
+  const stateOf = new Map<string, string | null>();
+  for (const r of rows as any[]) {
+    const plant = String(r.plant ?? '');
+    if (!stateOf.has(plant)) stateOf.set(plant, await getPlantStateCode(pool, plant));
+    const size = getPalletSize({ gjPlt: r.gjPlt, mpPlt: r.mpPlt }, stateOf.get(plant) ?? null);
+    if (size <= 0) continue;
+    const cur = out.get(r.slipId) ?? { totalPallets: 0, pickedPallets: 0 };
+    cur.totalPallets += r.qty / size;
+    cur.pickedPallets += r.picked / size;
+    out.set(r.slipId, cur);
+  }
+  for (const v of out.values()) { v.totalPallets = Math.round(v.totalPallets * 100) / 100; v.pickedPallets = Math.round(v.pickedPallets * 100) / 100; }
+  return out;
+}
+
 router.get('/sort-slips', requirePageAccess('sort-slip'), async (req: Request, res: Response) => {
   try {
     const limit = Math.max(1, Math.min(200, parseInt(String(req.query.limit ?? '25'), 10) || 25));
@@ -276,8 +320,10 @@ router.get('/sort-slips', requirePageAccess('sort-slip'), async (req: Request, r
       optionParams,
     );
 
+    const pallets = await palletsForSlips(dataRes.rows.map((r: any) => r.id));
+
     res.json({
-      records: dataRes.rows.map((row: any) => ({ ...row, assignees: byId.get(row.id) ?? [] })),
+      records: dataRes.rows.map((row: any) => ({ ...row, assignees: byId.get(row.id) ?? [], ...(pallets.get(row.id) ?? { totalPallets: 0, pickedPallets: 0 }) })),
       total: countRes.rows[0]?.total ?? 0,
       limit, offset,
       canWrite: hasWrite(req),
@@ -295,31 +341,24 @@ router.get('/sort-slips', requirePageAccess('sort-slip'), async (req: Request, r
   }
 });
 
-// GET /sort-slips/loaders?plant=VALSAD — the loaders a slip can be given to.
+// GET /sort-slips/loaders?plant=VALSAD — the loaders a slip can be given to, and who was left out and why.
 //
-// A LOADER is someone with VIEW access to Sort Slip and no write access: view access is exactly
-// what lets a person open a slip assigned to them and record picks. Write access makes someone a
-// SUPERVISOR — the person doing the assigning — and admins are supervisors everywhere, so neither
-// appears in this list. Only people with the designation "Loader" are listed — the designation on
-// User Management must be exactly "Loader" (case and extra spaces ignored).
-//
-// They must also hold the order's plant, which is applied below — so every name here is a name
-// that can actually be assigned.
+// A LOADER is someone whose designation on User Management is "Loader" (case and extra spaces ignored) and who has VIEW access to Sort Slip - view access is what lets a person
+// open a slip assigned to them and record picks. Write access is not needed. Admins assign the work, so they never appear. They must also hold the order's plant.
+// Anyone with the designation "Loader" who does not qualify comes back in `excluded` with the reason, so the picker can say what to fix on User Management.
 //
 // `plant` is optional only for the case where no order has been chosen yet.
-router.get('/sort-slips/loaders', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.get('/sort-slips/loaders', requireSupervisor, async (req: Request, res: Response) => {
   try {
     const plant = String(req.query.plant ?? '').trim();
     const { rows } = await pool.query(
       `SELECT u.user_code AS "userCode", u.name, u.username, u.department, u.designation,
-              u.plants, u.role,
+              u.plants, u.role, u.allowed_pages AS "allowedPages",
               a.sort_slip_id AS "activeSlipId", s.order_number AS "activeOrderNumber"
          FROM users u
          LEFT JOIN sort_slip_assignees a ON a.user_code = u.user_code AND a.is_active
          LEFT JOIN sort_slips s ON s.id = a.sort_slip_id
-        WHERE COALESCE(u.allowed_pages, '') LIKE '%sort-slip%'
-          AND COALESCE(u.page_write_access, '') NOT LIKE '%sort-slip%'
-          AND NOT (LOWER(COALESCE(u.role, '')) = ANY($1))
+        WHERE NOT (LOWER(COALESCE(u.role, '')) = ANY($1))
           AND LOWER(TRIM(COALESCE(u.designation, ''))) = 'loader'
         ORDER BY u.name NULLS LAST, u.username`,
       [WRITE_ADMIN_ROLES],
@@ -328,32 +367,40 @@ router.get('/sort-slips/loaders', requirePageWrite('sort-slip'), async (req: Req
     // The plant test runs here rather than in SQL: users.plants is free-form text holding JSON
     // (and a few rows hold a malformed version of it), so it is read with the same parser the
     // rest of the app uses instead of being pattern-matched in the query.
-    const list = plant
-      ? rows.filter((row: any) => {
-          const allowed = getUserPlants(row);
-          return allowed === null || allowed.includes(normalize(plant));
-        })
-      : rows;
-    res.json(list);
+    const loaders: any[] = [];
+    const excluded: Array<{ userCode: string; name: string | null; reason: string }> = [];
+    for (const { allowedPages, ...row } of rows as any[]) {
+      let pages: string[] = [];
+      try { pages = JSON.parse(allowedPages || '[]'); } catch { /* none */ }
+      const label = row.name || row.username || row.userCode;
+      if (!pages.includes('sort-slip')) { excluded.push({ userCode: row.userCode, name: label, reason: 'does not have the Sort Slip page (give it View access)' }); continue; }
+      if (plant) {
+        const allowed = getUserPlants(row);
+        if (allowed !== null && !allowed.includes(normalize(plant))) { excluded.push({ userCode: row.userCode, name: label, reason: `has no access to the plant ${plant}` }); continue; }
+      }
+      loaders.push(row);
+    }
+    res.json({ loaders, excluded });
   } catch (error) {
     console.error('[Sort Slip] loaders failed:', error);
     res.status(500).json({ message: 'Failed to load the loader list' });
   }
 });
 
-// GET /sort-slips/supervisors — real Sort Slip supervisors only (write access to the page) —
+// GET /sort-slips/supervisors — real Sort Slip supervisors only (designation "Supervisor" with write access to the page) —
 // admins are deliberately left out: they can already manage every slip regardless of who
 // managed_by_code names (see canManageAssignment's admin bypass), so naming one as the new
 // "owner" would be a no-op that just clutters the picker. Powers the "Transfer to Supervisor"
 // picker (POST /sort-slips/transfer-supervisor) — the caller themself is filtered out
 // client-side (handing a slip to yourself is a no-op), not here.
-router.get('/sort-slips/supervisors', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.get('/sort-slips/supervisors', requireSupervisor, async (req: Request, res: Response) => {
   try {
     const { rows } = await pool.query(
       `SELECT u.user_code AS "userCode", u.name, u.username, u.department, u.designation,
               u.plants, u.role
          FROM users u
         WHERE COALESCE(u.page_write_access, '') LIKE '%sort-slip%'
+          AND LOWER(TRIM(COALESCE(u.designation, ''))) = 'supervisor'
           AND NOT (LOWER(COALESCE(u.role, '')) = ANY($1))
         ORDER BY u.name NULLS LAST, u.username`,
       [WRITE_ADMIN_ROLES],
@@ -368,7 +415,7 @@ router.get('/sort-slips/supervisors', requirePageWrite('sort-slip'), async (req:
 // GET /sort-slips/orders/search — proforma orders that can become a sort slip.
 // Orders that already have one are returned too, flagged, rather than hidden: "it's already
 // sorted" is a more useful answer than an empty result.
-router.get('/sort-slips/orders/search', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.get('/sort-slips/orders/search', requireSupervisor, async (req: Request, res: Response) => {
   try {
     const term = String(req.query.q ?? '').trim();
     const params: any[] = [];
@@ -410,7 +457,7 @@ router.get('/sort-slips/orders/search', requirePageWrite('sort-slip'), async (re
 // The order's own header and item list, read straight from the proforma slip, because at this
 // point no sort slip exists yet to read them through. Same shape as the create card on the
 // Loading page: a supervisor sees what they are about to hand out before they hand it out.
-router.get('/sort-slips/orders/:orderNumber/preview', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.get('/sort-slips/orders/:orderNumber/preview', requireSupervisor, async (req: Request, res: Response) => {
   try {
     const orderNumber = decodeURIComponent(req.params.orderNumber);
     const { rows } = await pool.query(
@@ -649,7 +696,7 @@ router.get('/sort-slips/:id(\\d+)/history', requirePageAccess('sort-slip'), asyn
 // The loader is required and the whole thing is all-or-nothing: if they cannot take it (busy on
 // another slip, no page access, not this plant), no slip is created at all. A slip with nobody on
 // it would sit in the list looking like work in progress that nobody is doing.
-router.post('/sort-slips', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.post('/sort-slips', requireSupervisor, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const orderNumber = String(req.body?.orderNumber ?? '').trim();
@@ -696,7 +743,7 @@ router.post('/sort-slips', requirePageWrite('sort-slip'), async (req: Request, r
       return res.status(400).json({ message: 'That person has not been given the Sort Slip page — grant it on User Management first' });
     }
     if (check === 'supervisor') {
-      return res.status(400).json({ message: 'That person has write access to Sort Slip — supervisors assign the work, they are not given it' });
+      return res.status(400).json({ message: 'That person is an admin — admins assign the work, they are not given it' });
     }
     if (check === 'designation') {
       return res.status(400).json({ message: 'Only a person with the designation "Loader" can be given a sort slip' });
@@ -791,7 +838,7 @@ async function addAssignee(client: any, slipId: number, userCode: string, byCode
 // a finished sort and stays. Removing a completed one means reopening it first, which is itself a
 // supervisor action and leaves its own trail. The picks, the assignee and the handoffs go with it
 // (ON DELETE CASCADE), which is why the page names how much picked work is about to be lost.
-router.delete('/sort-slips/:id(\\d+)', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.delete('/sort-slips/:id(\\d+)', requireSupervisor, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
     const slip = await getSlipById(id);
@@ -890,7 +937,7 @@ async function matchPicksToTargetOrder(client: any, oldSlipId: number, targetOrd
 
 // GET /sort-slips/:id/replace-preview?targetOrderNumber=X — "would this work?", before anyone
 // commits to it. Read-only: runs the exact same matching function the real replace does.
-router.get('/sort-slips/:id(\\d+)/replace-preview', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.get('/sort-slips/:id(\\d+)/replace-preview', requireSupervisor, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
     const targetOrderNumber = String(req.query.targetOrderNumber ?? '').trim();
@@ -935,7 +982,7 @@ router.get('/sort-slips/:id(\\d+)/replace-preview', requirePageWrite('sort-slip'
 // All-or-nothing: re-runs the SAME matching the preview showed, inside the transaction, and
 // refuses the whole thing if even one picked item has no home on the target order — never a
 // partial move that quietly drops some of the work.
-router.post('/sort-slips/:id(\\d+)/replace', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.post('/sort-slips/:id(\\d+)/replace', requireSupervisor, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);
@@ -1047,7 +1094,7 @@ router.post('/sort-slips/:id(\\d+)/replace', requirePageWrite('sort-slip'), asyn
 // moves a loader off work someone else put them on, so it's limited to whoever currently owns
 // the assignment (see canManageAssignment) — plus a loader can never move their own work onto
 // somebody else regardless, since that path never had write access to begin with.
-router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.post('/sort-slips/:id(\\d+)/transfer', requireSupervisor, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);
@@ -1090,7 +1137,7 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
       await client.query('ROLLBACK');
       return res.status(409).json({
         message: toCheck === 'supervisor'
-          ? 'That person has write access to Sort Slip — supervisors assign the work, they are not given it'
+          ? 'That person is an admin — admins assign the work, they are not given it'
           : toCheck === 'designation'
             ? 'Only a person with the designation "Loader" can be given a sort slip'
             : 'That person has not been given the Sort Slip page — grant it on User Management first',
@@ -1147,7 +1194,7 @@ router.post('/sort-slips/:id(\\d+)/transfer', requirePageWrite('sort-slip'), asy
 // rather than opening each one. Each slip is checked and updated independently so one bad id in
 // the batch (already someone else's, already completed, wrong plant) doesn't block the rest —
 // the response says which ones actually moved.
-router.post('/sort-slips/transfer-supervisor', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.post('/sort-slips/transfer-supervisor', requireSupervisor, async (req: Request, res: Response) => {
   try {
     const slipIds = Array.isArray(req.body?.slipIds)
       ? req.body.slipIds.map((v: any) => parseInt(v, 10)).filter((v: number) => Number.isFinite(v))
@@ -1162,15 +1209,15 @@ router.post('/sort-slips/transfer-supervisor', requirePageWrite('sort-slip'), as
     }
 
     const toRows = await pool.query(
-      `SELECT user_code, name, username, role, plants, page_write_access FROM users WHERE user_code = $1`,
+      `SELECT user_code, name, username, role, plants, designation, page_write_access FROM users WHERE user_code = $1`,
       [toSupervisorCode],
     );
     const toUser = toRows.rows[0];
     if (!toUser) return res.status(404).json({ message: 'That supervisor was not found' });
     const toIsSupervisor = WRITE_ADMIN_ROLES.includes(String(toUser.role ?? '').toLowerCase())
-      || (() => { try { return (JSON.parse(toUser.page_write_access || '[]') as string[]).includes('sort-slip'); } catch { return false; } })();
+      || (isDesignation(toUser.designation, 'supervisor') && (() => { try { return (JSON.parse(toUser.page_write_access || '[]') as string[]).includes('sort-slip'); } catch { return false; } })());
     if (!toIsSupervisor) {
-      return res.status(400).json({ message: 'That person does not have write access to Sort Slip' });
+      return res.status(400).json({ message: 'Only a Supervisor with write access to Sort Slip can take these slips' });
     }
     const toUserName = toUser.name || toUser.username || toUser.user_code;
 
@@ -1216,7 +1263,7 @@ router.post('/sort-slips/transfer-supervisor', requirePageWrite('sort-slip'), as
 // assigned or transferred this slip's active loader (sort_slip_assignees.assignedByCode on the
 // live row) — plus admins. A slip that's just been transferred is owned by whoever did that
 // transfer, not whoever originally created it.
-router.post('/sort-slips/:id(\\d+)/pause', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.post('/sort-slips/:id(\\d+)/pause', requireSupervisor, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);
@@ -1253,7 +1300,7 @@ router.post('/sort-slips/:id(\\d+)/pause', requirePageWrite('sort-slip'), async 
 // A slip never completes itself, even when every line is fully picked: closing it is a decision,
 // and it is what frees its loaders for their next slip. Short slips can be closed too — the page
 // shows the shortfall first.
-router.post('/sort-slips/:id(\\d+)/complete', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.post('/sort-slips/:id(\\d+)/complete', requireSupervisor, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);
@@ -1284,7 +1331,7 @@ router.post('/sort-slips/:id(\\d+)/complete', requirePageWrite('sort-slip'), asy
 // POST /sort-slips/:id/reopen — put a completed slip back to work.
 // Its loaders are only made active again if they are still free: someone may have been given
 // another slip in the meantime, and the one-active-slip rule still holds.
-router.post('/sort-slips/:id(\\d+)/reopen', requirePageWrite('sort-slip'), async (req: Request, res: Response) => {
+router.post('/sort-slips/:id(\\d+)/reopen', requireSupervisor, async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);
@@ -1424,6 +1471,65 @@ router.post('/sort-slips/:id(\\d+)/pick', requirePickAccess, async (req: Request
     await client.query('ROLLBACK').catch(() => {});
     console.error('[Sort Slip] pick failed:', error);
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to record the pick' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /sort-slips/:id/adjust-pick - body { itemId, delta }: the + / - buttons beside an item's picked quantity (the same as Load Operation's). A positive delta adds that
+// many to the picked quantity (never past what the order asks for); a negative one takes that many back (never below zero). Both are written as their own entry - a
+// negative qty for a take-back - so the history shows "+60, then -20" rather than a number that quietly changed. Same locking as a pick, so two people tapping at once
+// cannot push a line past its order quantity.
+router.post('/sort-slips/:id(\\d+)/adjust-pick', requirePickAccess, async (req: Request, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const id = parseInt(req.params.id, 10);
+    const itemId = parseInt(String(req.body?.itemId ?? ''), 10);
+    const delta = parseInt(String(req.body?.delta ?? ''), 10);
+    if (!Number.isFinite(itemId)) return res.status(400).json({ message: 'Pick an item first' });
+    if (!Number.isFinite(delta) || delta === 0 || Math.abs(delta) > 1000000) return res.status(400).json({ message: 'Enter a quantity greater than zero' });
+
+    await client.query('BEGIN');
+    const slip = (await client.query(`SELECT * FROM sort_slips WHERE id = $1 FOR UPDATE`, [id])).rows[0];
+    if (!slip) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Sort slip not found' }); }
+    if (slip.status === 'completed') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: 'This sort slip is completed — ask a supervisor to reopen it' });
+    }
+    if (!canAccessPlant(req, slip.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Plant access required' }); }
+
+    const item = (await client.query(
+      `SELECT i.id, i.sr_no, i.barcode, i.item_name, COALESCE(i.quantity, 0)::int AS expected
+         FROM proforma_slip_items i WHERE i.id = $1 AND i.proforma_slip_id = $2`,
+      [itemId, slip.proforma_slip_id],
+    )).rows[0];
+    if (!item) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'That item is not on this order' }); }
+
+    const picked: number = (await client.query(
+      `SELECT COALESCE(SUM(qty), 0)::int AS picked FROM sort_slip_picks WHERE proforma_slip_item_id = $1 AND NOT voided`, [itemId])).rows[0]?.picked ?? 0;
+    const name = item.item_name ?? 'This item';
+    if (delta > 0 && delta > item.expected - picked) {
+      await client.query('ROLLBACK');
+      const remaining = Math.max(0, item.expected - picked);
+      return res.status(400).json({ message: remaining <= 0 ? `${name} is already fully picked` : `Only ${remaining} left on ${name}`, remaining });
+    }
+    if (delta < 0 && -delta > picked) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ message: picked <= 0 ? `Nothing is picked on ${name} to take back` : `Only ${picked} is picked on ${name}`, picked });
+    }
+
+    const { userCode, userName } = actor(req);
+    await client.query(
+      `INSERT INTO sort_slip_picks (sort_slip_id, order_number, proforma_slip_item_id, barcode, sr_no, item_name, qty, picked_by_code, picked_by_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [id, slip.order_number, itemId, item.barcode, item.sr_no, item.item_name, delta, userCode, userName],
+    );
+    await client.query('COMMIT');
+    res.json({ itemId, pickedQty: picked + delta, expectedQty: item.expected, remaining: item.expected - picked - delta });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[Sort Slip] adjust-pick failed:', error);
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to change the picked quantity' });
   } finally {
     client.release();
   }

@@ -61,8 +61,11 @@ router.get('/stock-v2/report', requirePageAccess(PAGE), async (req: Request, res
              FROM stock_v2_daily WHERE line_id = l.id
          ) d ON true
          LEFT JOIN LATERAL (
-           SELECT SUM(CASE WHEN $1::date IS NOT NULL AND stock_date < $1::date THEN qty ELSE 0 END) AS opening,
-                  SUM(CASE WHEN ($1::date IS NULL OR stock_date >= $1::date) AND ($2::date IS NULL OR stock_date <= $2::date) THEN qty END) AS adj
+           -- An 'opening' entry (the Settings import, a fresh start) is always Opening, whatever From is picked - never Adjust - as long as it is dated on or
+           -- before To. Every other correction is Opening when dated before From, and Adjust when inside the period.
+           SELECT SUM(CASE WHEN kind = 'opening' THEN (CASE WHEN $2::date IS NULL OR stock_date <= $2::date THEN qty ELSE 0 END)
+                           WHEN $1::date IS NOT NULL AND stock_date < $1::date THEN qty ELSE 0 END) AS opening,
+                  SUM(CASE WHEN kind <> 'opening' AND ($1::date IS NULL OR stock_date >= $1::date) AND ($2::date IS NULL OR stock_date <= $2::date) THEN qty END) AS adj
              FROM stock_v2_ledger WHERE line_id = l.id
          ) a ON true
         ${where.length ? 'WHERE ' + where.join(' AND ') : ''}

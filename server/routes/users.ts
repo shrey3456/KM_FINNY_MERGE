@@ -5,6 +5,7 @@ import { pool } from "../db";
 import { insertUserSchema } from "@shared/schema";
 import { requirePageWrite } from "../lib/pageAccess";
 import { assertUserCodeFree, renameUserCode, UserCodeError } from "../lib/userCodeRename";
+import { sortSlipRoleBlock } from "../lib/sortSlipRoleGuard";
 
 const router = Router();
 
@@ -130,6 +131,14 @@ router.put("/users/:userCode", requirePageWrite("user-management"), async (req: 
     }
 
     const userData = insertUserSchema.partial().parse(req.body);
+    // Sort Slip: a Supervisor or Loader cannot be moved out of that role (designation or page access) while they still hold open slips - transfer or complete them first.
+    const blocked = await sortSlipRoleBlock(userCode, user as any, {
+      role: userData.role ?? user.role,
+      designation: userData.designation !== undefined ? userData.designation : user.designation,
+      allowedPages: userData.allowedPages !== undefined ? userData.allowedPages : user.allowedPages,
+      pageWriteAccess: userData.pageWriteAccess !== undefined ? userData.pageWriteAccess : user.pageWriteAccess,
+    });
+    if (blocked) return res.status(409).json({ message: blocked, type: "sort_slip_open_work" });
     // A changed User Code is checked first (not empty, not used), the other fields are saved, and then the code is renamed everywhere (every table that names the
     // user, and their sign-in) in one transaction.
     const newCode = userData.userCode !== undefined ? await assertUserCodeFree(userData.userCode, userCode) : userCode;

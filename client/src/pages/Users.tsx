@@ -338,6 +338,8 @@ const Users = () => {
     onSuccess: () => {
       toast({ title: "Success", description: "User created successfully" });
       queryClient.invalidateQueries({ queryKey: ['/api/users'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sort-slips/loaders'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sort-slips/supervisors'] });
       addUserForm.reset({
         userCode: "", username: "", pin: "", name: "",
         role: "read", department: "", designation: "",
@@ -364,6 +366,10 @@ const Users = () => {
     onSuccess: () => {
       toast({ title: "Success", description: "User updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['/api/users'] });
+      // A designation, page or plant change shows up at once in Sort Slip's loader/supervisor lists and in the signed-in user's own access.
+      queryClient.invalidateQueries({ queryKey: ['/api/sort-slips/loaders'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sort-slips/supervisors'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/user'] });
       setIsEditDialogOpen(false);
     },
     onError: (error) => {
@@ -379,6 +385,8 @@ const Users = () => {
         if (!Array.isArray(oldData)) return oldData;
         return oldData.filter((user: User) => user.userCode !== userCode);
       });
+      queryClient.invalidateQueries({ queryKey: ['/api/sort-slips/loaders'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/sort-slips/supervisors'] });
       toast({ title: "Success", description: "User deleted successfully" });
       setIsDeleteDialogOpen(false);
     },
@@ -785,6 +793,29 @@ const Users = () => {
             </FormItem>
           );
         }} />
+
+        {/* Sort Slip: the designation decides the role, and the access has to match it. Nothing is changed for you - this only says what to tick. */}
+        {(() => {
+          if (isAdminRole) return null;
+          const designation = String(form.watch("designation") ?? "").trim().toLowerCase();
+          const pages: string[] = form.watch("allowedPages") ?? [];
+          const writes: string[] = form.watch("pageWriteAccess") ?? [];
+          const notes: string[] = [];
+          if (designation === "loader") {
+            if (!pages.includes("sort-slip")) notes.push("A Loader needs the Sort Slip page in Allowed Pages (view access) to be given slips.");
+            if (writes.includes("sort-slip")) notes.push("A Loader only needs view access to Sort Slip - write access is not needed.");
+          } else if (designation === "supervisor") {
+            if (!pages.includes("sort-slip") || !writes.includes("sort-slip")) notes.push("A Supervisor needs Sort Slip in both Allowed Pages and Write Access to create and assign slips.");
+          } else if (writes.includes("sort-slip")) {
+            notes.push("Only the designation Supervisor can create and assign Sort Slips - write access on Sort Slip does nothing for this designation.");
+          }
+          if (notes.length === 0) return null;
+          return (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {notes.map((n) => <p key={n}>{n}</p>)}
+            </div>
+          );
+        })()}
         </FormSection>
       </div>
     );
