@@ -168,7 +168,7 @@ export function ResetPlanningDialog({ open, onOpenChange, onRefreshNow }: { open
 
 export type LastReset = { id: number; at: string; byName: string | null; startDate: string | null };
 
-export function ResetBanner({ planningStartDate, lastReset, isAdmin, onRefreshNow }: { planningStartDate: string | null; lastReset: LastReset | null; isAdmin: boolean; onRefreshNow: () => void }) {
+export function ResetBanner({ planningStartDate, lastReset, lastRefreshedAt, isAdmin, onRefreshNow, onResetAgain }: { planningStartDate: string | null; lastReset: LastReset | null; lastRefreshedAt: string | null; isAdmin: boolean; onRefreshNow: () => void; onResetAgain: () => void }) {
   const { toast } = useToast();
   const [sure, setSure] = useState(false);
   const [dateOpen, setDateOpen] = useState(false);
@@ -198,19 +198,20 @@ export function ResetBanner({ planningStartDate, lastReset, isAdmin, onRefreshNo
     onError: (err: any) => toast({ title: "Could not save", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
-  if (!lastReset && !planningStartDate) return null;
-  const when = lastReset ? new Date(lastReset.at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true }) : null;
+  // The line is only for the moment between the reset and the next Refresh from Notion; once a Refresh has run since, it goes away
+  // (the start date and Reset planning stay in the Companies settings).
+  if (!lastReset || (lastRefreshedAt && new Date(lastRefreshedAt) > new Date(lastReset.at))) return null;
+  const when = new Date(lastReset.at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true });
 
   return (
     <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
       <RotateCcw className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0">
-        {lastReset ? <>Planning was reset on <strong>{when}</strong>{lastReset.byName ? <> by {lastReset.byName}</> : null}. </> : null}
-        Refresh from Notion starts from <strong>{fmtDay(planningStartDate)}</strong>.
+        Planning was reset on <strong>{when}</strong>{lastReset.byName ? <> by {lastReset.byName}</> : null}. {planningStartDate ? <>Refresh from Notion starts from <strong>{fmtDay(planningStartDate)}</strong>.</> : <>Press Refresh from Notion to bring the orders in.</>}
       </span>
       {isAdmin && (
         <span className="flex flex-wrap items-center gap-1.5">
-          {lastReset && (sure ? (
+          {(sure ? (
             <>
               <span className="font-medium">Put everything back?</span>
               <Button size="sm" className="h-7 px-2.5 text-xs" disabled={undoMutation.isPending} onClick={() => undoMutation.mutate()}>
@@ -237,8 +238,37 @@ export function ResetBanner({ planningStartDate, lastReset, isAdmin, onRefreshNo
             </PopoverContent>
           </Popover>
           <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onRefreshNow}><RefreshCw className="mr-1 h-3.5 w-3.5" /> Refresh from Notion</Button>
+          <Button size="sm" variant="outline" className="h-7 border-red-200 bg-white px-2.5 text-xs text-red-700 hover:bg-red-50 hover:text-red-800" onClick={onResetAgain}><RotateCcw className="mr-1 h-3.5 w-3.5" /> Reset planning</Button>
         </span>
       )}
+    </div>
+  );
+}
+
+// The start-fresh day as a row inside the Companies settings (the banner above is only there until the next Refresh).
+export function PlanningStartDateRow({ planningStartDate }: { planningStartDate: string | null }) {
+  const { toast } = useToast();
+  const [draft, setDraft] = useState("");
+  useEffect(() => { setDraft(planningStartDate ?? ""); }, [planningStartDate]);
+  const save = useMutation({
+    mutationFn: async (startDate: string | null) => {
+      const res = await apiRequest("POST", "/api/vehicle-planning/start-date", { startDate });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to save the start date");
+      return res.json();
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: fleetKey }),
+    onError: (err: any) => toast({ title: "Could not save", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Refresh from Notion starts from</div>
+      <Input type="date" value={draft} onChange={(e) => setDraft(e.target.value)} className="h-8 text-xs" />
+      <div className="flex items-center justify-between gap-2">
+        <button type="button" className="text-[11px] text-gray-500 underline decoration-dotted hover:text-red-600 disabled:opacity-40" disabled={!planningStartDate || save.isPending} onClick={() => save.mutate(null)}>Remove the date</button>
+        <Button size="sm" className="h-7 px-3 text-xs" disabled={!draft || draft === (planningStartDate ?? "") || save.isPending} onClick={() => save.mutate(draft)}>
+          {save.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save"}
+        </Button>
+      </div>
     </div>
   );
 }

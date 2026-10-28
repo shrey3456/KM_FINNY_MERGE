@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, RefreshCw, RotateCcw, Search, Truck, Undo2,
+  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, ListFilter, RefreshCw, RotateCcw, Search, Truck, Undo2,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -23,7 +22,7 @@ import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 import { SyncProgressDialog } from "@/components/SyncProgressDialog";
 import { withNotionNotice } from "@/lib/notionSyncNotice";
-import { ExtendReasonDialog, ResetBanner, ResetPlanningDialog, type LastReset } from "@/components/VehiclePlanningReset";
+import { ExtendReasonDialog, PlanningStartDateRow, ResetBanner, ResetPlanningDialog, type LastReset } from "@/components/VehiclePlanningReset";
 
 // Vehicle Planning: a Gantt-style fleet timeline (rows = Krupa's vehicles, columns = days) plus
 // the assign-a-vehicle-to-an-order workflow. Each vehicle's bar spans its current order's start
@@ -184,7 +183,8 @@ export default function VehiclePlanning() {
   const [availableOn, setAvailableOn] = usePersistentFilter<string>("vehiclePlanning:availableOn", "");
   const [availableOpen, setAvailableOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [showNoHistory, setShowNoHistory] = useState(false);
+  // Which vehicles to list: only those with orders (default), all of them, or only those with no orders (the ones free to assign).
+  const [orderView, setOrderView] = usePersistentFilter<"with" | "all" | "none">("vehiclePlanning:orderView", "with");
   const [search, setSearch] = useState("");
   // Plant / State / Driver — each a simple multi-select (empty array = no restriction), same
   // "show only what's checked" idea as the Companies filter, just derived from whatever values
@@ -192,9 +192,7 @@ export default function VehiclePlanning() {
   const [plantFilter, setPlantFilter] = usePersistentFilter<string[]>("vehiclePlanning:plantFilter", []);
   const [stateFilter, setStateFilter] = usePersistentFilter<string[]>("vehiclePlanning:stateFilter", []);
   const [driverFilter, setDriverFilter] = usePersistentFilter<string[]>("vehiclePlanning:driverFilter", []);
-  const [plantFilterOpen, setPlantFilterOpen] = useState(false);
-  const [stateFilterOpen, setStateFilterOpen] = useState(false);
-  const [driverFilterOpen, setDriverFilterOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   // Sort — click Vehicle or Order No. to toggle; switching to a column that wasn't already
   // sorted always starts ascending (never inherits whatever direction the other column was on),
   // clicking the same column again flips asc<->desc. null = whatever order the server returned.
@@ -608,7 +606,11 @@ export default function VehiclePlanning() {
       if (tripFilter === "awaiting" && v.vehicleState !== "awaiting") return false;
       if (tripFilter === "conflicts" && !(v.conflicts?.length)) return false;
       if (availableOn && !isAvailableOn(v, availableOn)) return false;
-      return showNoHistory || v.hasHistory || !!v.showAlways || !!searchLower;
+      // A vehicle with no orders is free on every day, so when the Available filter is on it is listed even with the switch off.
+      if (orderView === "none") return !v.hasHistory;
+      if (orderView === "all") return true;
+      // Exactly what it says: only vehicles that have orders (a search can still surface one that has none).
+      return v.hasHistory || !!searchLower;
     })
     .sort((a, b) => {
       if (!sortBy) return 0;
@@ -636,38 +638,46 @@ export default function VehiclePlanning() {
 
   // The trips to draw for one vehicle, each on a lane: trips that overlap in time (a conflict) go on separate lanes
   // so neither bar hides the other. Cancelled trips are not drawn.
-  function tripLanes(v: VehicleRow): { trip: Trip; lane: number; startIdx: number; endIdx: number; labelEndIdx: number; conflict: boolean }[] {
+  // A trip of two or more days ends at the MIDDLE of its last day (the vehicle is back by then and can go out again), and a trip that starts on
+  // such a day begins at the middle - so the previous and the new trip sit end to end on that day. A one-day trip fills its day.
+  const endsHalf = (t: Trip) => t.freeFromDay === t.lastBusyDay && t.startDay < t.lastBusyDay;
+  function tripLanes(v: VehicleRow): { trip: Trip; lane: number; startIdx: number; endIdx: number; drawStart: number; drawEnd: number; labelEndIdx: number; conflict: boolean }[] {
     const shown = (v.trips ?? []).filter((t) => t.state !== "cancelled");
     const laneEnds: number[] = [];
     const conflictSet = new Set((v.conflicts ?? []).map((c) => c.orderNumber));
     const placed = shown.map((trip) => {
       const s0 = dayIdx(trip.startDay);
       const e0 = dayIdx(trip.lastBusyDay) + 1; // exclusive: the bar covers the last busy day itself
-      let lane = laneEnds.findIndex((end) => end <= s0);
-      if (lane < 0) { lane = laneEnds.length; laneEnds.push(e0); } else laneEnds[lane] = e0;
-      return { trip, lane, s0, e0, conflict: conflictSet.has(trip.orderNumber) };
+      const startHalf = shown.some((q) => q !== trip && endsHalf(q) && q.lastBusyDay === trip.startDay);
+      const sf = s0 + (startHalf ? 0.5 : 0);
+      const ef = e0 - (endsHalf(trip) ? 0.5 : 0);
+      let lane = laneEnds.findIndex((end) => end <= sf);
+      if (lane < 0) { lane = laneEnds.length; laneEnds.push(ef); } else laneEnds[lane] = ef;
+      return { trip, lane, s0, e0, sf, ef, conflict: conflictSet.has(trip.orderNumber) };
     });
     return placed
       .filter((p) => p.e0 > 0 && p.s0 < windowDays)
       .map((p) => {
-        const nextOnLane = placed.filter((q) => q.lane === p.lane && q.s0 > p.s0).map((q) => q.s0).sort((a, b) => a - b)[0];
+        const nextOnLane = placed.filter((q) => q.lane === p.lane && q.sf > p.sf).map((q) => q.sf).sort((a, b) => a - b)[0];
         return {
           trip: p.trip, lane: p.lane, conflict: p.conflict,
           startIdx: Math.max(0, p.s0), endIdx: Math.min(windowDays, p.e0),
+          drawStart: p.s0 < 0 ? 0 : p.sf, drawEnd: p.e0 > windowDays ? windowDays : p.ef,
           labelEndIdx: Math.min(windowDays, nextOnLane ?? windowDays),
         };
       });
   }
+
   const LANE_HEIGHT = 42;
 
   function tripBarClass(state: TripState, conflict: boolean) {
     if (conflict) return "bg-red-500";
     switch (state) {
-      case "planned": return "border border-dashed border-emerald-600 bg-emerald-100";
+      case "planned": return "border border-dashed border-blue-600 bg-blue-200";   // new: not started yet
       case "awaiting": return "bg-amber-400";
-      case "arrived": return "bg-slate-500";
-      case "closed": return "bg-slate-300";
-      default: return "bg-emerald-600";
+      case "arrived": return "bg-slate-400";                                          // past
+      case "closed": return "bg-slate-300";                                           // past
+      default: return "bg-emerald-600";                                               // current: on the trip now
     }
   }
   const stateText: Record<TripState, string> = {
@@ -764,133 +774,11 @@ export default function VehiclePlanning() {
       />
 
       {/* After a Reset planning: when, by whom, the day Refresh from Notion starts from, and Undo (7 days). */}
-      <ResetBanner planningStartDate={fleetQuery.data?.planningStartDate ?? null} lastReset={fleetQuery.data?.lastReset ?? null} isAdmin={canWrite && isAdmin} onRefreshNow={() => syncMutation.mutate()} />
+      <ResetBanner planningStartDate={fleetQuery.data?.planningStartDate ?? null} lastReset={fleetQuery.data?.lastReset ?? null} lastRefreshedAt={fleetQuery.data?.lastRefreshedAt ?? null} isAdmin={canWrite && isAdmin} onRefreshNow={() => syncMutation.mutate()} onResetAgain={() => setResetOpen(true)} />
 
-      {/* Fleet controls — Sync from Notion (the only thing that ever talks to Notion; the page
-          itself just reads vehicle_planning_state), which companies to include, search, and
-          whether to show vehicles with no order history at all (hidden by default). */}
+      {/* Fleet controls - search at the left; Companies (with the planning settings); at the right Filter, Available and Refresh from Notion
+          (the only thing that ever talks to Notion; the page itself just reads vehicle_planning_state). */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 rounded-full px-3 text-xs"
-          onClick={() => syncMutation.mutate()}
-          disabled={syncMutation.isPending}
-        >
-          <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
-          {syncMutation.isPending ? "Refreshing…" : "Refresh from Notion"}
-        </Button>
-        {canWrite && isAdmin && (
-          <Button size="sm" variant="outline" className="h-8 rounded-full border-red-200 px-3 text-xs text-red-700 hover:bg-red-50 hover:text-red-800" onClick={() => setResetOpen(true)}
-            title="Clear our planning board and start again from a day. Notion is not changed.">
-            <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> Reset planning
-          </Button>
-        )}
-        {/* Nothing refreshes this page by itself, so say how old the data is. */}
-        <span className="text-[11px] text-gray-500" title="Vehicle Planning reads Notion only when you press Refresh">
-          Last refreshed: {fleetQuery.data?.lastRefreshedAt
-            ? new Date(fleetQuery.data.lastRefreshedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true })
-            : "never"}
-        </span>
-
-        <Popover open={filterOpen} onOpenChange={setFilterOpen}>
-          <PopoverTrigger asChild>
-            <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs">
-              Companies{activeCompanyFilters.length > 0 ? ` (${activeCompanyFilters.length})` : ""}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-56 space-y-2" align="start">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Include companies</div>
-            <div className="max-h-56 space-y-1.5 overflow-y-auto">
-              {availableCompanies.map((company) => {
-                const checked = checkedCompanies.includes(company);
-                return (
-                  <label key={company} className="flex items-center gap-2 text-xs text-gray-700">
-                    <Checkbox
-                      checked={checked}
-                      onCheckedChange={(next) => toggleCompany(company, next === true)}
-                    />
-                    {company}
-                  </label>
-                );
-              })}
-              {availableCompanies.length === 0 && (
-                <div className="py-2 text-center text-xs text-gray-400">No companies found</div>
-              )}
-            </div>
-          </PopoverContent>
-        </Popover>
-
-        {/* Plant / State / Driver — simple local multi-selects, same checkbox-list shape as
-            Companies above but purely client-side (no settings row to save to; these just
-            narrow what's currently displayed). */}
-        {([
-          { label: "Plant", open: plantFilterOpen, setOpen: setPlantFilterOpen, options: availablePlants, active: plantFilter, setActive: setPlantFilter },
-          { label: "State", open: stateFilterOpen, setOpen: setStateFilterOpen, options: availableStates, active: stateFilter, setActive: setStateFilter },
-          { label: "Driver", open: driverFilterOpen, setOpen: setDriverFilterOpen, options: availableDrivers, active: driverFilter, setActive: setDriverFilter },
-        ] as const).map((f) => (
-          <Popover key={f.label} open={f.open} onOpenChange={f.setOpen}>
-            <PopoverTrigger asChild>
-              <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs">
-                {f.label}{f.active.length > 0 ? ` (${f.active.length})` : ""}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-56 space-y-2" align="start">
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{f.label}</div>
-                {f.active.length > 0 && (
-                  <button type="button" className="text-[11px] text-gray-400 hover:text-red-500" onClick={() => f.setActive([])}>
-                    Clear
-                  </button>
-                )}
-              </div>
-              <div className="max-h-56 space-y-1.5 overflow-y-auto">
-                {f.options.map((opt) => {
-                  const checked = f.active.includes(opt);
-                  return (
-                    <label key={opt} className="flex items-center gap-2 text-xs text-gray-700">
-                      <Checkbox
-                        checked={checked}
-                        onCheckedChange={(next) => {
-                          f.setActive(next ? [...f.active, opt] : f.active.filter((x) => x !== opt));
-                        }}
-                      />
-                      {opt}
-                    </label>
-                  );
-                })}
-                {f.options.length === 0 && (
-                  <div className="py-2 text-center text-xs text-gray-400">None found</div>
-                )}
-              </div>
-            </PopoverContent>
-          </Popover>
-        ))}
-
-        {/* Available: the vehicles that are free on a day you pick (by their arrival / trip end). */}
-        <Popover open={availableOpen} onOpenChange={setAvailableOpen}>
-          <PopoverTrigger asChild>
-            <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${availableOn ? "border-emerald-500 bg-emerald-50 text-emerald-800" : ""}`}>
-              <Truck className="mr-1.5 h-3.5 w-3.5" />
-              {availableOn ? `Available on ${dayLabel(availableOn)}` : "Available"}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-72 space-y-3" align="start">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Vehicles free on</div>
-            <Input type="date" value={availableOn || format(new Date(), "yyyy-MM-dd")} onChange={(e) => setAvailableOn(e.target.value)} className="h-9" />
-            <div className="flex flex-wrap gap-1.5">
-              <button type="button" className={chipCls(availableOn === format(new Date(), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(new Date(), "yyyy-MM-dd"))}>Today</button>
-              <button type="button" className={chipCls(availableOn === format(addDays(new Date(), 1), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(addDays(new Date(), 1), "yyyy-MM-dd"))}>Tomorrow</button>
-            </div>
-            <div className="flex items-center justify-between border-t pt-2 text-xs">
-              <span className="text-gray-500">
-                {availableOn ? `${allVehicles.filter((v) => isAvailableOn(v, availableOn) && (showNoHistory || v.hasHistory || !!v.showAlways)).length} vehicle(s) free` : "Pick a day to filter"}
-              </span>
-              {availableOn && <button type="button" className="text-gray-400 hover:text-red-500" onClick={() => { setAvailableOn(""); setAvailableOpen(false); }}>Clear</button>}
-            </div>
-          </PopoverContent>
-        </Popover>
-
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
           <Input
@@ -901,10 +789,157 @@ export default function VehiclePlanning() {
           />
         </div>
 
-        <label className="flex items-center gap-1.5 text-xs text-gray-600">
-          <Switch checked={showNoHistory} onCheckedChange={setShowNoHistory} />
-          Show vehicles with no orders
-        </label>
+        <Popover open={filterOpen} onOpenChange={setFilterOpen}>
+          <PopoverTrigger asChild>
+            <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs">
+              Companies{activeCompanyFilters.length > 0 ? ` (${activeCompanyFilters.length})` : ""}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-64 space-y-3" align="start">
+            <div className="space-y-2">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Include companies</div>
+              <div className="max-h-56 space-y-1.5 overflow-y-auto">
+                {availableCompanies.map((company) => {
+                  const checked = checkedCompanies.includes(company);
+                  return (
+                    <label key={company} className="flex items-center gap-2 text-xs text-gray-700">
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={(next) => toggleCompany(company, next === true)}
+                      />
+                      {company}
+                    </label>
+                  );
+                })}
+                {availableCompanies.length === 0 && (
+                  <div className="py-2 text-center text-xs text-gray-400">No companies found</div>
+                )}
+              </div>
+            </div>
+            {canWrite && isAdmin && (
+              <div className="space-y-3 border-t pt-3">
+                <PlanningStartDateRow planningStartDate={fleetQuery.data?.planningStartDate ?? null} />
+                <Button size="sm" variant="outline" className="h-8 w-full rounded-full border-red-200 px-3 text-xs text-red-700 hover:bg-red-50 hover:text-red-800"
+                  title="Clear our planning board and start again from a day. Notion is not changed."
+                  onClick={() => { setFilterOpen(false); setResetOpen(true); }}>
+                  <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> Reset planning
+                </Button>
+              </div>
+            )}
+          </PopoverContent>
+        </Popover>
+
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {/* Plant / State / Driver in one Filter button - purely client-side, they only narrow what is displayed. */}
+          <Popover open={filtersOpen} onOpenChange={setFiltersOpen}>
+            <PopoverTrigger asChild>
+              <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${plantFilter.length + stateFilter.length + driverFilter.length > 0 ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : ""}`}>
+                <ListFilter className="mr-1.5 h-3.5 w-3.5" />
+                Filter{plantFilter.length + stateFilter.length + driverFilter.length > 0 ? ` (${plantFilter.length + stateFilter.length + driverFilter.length})` : ""}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-[34rem] max-w-[calc(100vw-1rem)] space-y-2" align="end">
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Show only</div>
+                {plantFilter.length + stateFilter.length + driverFilter.length > 0 && (
+                  <button type="button" className="text-[11px] text-gray-400 hover:text-red-500" onClick={() => { setPlantFilter([]); setStateFilter([]); setDriverFilter([]); }}>
+                    Clear all
+                  </button>
+                )}
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                {([
+                  { label: "Plant", options: availablePlants, active: plantFilter, setActive: setPlantFilter },
+                  { label: "State", options: availableStates, active: stateFilter, setActive: setStateFilter },
+                  { label: "Driver", options: availableDrivers, active: driverFilter, setActive: setDriverFilter },
+                ] as const).map((f) => (
+                  <div key={f.label} className="min-w-0">
+                    <div className="mb-1 flex items-center justify-between border-b pb-1">
+                      <span className="text-xs font-semibold text-gray-700">{f.label}{f.active.length > 0 ? ` (${f.active.length})` : ""}</span>
+                      {f.active.length > 0 && (
+                        <button type="button" className="text-[11px] text-gray-400 hover:text-red-500" onClick={() => f.setActive([])}>Clear</button>
+                      )}
+                    </div>
+                    <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1">
+                      {f.options.map((opt) => (
+                        <label key={opt} className="flex items-center gap-2 text-xs text-gray-700">
+                          <Checkbox
+                            checked={f.active.includes(opt)}
+                            onCheckedChange={(next) => f.setActive(next ? [...f.active, opt] : f.active.filter((x) => x !== opt))}
+                          />
+                          <span className="truncate">{opt}</span>
+                        </label>
+                      ))}
+                      {f.options.length === 0 && <div className="py-2 text-center text-xs text-gray-400">None found</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          {/* Available: the vehicles that are free on a day you pick (by their arrival / trip end). */}
+          <Popover open={availableOpen} onOpenChange={setAvailableOpen}>
+            <PopoverTrigger asChild>
+              <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${availableOn ? "border-emerald-500 bg-emerald-50 text-emerald-800" : ""}`}>
+                <Truck className="mr-1.5 h-3.5 w-3.5" />
+                {availableOn ? `Available on ${dayLabel(availableOn)}` : "Available"}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-72 space-y-3" align="end">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Vehicles free on</div>
+              <Input type="date" value={availableOn || format(new Date(), "yyyy-MM-dd")} onChange={(e) => setAvailableOn(e.target.value)} className="h-9" />
+              <div className="flex flex-wrap gap-1.5">
+                <button type="button" className={chipCls(availableOn === format(new Date(), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(new Date(), "yyyy-MM-dd"))}>Today</button>
+                <button type="button" className={chipCls(availableOn === format(addDays(new Date(), 1), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(addDays(new Date(), 1), "yyyy-MM-dd"))}>Tomorrow</button>
+              </div>
+              <div className="flex items-center justify-between border-t pt-2 text-xs">
+                <span className="text-gray-500">
+                  {availableOn ? `${allVehicles.filter((v) => isAvailableOn(v, availableOn)).length} vehicle(s) free` : "Pick a day to filter"}
+                </span>
+                {availableOn && <button type="button" className="text-gray-400 hover:text-red-500" onClick={() => { setAvailableOn(""); setAvailableOpen(false); }}>Clear</button>}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          {/* Nothing refreshes this page by itself, so say how old the data is. */}
+          <span className="text-[11px] text-gray-500" title="Vehicle Planning reads Notion only when you press Refresh">
+            Last refreshed: {fleetQuery.data?.lastRefreshedAt
+              ? new Date(fleetQuery.data.lastRefreshedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true })
+              : "never"}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 rounded-full px-3 text-xs"
+            onClick={() => syncMutation.mutate()}
+            disabled={syncMutation.isPending}
+          >
+            <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
+            {syncMutation.isPending ? "Refreshing…" : "Refresh from Notion"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        {/* Which vehicles to list - same pill style as the 14 / 30 days switch. */}
+        <div className="flex overflow-hidden rounded-full border border-gray-200 bg-white text-xs font-medium" role="group" aria-label="Vehicles to show">
+          {([
+            { key: "with" as const, label: "With orders" },
+            { key: "all" as const, label: "All vehicles" },
+            { key: "none" as const, label: `No orders (${allVehicles.filter((v) => !v.hasHistory).length})` },
+          ]).map((o) => (
+            <button
+              key={o.key}
+              type="button"
+              onClick={() => setOrderView(o.key)}
+              aria-pressed={orderView === o.key}
+              className={`h-8 px-3 ${orderView === o.key ? "bg-[#001d6e] text-white" : "text-gray-600 hover:bg-gray-50"}`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
 
         {/* Quick filters for the two things that need a person: a vehicle past its planned end with no arrival recorded,
             and a vehicle with two trips that cannot both happen. */}
@@ -922,6 +957,15 @@ export default function VehiclePlanning() {
             {c.label}: {c.count}
           </button>
         ))}
+
+        {/* What the bar colours mean. */}
+        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-600" aria-label="Bar colours">
+          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-emerald-600" /> Current</span>
+          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full border border-dashed border-blue-600 bg-blue-200" /> New</span>
+          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-slate-400" /> Past</span>
+          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-amber-400" /> Waiting for arrival</span>
+          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-red-500" /> Clash</span>
+        </div>
       </div>
 
       {/* Window controls — 14/30 day toggle, a calendar picker for an exact single date or
@@ -1184,13 +1228,15 @@ export default function VehiclePlanning() {
                       const t = l.trip;
                       const dragging = drag && drag.vehicleId === v.id && drag.orderNumber === t.orderNumber ? drag : null;
                       const endIdx = dragging ? dragging.endIdx : l.endIdx;
+                      // Where the bar is drawn (half days included); the drag itself still moves whole days (endIdx).
+                      const drawEnd = dragging ? dragging.endIdx - (dragging.endIdx - 1 > dayIdx(t.startDay) && dragging.endIdx <= windowDays ? 0.5 : 0) : l.drawEnd;
                       const canStretch = canWrite && (t.state === "planned" || t.state === "on_trip" || t.state === "awaiting");
                       return (
-                        <div key={t.orderNumber} className="absolute flex flex-col gap-0.5" style={{ top: 4 + l.lane * LANE_HEIGHT, left: `${(l.startIdx / windowDays) * 100}%`, width: `${((Math.max(l.labelEndIdx, endIdx) - l.startIdx) / windowDays) * 100}%` }}>
+                        <div key={t.orderNumber} className="absolute flex flex-col gap-0.5" style={{ top: 4 + l.lane * LANE_HEIGHT, left: `${(l.drawStart / windowDays) * 100}%`, width: `${((Math.max(l.labelEndIdx, drawEnd) - l.drawStart) / windowDays) * 100}%` }}>
                           <div className="truncate text-[10px] font-medium leading-[1.15] text-black" title={t.partyName ?? undefined}>
-                            {barLabel(t, l.labelEndIdx - l.startIdx)}
+                            {barLabel(t, l.labelEndIdx - l.drawStart)}
                           </div>
-                          <div className="relative h-2.5" style={{ width: `${((endIdx - l.startIdx) / (Math.max(l.labelEndIdx, endIdx) - l.startIdx)) * 100}%` }}>
+                          <div className="relative h-2.5" style={{ width: `${((drawEnd - l.drawStart) / (Math.max(l.labelEndIdx, drawEnd) - l.drawStart)) * 100}%` }}>
                             <button
                               type="button"
                               onClick={() => setTripTarget({ vehicle: v, trip: t })}
@@ -1198,8 +1244,8 @@ export default function VehiclePlanning() {
                               title={`#${t.members.map((m) => m.orderNumber).join(" + #")} · ${t.members.map((m) => m.partyName ?? "—").join(" + ")} · ${dayLabel(t.startDay)} to ${dayLabel(t.lastBusyDay)} · ${l.conflict ? "Vehicle not back yet" : stateText[t.state]}${t.notionNote ? " · Notion not updated" : ""}`}
                             />
                             {/* A shared load whose slips end on different days: a notch on the bar at each shorter slip's last day. */}
-                            {t.members.length > 1 && endIdx > l.startIdx && t.members.filter((m) => m.plannedLastDay < t.lastBusyDay).map((m) => {
-                              const pos = (dayIdx(m.plannedLastDay) + 1 - l.startIdx) / (endIdx - l.startIdx);
+                            {t.members.length > 1 && drawEnd > l.drawStart && t.members.filter((m) => m.plannedLastDay < t.lastBusyDay).map((m) => {
+                              const pos = (dayIdx(m.plannedLastDay) + 1 - l.drawStart) / (drawEnd - l.drawStart);
                               if (!(pos > 0 && pos < 1)) return null;
                               return (
                                 <span key={m.orderNumber} className="absolute top-[-2px] z-[1] h-[calc(100%+4px)] w-2 -translate-x-1/2" style={{ left: `${pos * 100}%` }}
@@ -1245,18 +1291,21 @@ export default function VehiclePlanning() {
                     {/* Assign sits right after the last bar and says when the vehicle is free. */}
                     {canAssign && (() => {
                       const idx = freeIdx == null ? 0 : Math.max(0, Math.min(windowDays - 1, freeIdx));
+                      // The vehicle is free from the MIDDLE of the day when the trip that frees it last is a multi-day one.
+                      const halfFree = !!v.freeFrom && (v.trips ?? []).some((q) => q.state !== "cancelled" && q.freeFromDay === v.freeFrom && endsHalf(q));
+                      const pillAt = idx + (halfFree && freeIdx != null && freeIdx >= 0 && freeIdx < windowDays ? 0.5 : 0);
                       const freeNow = !v.freeFrom || dayIdx(v.freeFrom) <= todayIdx;
-                      const nearEnd = idx >= windowDays - 2;
+                      const nearEnd = pillAt >= windowDays - 2;
                       return (
                         <button
                           type="button"
                           onClick={() => setAssignTarget(v)}
                           className="absolute rounded-lg border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-center text-[11px] font-semibold leading-tight text-emerald-700 hover:bg-emerald-100"
-                          style={nearEnd ? { right: 4, top: 17 } : { left: `calc(${(idx / windowDays) * 100}% + 4px)`, top: 17 }}
-                          title={v.freeFrom ? `Free from ${dayLabel(v.freeFrom)}` : "No trips yet"}
+                          style={nearEnd ? { right: 4, top: 17 } : { left: `calc(${(pillAt / windowDays) * 100}% + 4px)`, top: 17 }}
+                          title={v.freeFrom ? `Free from ${halfFree ? "the middle of " : ""}${dayLabel(v.freeFrom)}` : "No trips yet"}
                         >
                           Assign
-                          <div className="text-[9px] font-normal text-emerald-600">{freeNow ? "Free now" : `Free ${dayLabel(v.freeFrom!)}`}</div>
+                          <div className="text-[9px] font-normal text-emerald-600">{freeNow ? "Free now" : `Free ${dayLabel(v.freeFrom!)}${halfFree ? " pm" : ""}`}</div>
                         </button>
                       );
                     })()}
@@ -1266,7 +1315,7 @@ export default function VehiclePlanning() {
                         title tooltip or the Assign button sitting on/after it. */}
                     {todayInView && (
                       <div
-                        className="pointer-events-none absolute top-0 h-full bg-[#001d6e]/[0.04]"
+                        className="pointer-events-none absolute top-0 h-full border-l-2 border-blue-500/70 bg-[#001d6e]/[0.04]"
                         style={{ left: `${(todayIdx / windowDays) * 100}%`, width: `${100 / windowDays}%` }}
                       />
                     )}
