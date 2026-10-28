@@ -829,6 +829,14 @@ export default function VehiclePlanning() {
           </PopoverContent>
         </Popover>
 
+        {/* Always visible for admins (it is also in the Companies settings and, right after a reset, in the yellow line). */}
+        {canWrite && isAdmin && (
+          <Button size="sm" variant="outline" className="h-8 rounded-full border-red-200 px-3 text-xs text-red-700 hover:bg-red-50 hover:text-red-800" onClick={() => setResetOpen(true)}
+            title="Clear our planning board and start again from a day. Notion is not changed.">
+            <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> Reset planning
+          </Button>
+        )}
+
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {/* Plant / State / Driver in one Filter button - purely client-side, they only narrow what is displayed. */}
           <Popover open={filtersOpen} onOpenChange={setFiltersOpen}>
