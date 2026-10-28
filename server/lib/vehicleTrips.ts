@@ -38,6 +38,7 @@ export type Trip = {
   startDay: string;            // the order date, YYYY-MM-DD
   plannedLastDay: string;
   expectedEnd: string | null;
+  expectedEndReason: string | null;   // why it was stretched (set with the expected end)
   arrivedOn: string | null;
   lastBusyDay: string;         // arrival, else expected end, else planned
   state: TripState;
@@ -73,7 +74,7 @@ export function parseDmy(raw: string | null | undefined): string | null {
 export function toDmy(day: string): string { const [y, m, d] = day.split('-'); return `${d}/${m}/${y}`; }
 
 type Entry = Pick<VehiclePlanningOrderEntry, 'orderNumber' | 'orderDate' | 'tripDays' | 'tripCompletesOn' | 'status' | 'partyName' | 'plant' | 'driver' | 'proformaSlipId'>
-  & { notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null; freeSameDay?: boolean | null; sameTripAs?: string | null };
+  & { notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null; freeSameDay?: boolean | null; sameTripAs?: string | null; expectedEndReason?: string | null };
 
 export function plannedLastDayOf(e: Pick<Entry, 'orderDate' | 'tripDays' | 'tripCompletesOn'>): { start: string; last: string; days: number } | null {
   const start = String(e.orderDate ?? '').slice(0, 10);
@@ -130,6 +131,7 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
     const arrivedOn = isDay(arrivedRaw) ? arrivedRaw : null;
     const endRaw = primary.e.expectedEnd ?? all.find((b) => b.e.expectedEnd)?.e.expectedEnd ?? null;
     const expectedEnd = isDay(endRaw) && endRaw >= startDay ? endRaw : null;
+    const expectedEndReason = expectedEnd ? (primary.e.expectedEndReason ?? all.find((b) => b.e.expectedEndReason)?.e.expectedEndReason ?? null) : null;
     const lastBusyDay = arrivedOn ?? expectedEnd ?? plannedLastDay;
     let state: TripState;
     let assumed = false;
@@ -158,7 +160,7 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
       status: head.status ?? null, driver: head.driver ?? null, driverNotionId: head.driverNotionId ?? null,
       notionNote: members.find((m) => m.notionNote)?.notionNote ?? null,
       notInSystem: members.every((m) => m.notInSystem),
-      tripDays: daysBetween(startDay, plannedLastDay) + 1, startDay, plannedLastDay, expectedEnd, arrivedOn, lastBusyDay, state, assumed,
+      tripDays: daysBetween(startDay, plannedLastDay) + 1, startDay, plannedLastDay, expectedEnd, expectedEndReason, arrivedOn, lastBusyDay, state, assumed,
     });
   }
   trips.sort((a, b) => a.startDay.localeCompare(b.startDay) || a.orderNumber.localeCompare(b.orderNumber));
@@ -182,7 +184,7 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
 }
 
 // The fields only a person sets on a trip. A Refresh from Notion rebuilds the trip from Notion's data; these must survive it.
-const LOCAL_TRIP_FIELDS = ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'sameTripAs', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt'] as const;
+const LOCAL_TRIP_FIELDS = ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'sameTripAs', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt', 'expectedEndReason'] as const;
 export function mergeLocalTripFields<T extends Record<string, any>>(previous: Record<string, any> | undefined, next: T): T {
   if (!previous) return next;
   for (const k of LOCAL_TRIP_FIELDS) if (previous[k] != null && next[k] == null) (next as any)[k] = previous[k];

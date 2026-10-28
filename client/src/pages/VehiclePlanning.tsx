@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, RefreshCw, Search, Truck, Undo2,
+  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, RefreshCw, RotateCcw, Search, Truck, Undo2,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 import { SyncProgressDialog } from "@/components/SyncProgressDialog";
 import { withNotionNotice } from "@/lib/notionSyncNotice";
+import { ExtendReasonDialog, ResetBanner, ResetPlanningDialog, type LastReset } from "@/components/VehiclePlanningReset";
 
 // Vehicle Planning: a Gantt-style fleet timeline (rows = Krupa's vehicles, columns = days) plus
 // the assign-a-vehicle-to-an-order workflow. Each vehicle's bar spans its current order's start
@@ -56,7 +57,7 @@ type NotFreeAsk = {
 type Trip = {
   orderNumber: string; members: TripMember[]; freeSameDay: boolean; freeFromDay: string; proformaSlipId: number | null; partyName: string | null; plant: string | null;
   status: string | null; driver: string | null; driverNotionId: string | null; notionNote: string | null; notInSystem: boolean; tripDays: number;
-  startDay: string; plannedLastDay: string; expectedEnd: string | null; arrivedOn: string | null;
+  startDay: string; plannedLastDay: string; expectedEnd: string | null; expectedEndReason?: string | null; arrivedOn: string | null;
   lastBusyDay: string; state: TripState; assumed: boolean;
 };
 type TripConflict = { orderNumber: string; startDay: string; withOrderNumber: string; withLastBusyDay: string };
@@ -162,7 +163,10 @@ export default function VehiclePlanning() {
   const [arrivalTarget, setArrivalTarget] = useState<{ vehicle: VehicleRow; trip: Trip } | null>(null);
   const [arrivalDay, setArrivalDay] = useState("");
   const [arrivalNote, setArrivalNote] = useState("");
-  const [stretchAsk, setStretchAsk] = useState<{ vehicle: VehicleRow; trip: Trip; newEnd: string; clashes: Trip[] } | null>(null);
+  const [stretchAsk, setStretchAsk] = useState<{ vehicle: VehicleRow; trip: Trip; newEnd: string; clashes: Trip[]; reason?: string } | null>(null);
+  // Moving a trip's last day LATER first asks why (ExtendReasonDialog); the clash question, when there is one, follows. And the admin's Reset planning dialog.
+  const [extendAsk, setExtendAsk] = useState<{ vehicle: VehicleRow; trip: Trip; newEnd: string; clashes: Trip[] } | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
   const [drag, setDrag] = useState<{ vehicleId: number; orderNumber: string; endIdx: number } | null>(null);
   // Change plan on one trip: move it to another vehicle, change its driver, or take the vehicle off.
   const [changeTarget, setChangeTarget] = useState<{ vehicle: VehicleRow; trip: Trip } | null>(null);
@@ -282,7 +286,7 @@ export default function VehiclePlanning() {
     setWindowDays(Math.max(1, differenceInCalendarDays(to, from) + 1));
   };
 
-  const fleetQuery = useQuery<{ vehicles: VehicleRow[]; companyFilters: string[]; lastRefreshedAt?: string | null }>({
+  const fleetQuery = useQuery<{ vehicles: VehicleRow[]; companyFilters: string[]; lastRefreshedAt?: string | null; planningStartDate?: string | null; lastReset?: LastReset | null }>({
     queryKey: ["/api/vehicle-planning/vehicles"],
     queryFn: async () => (await apiRequest("GET", "/api/vehicle-planning/vehicles")).json(),
   });
@@ -373,7 +377,7 @@ export default function VehiclePlanning() {
 
   // Stretch (or reset) the expected last day of a trip that has not arrived.
   const expectedEndMutation = useMutation({
-    mutationFn: async (body: { vehicleId: number; orderNumber: string; expectedEnd: string | null }) => {
+    mutationFn: async (body: { vehicleId: number; orderNumber: string; expectedEnd: string | null; reason?: string }) => {
       const res = await apiRequest("POST", "/api/vehicle-planning/trips/expected-end", body);
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to change the end day");
       return res.json();
@@ -382,6 +386,7 @@ export default function VehiclePlanning() {
       toast({ title: body.expectedEnd ? "Expected last day changed" : "Expected last day reset", description: `Order #${body.orderNumber}${body.expectedEnd ? ` → ${body.expectedEnd}` : ""}` });
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
       setStretchAsk(null);
+      setExtendAsk(null);
     },
     onError: (err: any) => toast({ title: "Could not change the end day", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
@@ -674,6 +679,7 @@ export default function VehiclePlanning() {
     if (newEnd === trip.lastBusyDay) return;
     const clashes = (v.trips ?? []).filter((t) => t.orderNumber !== trip.orderNumber && t.state !== "cancelled" && t.state !== "arrived" && t.state !== "closed"
       && t.startDay > trip.startDay && t.startDay <= newEnd);
+    if (newEnd > trip.lastBusyDay) { setExtendAsk({ vehicle: v, trip, newEnd, clashes }); return; }   // a longer trip needs a reason first
     if (clashes.length > 0) { setStretchAsk({ vehicle: v, trip, newEnd, clashes }); return; }
     expectedEndMutation.mutate({ vehicleId: v.id, orderNumber: trip.orderNumber, expectedEnd: newEnd === trip.plannedLastDay ? null : newEnd });
   }
@@ -757,6 +763,9 @@ export default function VehiclePlanning() {
         title="Vehicle Planning"
       />
 
+      {/* After a Reset planning: when, by whom, the day Refresh from Notion starts from, and Undo (7 days). */}
+      <ResetBanner planningStartDate={fleetQuery.data?.planningStartDate ?? null} lastReset={fleetQuery.data?.lastReset ?? null} isAdmin={canWrite && isAdmin} onRefreshNow={() => syncMutation.mutate()} />
+
       {/* Fleet controls — Sync from Notion (the only thing that ever talks to Notion; the page
           itself just reads vehicle_planning_state), which companies to include, search, and
           whether to show vehicles with no order history at all (hidden by default). */}
@@ -771,6 +780,12 @@ export default function VehiclePlanning() {
           <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
           {syncMutation.isPending ? "Refreshing…" : "Refresh from Notion"}
         </Button>
+        {canWrite && isAdmin && (
+          <Button size="sm" variant="outline" className="h-8 rounded-full border-red-200 px-3 text-xs text-red-700 hover:bg-red-50 hover:text-red-800" onClick={() => setResetOpen(true)}
+            title="Clear our planning board and start again from a day. Notion is not changed.">
+            <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> Reset planning
+          </Button>
+        )}
         {/* Nothing refreshes this page by itself, so say how old the data is. */}
         <span className="text-[11px] text-gray-500" title="Vehicle Planning reads Notion only when you press Refresh">
           Last refreshed: {fleetQuery.data?.lastRefreshedAt
@@ -1296,6 +1311,7 @@ export default function VehiclePlanning() {
       {/* Stays open until the Notion sync has finished; no progress count is available for this
           one, so it just says it's running. */}
       <SyncProgressDialog open={syncMutation.isPending} title="Refreshing from Notion…" />
+      <ResetPlanningDialog open={resetOpen} onOpenChange={setResetOpen} onRefreshNow={() => syncMutation.mutate()} />
 
       <Dialog open={!!assignTarget} onOpenChange={(open) => { if (!open) setAssignTarget(null); }}>
         <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
@@ -1456,6 +1472,7 @@ export default function VehiclePlanning() {
                     <span className="text-gray-500">Planned last day</span><span>{dayLabel(t.plannedLastDay)}</span>
                     {t.members.length <= 1 && <><span className="text-gray-500">Vehicle free from</span><span>{dayLabel(t.freeFromDay)}</span></>}
                     {t.expectedEnd && <><span className="text-gray-500">Expected last day</span><span>{dayLabel(t.expectedEnd)}</span></>}
+                    {t.expectedEnd && t.expectedEndReason && <><span className="text-gray-500">Extended because</span><span>{t.expectedEndReason}</span></>}
                     {t.arrivedOn && <><span className="text-gray-500">Arrived on</span><span>{dayLabel(t.arrivedOn)}{t.freeSameDay ? " (free the same day)" : ""}</span></>}
                     <span className="text-gray-500">Driver</span><span>{t.driver ?? "—"}</span>
                   </div>
@@ -1523,6 +1540,25 @@ export default function VehiclePlanning() {
         </DialogContent>
       </Dialog>
 
+      {/* Why is the trip extended? Asked whenever a trip's last day moves later; then the clash question below, if the longer trip runs into the next one. */}
+      <ExtendReasonDialog
+        ask={extendAsk ? {
+          vehicleNumber: extendAsk.vehicle.vehicleNumber,
+          orders: extendAsk.trip.members.map((m) => m.orderNumber),
+          oldEnd: extendAsk.trip.lastBusyDay,
+          newEnd: extendAsk.newEnd,
+          extraDays: Math.max(1, differenceInCalendarDays(parse(extendAsk.newEnd, "yyyy-MM-dd", new Date()), parse(extendAsk.trip.lastBusyDay, "yyyy-MM-dd", new Date()))),
+        } : null}
+        pending={expectedEndMutation.isPending}
+        onCancel={() => setExtendAsk(null)}
+        onConfirm={(reason) => {
+          if (!extendAsk) return;
+          const { vehicle, trip, newEnd, clashes } = extendAsk;
+          if (clashes.length > 0) { setExtendAsk(null); setStretchAsk({ vehicle, trip, newEnd, clashes, reason }); return; }
+          expectedEndMutation.mutate({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd, reason });
+        }}
+      />
+
       {/* A stretch that runs into the next trip. Nothing is blocked: the planner decides. */}
       <Dialog open={!!stretchAsk} onOpenChange={(open) => { if (!open && !expectedEndMutation.isPending) setStretchAsk(null); }}>
         <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
@@ -1541,9 +1577,9 @@ export default function VehiclePlanning() {
             <div className="flex flex-col gap-2 sm:flex-row">
               <Button variant="outline" className="flex-1 text-xs" disabled={expectedEndMutation.isPending || removeMutation.isPending}
                 onClick={async () => {
-                  const { vehicle, trip, newEnd, clashes } = stretchAsk;
+                  const { vehicle, trip, newEnd, clashes, reason } = stretchAsk;
                   try {
-                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd });
+                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd, reason });
                     removeMutation.mutate({ vehicleId: vehicle.id, orderNumber: clashes[0].orderNumber });
                   } catch { /* the mutation already showed its error */ }
                 }}>
@@ -1551,9 +1587,9 @@ export default function VehiclePlanning() {
               </Button>
               <Button variant="outline" className="flex-1 text-xs" disabled={expectedEndMutation.isPending}
                 onClick={async () => {
-                  const { vehicle, trip, newEnd, clashes } = stretchAsk;
+                  const { vehicle, trip, newEnd, clashes, reason } = stretchAsk;
                   try {
-                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd });
+                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd, reason });
                     setChangeTarget({ vehicle, trip: clashes[0] });
                   } catch { /* the mutation already showed its error */ }
                 }}>
@@ -1565,7 +1601,7 @@ export default function VehiclePlanning() {
             <Button variant="outline" disabled={expectedEndMutation.isPending} onClick={() => setStretchAsk(null)}>Cancel the stretch</Button>
             <Button
               disabled={expectedEndMutation.isPending}
-              onClick={() => stretchAsk && expectedEndMutation.mutate({ vehicleId: stretchAsk.vehicle.id, orderNumber: stretchAsk.trip.orderNumber, expectedEnd: stretchAsk.newEnd })}
+              onClick={() => stretchAsk && expectedEndMutation.mutate({ vehicleId: stretchAsk.vehicle.id, orderNumber: stretchAsk.trip.orderNumber, expectedEnd: stretchAsk.newEnd, reason: stretchAsk.reason })}
             >
               {expectedEndMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Keep it (stays red)"}
             </Button>

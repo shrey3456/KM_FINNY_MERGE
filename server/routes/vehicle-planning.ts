@@ -350,9 +350,11 @@ export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number
 
     let mismatches = 0;
     let notInSystem = 0;
+    // After "Reset planning": an order dated before the start day is not brought back.
+    const planningStart = await getPlanningStartDate();
     for (const v of fleet) {
       const currentOrder = v.notionPageId ? currentOrderByVehicle.get(v.notionPageId) ?? null : null;
-      if (!currentOrder) {
+      if (!currentOrder || (planningStart && String(currentOrder.orderDate ?? '').slice(0, 10) < planningStart)) {
         await pool.query(`UPDATE vehicle_planning_state SET last_synced_at = now() WHERE vehicle_id = $1`, [v.id]);
         continue;
       }
@@ -591,14 +593,23 @@ router.post('/vehicle-planning/trips/expected-end', requirePageWrite('vehicle-pl
     const { userCode, userName } = who(req);
     const vehicle = await storage.getVehicleInfo(vehicleId);
     if (req.body?.expectedEnd == null) {
-      for (const g of group) { g.expectedEnd = null; g.expectedEndByCode = null; g.expectedEndAt = null; }
+      for (const g of group) { g.expectedEnd = null; g.expectedEndByCode = null; g.expectedEndAt = null; g.expectedEndReason = null; }
     } else {
       const problem = checkExpectedEnd({ ...first, arrivedOn: group.find((g) => g.arrivedOn)?.arrivedOn ?? null }, req.body.expectedEnd);
       if (problem) return res.status(400).json({ message: problem });
-      for (const g of group) { g.expectedEnd = String(req.body.expectedEnd); g.expectedEndByCode = userCode ?? null; g.expectedEndAt = new Date().toISOString(); }
+      const newEnd = String(req.body.expectedEnd);
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 300) : '';
+      // Moving the last day LATER than it is now needs a reason (breakdown, waiting at the party...). Shortening, or going back to the plan, does not.
+      const current = computeVehicleTrips(history).trips.find((t) => t.members.some((m) => m.orderNumber === orderNumber));
+      const extending = !!current && newEnd > current.lastBusyDay;
+      if (extending && reason.length < 3) return res.status(400).json({ code: 'REASON_REQUIRED', message: 'Say why the trip is extended.' });
+      for (const g of group) {
+        g.expectedEndReason = reason || (extending ? null : g.expectedEndReason ?? null);
+        g.expectedEnd = newEnd; g.expectedEndByCode = userCode ?? null; g.expectedEndAt = new Date().toISOString();
+      }
     }
     await saveHistory(vehicleId, history);
-    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId}: expected last day of order${group.length > 1 ? 's' : ''} ${group.map((g) => `#${g.orderNumber}`).join(', ')} ${group[0].expectedEnd ? `set to ${group[0].expectedEnd}` : 'cleared (back to the planned end)'} by ${userName ?? userCode}`, userCode, userName });
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId}: expected last day of order${group.length > 1 ? 's' : ''} ${group.map((g) => `#${g.orderNumber}`).join(', ')} ${group[0].expectedEnd ? `set to ${group[0].expectedEnd}${group[0].expectedEndReason ? ` (reason: ${group[0].expectedEndReason})` : ''}` : 'cleared (back to the planned end)'} by ${userName ?? userCode}`, userCode, userName });
     res.json(tripsView(history));
   } catch (error) {
     console.error('Error setting the expected end:', error);
@@ -698,7 +709,7 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
 
     // When the data was last read from Notion (the page shows it next to the Refresh button, since nothing refreshes it by itself).
     const lastRefreshedAt = stateRows.reduce((m: Date | null, r: any) => (r.lastSyncedAt && (!m || new Date(r.lastSyncedAt) > m) ? new Date(r.lastSyncedAt) : m), null as Date | null);
-    res.json({ vehicles: rows, companyFilters, lastRefreshedAt: lastRefreshedAt ? lastRefreshedAt.toISOString() : null });
+    res.json({ vehicles: rows, companyFilters, lastRefreshedAt: lastRefreshedAt ? lastRefreshedAt.toISOString() : null, planningStartDate: await getPlanningStartDate(), lastReset: await lastUndoableReset() });
   } catch (error) {
     console.error('Error building vehicle planning fleet view:', error);
     res.status(500).json({ message: 'Failed to load vehicle planning data' });
@@ -867,7 +878,7 @@ function removeFromHistory(history: VehiclePlanningOrderEntry[], orderNumber: st
   const followers = rest.filter((e) => e.sameTripAs === orderNumber);
   if (followers.length === 0) return rest;
   const next = [...followers].sort((a, b) => String(a.orderDate ?? '').localeCompare(String(b.orderDate ?? '')))[0];
-  for (const k of ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt'] as const) {
+  for (const k of ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt', 'expectedEndReason'] as const) {
     if ((next as any)[k] == null && (leaving as any)[k] != null) (next as any)[k] = (leaving as any)[k];
   }
   next.sameTripAs = leaving.sameTripAs ?? null;
@@ -1162,6 +1173,212 @@ router.post('/vehicle-planning/retry-notion', requirePageWrite('vehicle-planning
   } catch (error) {
     console.error('Error retrying the Notion update:', error);
     res.status(500).json({ message: 'Failed to retry the Notion update' });
+  }
+});
+
+// ─── Reset planning: clear our planning board and start again from a day (our system only - Notion is never touched) ─────────────────────────────────────
+
+const RESET_UNDO_DAYS = 7;
+
+async function getPlanningStartDate(): Promise<string | null> {
+  const { rows } = await pool.query(`SELECT planning_start_date::text AS d FROM vehicle_planning_settings ORDER BY id LIMIT 1`);
+  return rows[0]?.d ?? null;
+}
+async function setPlanningStartDate(day: string | null): Promise<void> {
+  const updated = await pool.query(`UPDATE vehicle_planning_settings SET planning_start_date = $1 WHERE id = (SELECT id FROM vehicle_planning_settings ORDER BY id LIMIT 1)`, [day]);
+  if (!updated.rowCount) await pool.query(`INSERT INTO vehicle_planning_settings (planning_start_date) VALUES ($1)`, [day]);
+}
+
+// What a reset would clear for the vehicles in the selected companies. Trips whose slip has gone out or started loading (planningLock) stay: Loading depends on their
+// vehicle. A shared load is kept or cleared as a whole.
+async function buildResetPlan() {
+  const companyFilters = await getCompanyFilters();
+  const fleet = (await storage.getAllVehicleInfo()).filter((v) => qualifiesForVehiclePlanning(v.company, companyFilters));
+  const byId = new Map(fleet.map((v) => [v.id, v] as const));
+  const { rows } = await pool.query(
+    `SELECT vehicle_id AS "vehicleId", order_history AS "orderHistory" FROM vehicle_planning_state WHERE vehicle_id = ANY($1::int[]) AND jsonb_array_length(order_history) > 0`,
+    [fleet.map((v) => v.id)],
+  );
+  const orderNumbers = Array.from(new Set(rows.flatMap((r: any) => (r.orderHistory as VehiclePlanningOrderEntry[]).map((e) => e.orderNumber))));
+  const slipByOrder = new Map<string, any>();
+  await mapWithConcurrency(orderNumbers, 8, async (no) => { const s = await storage.getProformaSlipByOrderNumber(no); if (s) slipByOrder.set(no, s); });
+
+  const vehicles: Array<{ vehicleId: number; vehicleNumber: string | null; history: VehiclePlanningOrderEntry[]; keep: VehiclePlanningOrderEntry[]; clearTrips: number; clearEntries: VehiclePlanningOrderEntry[] }> = [];
+  const slipClears: Array<{ id: number; orderNumber: string; vehicleId: number; vehicleNumber: string | null; vehicleInfoId: number | null; vehicleAssignedByCode: string | null; driverName: string | null }> = [];
+  const kept: Array<{ orderNumber: string; vehicleNumber: string | null; reason: string }> = [];
+  for (const r of rows as any[]) {
+    const vehicle = byId.get(r.vehicleId);
+    const history: VehiclePlanningOrderEntry[] = r.orderHistory;
+    const groups = new Map<string, VehiclePlanningOrderEntry[]>();
+    for (const e of history) { const k = groupPrimaryOf(history, e.orderNumber); (groups.get(k) ?? groups.set(k, []).get(k)!).push(e); }
+    const keep: VehiclePlanningOrderEntry[] = [];
+    const clearEntries: VehiclePlanningOrderEntry[] = [];
+    let clearTrips = 0;
+    for (const members of groups.values()) {
+      const lock = members.map((m) => ({ m, why: slipByOrder.has(m.orderNumber) ? planningLock(slipByOrder.get(m.orderNumber)) : null })).find((x) => x.why);
+      if (lock) {
+        keep.push(...members);
+        kept.push({ orderNumber: lock.m.orderNumber, vehicleNumber: vehicle?.vehicleNumber ?? null, reason: lock.why! });
+      } else {
+        clearEntries.push(...members);
+        clearTrips++;
+        for (const m of members) {
+          const slip = slipByOrder.get(m.orderNumber);
+          // Only a slip that really carries THIS vehicle loses it (a slip moved to another vehicle by Loading is left alone).
+          if (slip && slip.vehicleInfoId === r.vehicleId) {
+            slipClears.push({ id: slip.id, orderNumber: m.orderNumber, vehicleId: r.vehicleId, vehicleNumber: slip.vehicleNumber ?? null, vehicleInfoId: slip.vehicleInfoId ?? null, vehicleAssignedByCode: slip.vehicleAssignedByCode ?? null, driverName: slip.driverName ?? null });
+          }
+        }
+      }
+    }
+    vehicles.push({ vehicleId: r.vehicleId, vehicleNumber: vehicle?.vehicleNumber ?? null, history, keep, clearTrips, clearEntries });
+  }
+  return { companyFilters, vehicles, slipClears, kept };
+}
+
+// GET /api/vehicle-planning/reset/preview - admin: the counts the Reset dialog shows. Writes nothing.
+router.get('/vehicle-planning/reset/preview', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    if (!isAdminUser(req)) return res.status(403).json({ message: 'Only an admin can reset planning.' });
+    const plan = await buildResetPlan();
+    res.json({
+      companyFilters: plan.companyFilters,
+      vehiclesWithTrips: plan.vehicles.filter((v) => v.clearEntries.length > 0).length,
+      trips: plan.vehicles.reduce((n, v) => n + v.clearTrips, 0),
+      slipsToClear: plan.slipClears.length,
+      kept: plan.kept.slice(0, 50),
+      keptCount: plan.kept.length,
+      currentStartDate: await getPlanningStartDate(),
+      today: todayIst(),
+    });
+  } catch (error) {
+    console.error('Error previewing the planning reset:', error);
+    res.status(500).json({ message: 'Failed to prepare the reset' });
+  }
+});
+
+// POST /api/vehicle-planning/reset - body { startDate: 'YYYY-MM-DD', confirm: 'RESET' } - admin. Copies what it clears (so Undo can bring it back), empties the planning board of the
+// vehicles in the selected companies, takes the vehicle and driver off their slips in OUR system, and saves the start day. Nothing is sent to Notion.
+router.post('/vehicle-planning/reset', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  const client = await pool.connect();
+  try {
+    if (!isAdminUser(req)) return res.status(403).json({ message: 'Only an admin can reset planning.' });
+    if (String(req.body?.confirm ?? '').trim().toUpperCase() !== 'RESET') return res.status(400).json({ message: 'Type RESET to confirm.' });
+    const startDate = String(req.body?.startDate ?? '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return res.status(400).json({ message: 'Pick the day to start fresh from.' });
+
+    const plan = await buildResetPlan();
+    const affected = plan.vehicles.filter((v) => v.clearEntries.length > 0);
+    const { userCode, userName } = who(req);
+    const previousStart = await getPlanningStartDate();
+
+    await client.query('BEGIN');
+    const backup = await client.query(
+      `INSERT INTO vehicle_planning_reset_backup (created_by_code, created_by_name, start_date, previous_start_date, company_filters, vehicles, slips)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [userCode ?? null, userName ?? null, startDate, previousStart, JSON.stringify(plan.companyFilters),
+       JSON.stringify(affected.map((v) => ({ vehicleId: v.vehicleId, history: v.history }))), JSON.stringify(plan.slipClears)],
+    );
+    for (const v of affected) {
+      await client.query(`UPDATE vehicle_planning_state SET order_history = $1 WHERE vehicle_id = $2`, [JSON.stringify(v.keep), v.vehicleId]);
+    }
+    if (plan.slipClears.length > 0) {
+      await client.query(
+        `UPDATE proforma_slips SET vehicle_number = NULL, vehicle_info_id = NULL, vehicle_assigned_by_code = NULL, driver_name = NULL WHERE id = ANY($1::int[])`,
+        [plan.slipClears.map((s) => s.id)],
+      );
+    }
+    const updated = await client.query(`UPDATE vehicle_planning_settings SET planning_start_date = $1 WHERE id = (SELECT id FROM vehicle_planning_settings ORDER BY id LIMIT 1)`, [startDate]);
+    if (!updated.rowCount) await client.query(`INSERT INTO vehicle_planning_settings (planning_start_date) VALUES ($1)`, [startDate]);
+    await client.query('COMMIT');
+
+    const trips = plan.vehicles.reduce((n, v) => n + v.clearTrips, 0);
+    if (userCode) {
+      await storage.logActivity({
+        pageName: 'Vehicle Planning', action: 'update', entityType: 'planning_reset', entityId: String(backup.rows[0].id),
+        details: `Planning reset by ${userName ?? userCode} (our system only, Notion not changed): ${trips} trip(s) cleared on ${affected.length} vehicle(s), ${plan.slipClears.length} slip(s) lost their vehicle and driver, ${plan.kept.length} kept (gone out or loading); start fresh from ${startDate}`,
+        userCode, userName,
+      });
+    }
+    res.json({ resetId: backup.rows[0].id, vehiclesCleared: affected.length, trips, slipsCleared: plan.slipClears.length, kept: plan.kept.slice(0, 50), keptCount: plan.kept.length, startDate });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Error resetting vehicle planning:', error);
+    res.status(500).json({ message: 'Failed to reset planning' });
+  } finally {
+    client.release();
+  }
+});
+
+// The last reset that can still be undone (not undone yet, within RESET_UNDO_DAYS) - shown as the banner on the page.
+async function lastUndoableReset() {
+  const { rows } = await pool.query(
+    `SELECT id, created_at AS "at", created_by_name AS "byName", start_date::text AS "startDate"
+       FROM vehicle_planning_reset_backup WHERE undone_at IS NULL AND created_at > NOW() - ($1 || ' days')::interval ORDER BY id DESC LIMIT 1`,
+    [String(RESET_UNDO_DAYS)],
+  );
+  return rows[0] ?? null;
+}
+
+// POST /api/vehicle-planning/reset/undo - body { id } - admin. Puts back what the reset cleared WITHOUT overwriting anything done since: a trip is added back only when its
+// order is not on that vehicle now, and a slip gets its vehicle and driver back only when it has none now.
+router.post('/vehicle-planning/reset/undo', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  const client = await pool.connect();
+  try {
+    if (!isAdminUser(req)) return res.status(403).json({ message: 'Only an admin can undo a reset.' });
+    const last = await lastUndoableReset();
+    const id = Number(req.body?.id);
+    if (!last || last.id !== id) return res.status(404).json({ message: 'That reset can no longer be undone.' });
+    const { rows } = await client.query(`SELECT * FROM vehicle_planning_reset_backup WHERE id = $1`, [id]);
+    const b = rows[0];
+    let trips = 0;
+    await client.query('BEGIN');
+    for (const v of b.vehicles as Array<{ vehicleId: number; history: VehiclePlanningOrderEntry[] }>) {
+      const cur = await client.query(`SELECT order_history AS "h" FROM vehicle_planning_state WHERE vehicle_id = $1 FOR UPDATE`, [v.vehicleId]);
+      const have = new Set(((cur.rows[0]?.h ?? []) as VehiclePlanningOrderEntry[]).map((e) => e.orderNumber));
+      const back = v.history.filter((e) => !have.has(e.orderNumber));
+      trips += back.length;
+      if (cur.rows[0]) await client.query(`UPDATE vehicle_planning_state SET order_history = $1 WHERE vehicle_id = $2`, [JSON.stringify([...(cur.rows[0].h ?? []), ...back]), v.vehicleId]);
+      else await client.query(`INSERT INTO vehicle_planning_state (vehicle_id, order_history) VALUES ($1, $2)`, [v.vehicleId, JSON.stringify(v.history)]);
+    }
+    let slips = 0;
+    for (const s of b.slips as Array<{ id: number; vehicleNumber: string | null; vehicleInfoId: number | null; vehicleAssignedByCode: string | null; driverName: string | null }>) {
+      const r = await client.query(
+        `UPDATE proforma_slips SET vehicle_number = $2, vehicle_info_id = $3, vehicle_assigned_by_code = $4, driver_name = $5 WHERE id = $1 AND vehicle_info_id IS NULL`,
+        [s.id, s.vehicleNumber, s.vehicleInfoId, s.vehicleAssignedByCode, s.driverName],
+      );
+      slips += r.rowCount ?? 0;
+    }
+    const startUpdate = await client.query(`UPDATE vehicle_planning_settings SET planning_start_date = $1 WHERE id = (SELECT id FROM vehicle_planning_settings ORDER BY id LIMIT 1)`, [b.previous_start_date]);
+    if (!startUpdate.rowCount && b.previous_start_date) await client.query(`INSERT INTO vehicle_planning_settings (planning_start_date) VALUES ($1)`, [b.previous_start_date]);
+    await client.query(`UPDATE vehicle_planning_reset_backup SET undone_at = NOW() WHERE id = $1`, [id]);
+    await client.query('COMMIT');
+    const { userCode, userName } = who(req);
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'planning_reset', entityId: String(id), details: `Planning reset #${id} undone by ${userName ?? userCode}: ${trips} trip(s) and ${slips} slip(s) put back`, userCode, userName });
+    res.json({ trips, slips });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Error undoing the planning reset:', error);
+    res.status(500).json({ message: 'Failed to undo the reset' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/vehicle-planning/start-date - body { startDate: 'YYYY-MM-DD' | null } - admin: move (or remove) the day a Refresh from Notion starts from.
+router.post('/vehicle-planning/start-date', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    if (!isAdminUser(req)) return res.status(403).json({ message: 'Only an admin can change the start date.' });
+    const raw = req.body?.startDate;
+    const day = raw == null || raw === '' ? null : String(raw).slice(0, 10);
+    if (day !== null && !/^\d{4}-\d{2}-\d{2}$/.test(day)) return res.status(400).json({ message: 'Pick a valid day.' });
+    await setPlanningStartDate(day);
+    const { userCode, userName } = who(req);
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'planning_start_date', entityId: 'start-date', details: `Vehicle Planning start date ${day ? `set to ${day}` : 'removed'} by ${userName ?? userCode}`, userCode, userName });
+    res.json({ startDate: day });
+  } catch (error) {
+    console.error('Error saving the planning start date:', error);
+    res.status(500).json({ message: 'Failed to save the start date' });
   }
 });
 

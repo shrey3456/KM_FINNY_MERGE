@@ -469,6 +469,22 @@ app.use((req, res, next) => {
     // so progress, stock and corrections are per product, not per barcode.
     await ensureAutoDispatchSchema(pool);
     await pool.query(`ALTER TABLE vehicle_planning_state ADD COLUMN IF NOT EXISTS setup_done BOOLEAN NOT NULL DEFAULT false`);
+    // Vehicle Planning "Reset planning": the start-fresh day, and a copy of what a reset cleared so it can be undone.
+    await pool.query(`ALTER TABLE vehicle_planning_settings ADD COLUMN IF NOT EXISTS planning_start_date DATE`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_planning_reset_backup (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        created_by_code TEXT,
+        created_by_name TEXT,
+        start_date DATE,
+        previous_start_date DATE,
+        company_filters JSONB,
+        vehicles JSONB NOT NULL DEFAULT '[]',
+        slips JSONB NOT NULL DEFAULT '[]',
+        undone_at TIMESTAMP
+      )
+    `);
     await pool.query(`ALTER TABLE order_import_sessions ADD COLUMN IF NOT EXISTS auto_complete_suppressed BOOLEAN NOT NULL DEFAULT false`);
     await pool.query(`ALTER TABLE unload_import_sessions ADD COLUMN IF NOT EXISTS auto_complete_suppressed BOOLEAN NOT NULL DEFAULT false`);
     // Older order lines (a row added by editing a CSV, or imported before products were tracked) have no product saved: give them the product their barcode

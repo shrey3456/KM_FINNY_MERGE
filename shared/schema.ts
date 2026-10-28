@@ -1101,6 +1101,8 @@ export type VehiclePlanningOrderEntry = {
   expectedEnd?: string | null;
   expectedEndByCode?: string | null;
   expectedEndAt?: string | null;
+  // Why the planner stretched the trip (required when the end moves later); cleared when the end goes back to the plan.
+  expectedEndReason?: string | null;
   // The driver's Notion page (the "Driver :" relation), set when the planner picks a driver on Assign / Change.
   driverNotionId?: string | null;
   // Set when the last push to Notion did not go through (the page shows "Notion not updated" and a Retry button); cleared when it does.
@@ -1132,6 +1134,8 @@ export type VehiclePlanningStateRow = typeof vehiclePlanningState.$inferSelect;
 export const vehiclePlanningSettings = pgTable("vehicle_planning_settings", {
   id: serial("id").primaryKey(),
   companyFilters: jsonb("company_filters").$type<string[]>().notNull().default(['krupa', 'transport']),
+  // Set by "Reset planning": a Refresh from Notion ignores orders dated before this day (YYYY-MM-DD). Null = no cutoff.
+  planningStartDate: date("planning_start_date"),
 });
 
 export type VehiclePlanningSettingsRow = typeof vehiclePlanningSettings.$inferSelect;
