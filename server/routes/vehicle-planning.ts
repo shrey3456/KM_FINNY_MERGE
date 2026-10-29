@@ -537,6 +537,34 @@ function tripEntries(history: VehiclePlanningOrderEntry[], orderNumber: string) 
   return { group, first };
 }
 
+// POST /api/vehicle-planning/day-notes - body { vehicleId, day: 'YYYY-MM-DD', text }: the note for that vehicle on that day. An empty text removes it. Only our board; Notion is untouched.
+router.post('/vehicle-planning/day-notes', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const vehicleId = Number(req.body?.vehicleId);
+    const day = String(req.body?.day ?? '');
+    if (!vehicleId || !/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(new Date(`${day}T00:00:00Z`).getTime())) return res.status(400).json({ message: 'vehicleId and a valid day are required' });
+    const vehicle = await storage.getVehicleInfo(vehicleId);
+    if (!vehicle) return res.status(404).json({ message: 'Vehicle not found' });
+    const text = String(req.body?.text ?? '').trim().slice(0, 500);
+    const { userCode, userName } = who(req);
+    if (!text) {
+      await pool.query(`DELETE FROM vehicle_planning_day_notes WHERE vehicle_id = $1 AND day = $2`, [vehicleId, day]);
+      if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'delete', entityType: 'vehicle_day_note', entityId: `${vehicleId}:${day}`, details: `Note on ${vehicle.vehicleNumber ?? vehicleId} for ${day} removed by ${userName ?? userCode}`, userCode, userName });
+      return res.json({ removed: true });
+    }
+    await pool.query(
+      `INSERT INTO vehicle_planning_day_notes (vehicle_id, day, note, created_by_code, created_by_name, updated_at) VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (vehicle_id, day) DO UPDATE SET note = EXCLUDED.note, created_by_code = EXCLUDED.created_by_code, created_by_name = EXCLUDED.created_by_name, updated_at = NOW()`,
+      [vehicleId, day, text, userCode ?? null, userName ?? null],
+    );
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_day_note', entityId: `${vehicleId}:${day}`, details: `Note on ${vehicle.vehicleNumber ?? vehicleId} for ${day} by ${userName ?? userCode}: ${text.slice(0, 120)}`, userCode, userName });
+    res.json({ day, text, byName: userName ?? null });
+  } catch (error) {
+    console.error('Error saving the day note:', error);
+    res.status(500).json({ message: 'Failed to save the note' });
+  }
+});
+
 // POST /api/vehicle-planning/trips/arrival - body { vehicleId, orderNumber, arrivedOn: 'YYYY-MM-DD', note?, freeSameDay? } records the real arrival; { undo: true } clears it.
 // freeSameDay (default true): the vehicle can go out again on the arrival day itself, so an order starting that day does not clash.
 router.post('/vehicle-planning/trips/arrival', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
@@ -719,9 +747,23 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
       };
     });
 
+    // Day notes (the last 90 days and the next 270, the board's scroll range), grouped by vehicle.
+    const { rows: noteRows } = await pool.query(
+      `SELECT vehicle_id AS "vehicleId", day::text AS day, note AS text, created_by_name AS "byName", updated_at AS "at"
+         FROM vehicle_planning_day_notes
+        WHERE vehicle_id = ANY($1::int[]) AND day BETWEEN (CURRENT_DATE - 90) AND (CURRENT_DATE + 270) ORDER BY day`,
+      [fleet.map((v) => v.id)],
+    );
+    const notesByVehicle = new Map<number, { day: string; text: string; byName: string | null; at: string }[]>();
+    for (const n of noteRows as any[]) {
+      if (!notesByVehicle.has(n.vehicleId)) notesByVehicle.set(n.vehicleId, []);
+      notesByVehicle.get(n.vehicleId)!.push({ day: n.day, text: n.text, byName: n.byName ?? null, at: new Date(n.at).toISOString() });
+    }
+    const rowsWithNotes = rows.map((r) => ({ ...r, dayNotes: notesByVehicle.get(r.id) ?? [] }));
+
     // When the data was last read from Notion (the page shows it next to the Refresh button, since nothing refreshes it by itself).
     const lastRefreshedAt = stateRows.reduce((m: Date | null, r: any) => (r.lastSyncedAt && (!m || new Date(r.lastSyncedAt) > m) ? new Date(r.lastSyncedAt) : m), null as Date | null);
-    res.json({ vehicles: rows, companyFilters, lastRefreshedAt: lastRefreshedAt ? lastRefreshedAt.toISOString() : null, planningStartDate: await getPlanningStartDate(), lastReset: await lastUndoableReset() });
+    res.json({ vehicles: rowsWithNotes, companyFilters, lastRefreshedAt: lastRefreshedAt ? lastRefreshedAt.toISOString() : null, planningStartDate: await getPlanningStartDate(), lastReset: await lastUndoableReset() });
   } catch (error) {
     console.error('Error building vehicle planning fleet view:', error);
     res.status(500).json({ message: 'Failed to load vehicle planning data' });

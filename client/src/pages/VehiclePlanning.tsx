@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, ListFilter, RefreshCw, RotateCcw, Search, Truck, Undo2,
+  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, ListFilter, MessageSquare, RefreshCw, RotateCcw, Search, Truck, Undo2,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { hasPageWriteAccess, isAdminOrSuperAdmin } from "@/lib/permissions";
@@ -76,6 +77,7 @@ type VehicleRow = {
   hasHistory: boolean; lastSyncedAt: string | null;
   // The vehicle's company was added beyond the two defaults (for example DUMMY): listed even with no trips.
   showAlways?: boolean;
+  dayNotes?: { day: string; text: string; byName: string | null; at: string }[];
   trips?: Trip[]; freeFrom?: string | null; vehicleState?: "free" | "busy" | "awaiting"; conflicts?: TripConflict[];
 };
 
@@ -113,8 +115,7 @@ const LABEL_COLS: { key: string; label: string; width: number }[] = [
 ];
 const ROW_LABEL_WIDTH = LABEL_COLS.reduce((sum, c) => sum + c.width, 0);
 // px per day for the three column sizes. The board scrolls sideways when the days do not fit, so a wider column never squeezes the labels.
-const COL_SIZES = { compact: 42, normal: 90, large: 130 } as const;
-type ColSize = keyof typeof COL_SIZES;
+const DAY_COL_MIN = 40, DAY_COL_MAX = 180, DAY_COL_DEFAULT = 90;
 const ACTION_COL_WIDTH = 92; // the Free / Arrived buttons at the end of the pinned label columns
 // Mouse-wheel / arrow-key nudge amount — fixed, no user-facing control for it. The full-window
 // and single-day buttons stay as a discoverable fallback for anyone who'd rather click than
@@ -215,8 +216,11 @@ export default function VehiclePlanning() {
   // today every time.
   const [windowDays, setWindowDays] = usePersistentFilter<number>("vehiclePlanning:windowDays", 14);
   // How wide one day is: Compact (as before), Normal (default) or Large. Remembered for the session.
-  const [colSize, setColSize] = usePersistentFilter<ColSize>("vehiclePlanning:colSize", "normal");
-  const dayColW = COL_SIZES[colSize] ?? COL_SIZES.normal;
+  const [dayColW, setDayColW] = usePersistentFilter<number>("vehiclePlanning:dayColW", DAY_COL_DEFAULT);
+  const narrowDays = dayColW < 64; // too narrow for the full weekday and "29 Oct"
+  // A day note being written / read: which vehicle and day, and the text in the box.
+  const [noteTarget, setNoteTarget] = useState<{ vehicle: VehicleRow; day: string } | null>(null);
+  const [noteText, setNoteText] = useState("");
   // Free a vehicle from an order (the row's Free button): which trip, and which order of a shared load.
   const [freeAsk, setFreeAsk] = useState<{ vehicle: VehicleRow; order: string; options: FreeOption[] } | null>(null);
   const [windowStartIso, setWindowStartIso] = usePersistentFilter<string>(
@@ -249,7 +253,7 @@ export default function VehiclePlanning() {
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
-      if (!horizontal && !ganttActiveRef.current) return; // plain vertical scroll stays the page's
+      if (!horizontal) return; // vertical scroll is the board's own (the day header stays put); only a sideways gesture moves the dates
       const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
       if (delta === 0) return;
       e.preventDefault();
@@ -461,6 +465,21 @@ export default function VehiclePlanning() {
       setFreeAsk(null);
     },
     onError: (err: any) => toast({ title: "Could not remove the vehicle", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
+  // A day note: save (or, with empty text, remove) the note for one vehicle on one day.
+  const noteMutation = useMutation({
+    mutationFn: async (body: { vehicleId: number; day: string; text: string }) => {
+      const res = await apiRequest("POST", "/api/vehicle-planning/day-notes", body);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to save the note");
+      return res.json();
+    },
+    onSuccess: (_d, body) => {
+      toast({ title: body.text.trim() ? "Note saved" : "Note removed" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+      setNoteTarget(null);
+    },
+    onError: (err: any) => toast({ title: "Could not save the note", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   const retryNotionMutation = useMutation({
@@ -1026,19 +1045,13 @@ export default function VehiclePlanning() {
           ))}
         </div>
 
-        {/* How wide each day is. */}
-        <div className="flex overflow-hidden rounded-full border border-gray-200 bg-white text-xs font-medium" role="group" aria-label="Day column size" title="How wide each day column is">
-          {(["compact", "normal", "large"] as const).map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setColSize(k)}
-              aria-pressed={colSize === k}
-              className={`px-3 py-1.5 capitalize ${colSize === k ? "bg-[#001d6e] text-white" : "text-gray-600 hover:bg-gray-50"}`}
-            >
-              {k}
-            </button>
-          ))}
+        {/* How wide each day is: drag to fit more days on the screen or to give each day more room. */}
+        <div className="flex h-8 items-center gap-2 rounded-full border border-gray-200 bg-white px-3 text-xs text-gray-600" title="How wide each day column is">
+          <span>Day width</span>
+          <input type="range" min={DAY_COL_MIN} max={DAY_COL_MAX} step={5} value={dayColW} onChange={(e) => setDayColW(Number(e.target.value))}
+            aria-label="Day column width" className="h-1.5 w-28 cursor-pointer accent-[#001d6e]" />
+          <span className="w-9 tabular-nums text-gray-500">{dayColW}px</span>
+          {dayColW !== DAY_COL_DEFAULT && <button type="button" className="text-[11px] text-gray-400 underline decoration-dotted hover:text-gray-700" onClick={() => setDayColW(DAY_COL_DEFAULT)}>Reset</button>}
         </div>
 
         <Popover
@@ -1162,9 +1175,9 @@ export default function VehiclePlanning() {
       ) : (
         <div
           ref={ganttRef}
-          className={`overflow-x-auto overscroll-x-contain border bg-white shadow-sm focus:outline-none ${ganttActive ? "border-[#001d6e]/40 ring-2 ring-[#001d6e]/30" : "border-gray-200"}`}
+          className={`max-h-[calc(100vh-9rem)] overflow-auto overscroll-x-contain border bg-white shadow-sm focus:outline-none ${ganttActive ? "border-[#001d6e]/40 ring-2 ring-[#001d6e]/30" : "border-gray-200"}`}
           tabIndex={0}
-          title={ganttActive ? "Scroll or use the arrow keys to move the date range" : "Click, then scroll or use the arrow keys to move the date range"}
+          title={ganttActive ? "Swipe sideways or use the arrow keys to move the date range" : "Click, then swipe sideways or use the arrow keys to move the date range"}
           onFocus={() => setGanttActive(true)}
           onBlur={() => setGanttActive(false)}
           // A click anywhere inside the table (a row, a cell, empty space) bubbles up to here —
@@ -1181,7 +1194,7 @@ export default function VehiclePlanning() {
           <div style={{ minWidth: ROW_LABEL_WIDTH + (canWrite ? ACTION_COL_WIDTH : 0) + windowDays * dayColW }}>
             {/* Day header — one continuous bar with date ticks, not a row of separately
                 bordered boxes (that read as "many small columns" rather than one timeline). */}
-            <div className="flex border-b border-gray-200 bg-[#001d6e] text-white">
+            <div className="sticky top-0 z-30 flex border-b border-gray-200 bg-[#001d6e] text-white">
               {/* Vehicle … Trip Days stay pinned to the left while the calendar scrolls under them. */}
               <div className="sticky left-0 z-20 flex shrink-0 bg-[#001d6e] shadow-[2px_0_4px_-1px_rgba(0,0,0,0.25)]">
               {LABEL_COLS.map((c) => {
@@ -1207,10 +1220,10 @@ export default function VehiclePlanning() {
                   <div
                     key={i}
                     style={{ width: `${100 / windowDays}%`, minWidth: dayColW }}
-                    className={`shrink-0 border-l border-white/10 text-center ${colSize === "compact" ? "py-1.5 text-[11px]" : "py-2 text-xs"} ${isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
+                    className={`shrink-0 border-l border-white/10 text-center ${narrowDays ? "py-1.5 text-[11px]" : "py-2 text-xs"} ${isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
                   >
-                    <div className="opacity-70">{format(d, colSize === "compact" ? "EEE" : "EEEE")}</div>
-                    <div className={colSize === "compact" ? "" : "text-sm font-semibold"}>{format(d, colSize === "compact" ? "d/M" : "d MMM")}</div>
+                    <div className="opacity-70">{format(d, narrowDays ? "EEE" : "EEEE")}</div>
+                    <div className={narrowDays ? "" : "text-sm font-semibold"}>{format(d, narrowDays ? "d/M" : "d MMM")}</div>
                   </div>
                 ))}
               </div>
@@ -1294,13 +1307,27 @@ export default function VehiclePlanning() {
                     {/* One continuous area. A thin, light vertical line at each day (a little firmer at the start of a week, Monday) lines the bars up
                         with the dates in the header without turning it into a boxed grid; today keeps its faint tint. */}
                     <div className="absolute inset-0 flex">
-                      {days.map((d, i) => (
-                        <div
-                          key={i}
-                          style={{ width: `${100 / windowDays}%`, minWidth: dayColW }}
-                          className={`shrink-0 border-l ${d.getDay() === 1 ? "border-gray-300" : "border-gray-200/70"} ${isSameDay(d, today) ? "bg-[#001d6e]/[0.04]" : ""}`}
-                        />
-                      ))}
+                      {days.map((d, i) => {
+                        const dayIso = isoOf(d);
+                        const note = (v.dayNotes ?? []).find((n) => n.day === dayIso);
+                        const clickable = canWrite || !!note;
+                        return (
+                          <div
+                            key={i}
+                            style={{ width: `${100 / windowDays}%`, minWidth: dayColW }}
+                            className={`relative shrink-0 border-l ${d.getDay() === 1 ? "border-gray-300" : "border-gray-200/70"} ${isSameDay(d, today) ? "bg-[#001d6e]/[0.04]" : ""} ${clickable ? "cursor-pointer hover:bg-[#001d6e]/[0.06]" : ""}`}
+                            title={note ? `${note.text}${note.byName ? `\n— ${note.byName}` : ""}` : canWrite ? `Click to add a note for ${v.vehicleNumber} on ${format(d, "d MMM")}` : undefined}
+                            onClick={clickable ? () => { setNoteTarget({ vehicle: v, day: dayIso }); setNoteText(note?.text ?? ""); } : undefined}
+                          >
+                            {note && (
+                              <span className="pointer-events-none absolute inset-x-0.5 bottom-0.5 flex items-center gap-0.5 truncate rounded bg-amber-100 px-1 text-[9px] leading-4 text-amber-900">
+                                <MessageSquare className="h-2.5 w-2.5 shrink-0" />
+                                {!narrowDays && <span className="truncate">{note.text}</span>}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                     {/* One bar per trip. Each bar sits on its own lane (overlapping trips stack), has the party name above it
                         (as wide as the free space up to the next trip on the lane), opens the trip's details on click, and - when
@@ -1653,6 +1680,42 @@ export default function VehiclePlanning() {
                   {canWrite && !t.arrivedOn && t.state !== "planned" && t.state !== "cancelled" && (
                     <Button onClick={() => { setTripTarget(null); openArrival(v, t); }}>
                       <CheckCircle2 className="mr-1.5 h-4 w-4" /> Arrived
+                    </Button>
+                  )}
+                </DialogFooter>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
+      {/* Day note: what happens with this vehicle on this day. Our board only. */}
+      <Dialog open={!!noteTarget} onOpenChange={(open) => { if (!open && !noteMutation.isPending) setNoteTarget(null); }}>
+        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
+          {noteTarget && (() => {
+            const existing = (noteTarget.vehicle.dayNotes ?? []).find((n) => n.day === noteTarget.day);
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-1.5"><MessageSquare className="h-4 w-4" /> {noteTarget.vehicle.vehicleNumber} · {format(parse(noteTarget.day, "yyyy-MM-dd", new Date()), "EEEE d MMM")}</DialogTitle>
+                  <DialogDescription>{canWrite ? "A note for this vehicle on this day. Only our board; Notion is not changed." : "Note for this vehicle on this day."}</DialogDescription>
+                </DialogHeader>
+                {canWrite ? (
+                  <Textarea value={noteText} onChange={(e) => setNoteText(e.target.value)} maxLength={500} rows={4} autoFocus placeholder="For example: breakdown at Surat, driver on leave, service due" />
+                ) : (
+                  <div className="whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm">{existing?.text}</div>
+                )}
+                {existing && <div className="text-[11px] text-gray-500">Written by {existing.byName ?? "—"}, {new Date(existing.at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true })}</div>}
+                <DialogFooter className="gap-2 sm:gap-2">
+                  {canWrite && existing && (
+                    <Button variant="outline" className="mr-auto border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={noteMutation.isPending}
+                      onClick={() => noteMutation.mutate({ vehicleId: noteTarget.vehicle.id, day: noteTarget.day, text: "" })}>Delete</Button>
+                  )}
+                  <Button variant="outline" disabled={noteMutation.isPending} onClick={() => setNoteTarget(null)}>{canWrite ? "Cancel" : "Close"}</Button>
+                  {canWrite && (
+                    <Button disabled={noteMutation.isPending || !noteText.trim() || noteText.trim() === (existing?.text ?? "")}
+                      onClick={() => noteMutation.mutate({ vehicleId: noteTarget.vehicle.id, day: noteTarget.day, text: noteText })}>
+                      {noteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save note"}
                     </Button>
                   )}
                 </DialogFooter>

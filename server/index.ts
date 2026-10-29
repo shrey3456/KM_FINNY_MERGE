@@ -485,6 +485,18 @@ app.use((req, res, next) => {
         undone_at TIMESTAMP
       )
     `);
+    // Vehicle Planning day notes: one short note per vehicle per day, written by clicking that day on the board.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_planning_day_notes (
+        vehicle_id INTEGER NOT NULL,
+        day DATE NOT NULL,
+        note TEXT NOT NULL,
+        created_by_code TEXT,
+        created_by_name TEXT,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (vehicle_id, day)
+      )
+    `);
     await pool.query(`ALTER TABLE order_import_sessions ADD COLUMN IF NOT EXISTS auto_complete_suppressed BOOLEAN NOT NULL DEFAULT false`);
     await pool.query(`ALTER TABLE unload_import_sessions ADD COLUMN IF NOT EXISTS auto_complete_suppressed BOOLEAN NOT NULL DEFAULT false`);
     // Older order lines (a row added by editing a CSV, or imported before products were tracked) have no product saved: give them the product their barcode
