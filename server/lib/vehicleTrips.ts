@@ -42,6 +42,7 @@ export type Trip = {
   arrivedOn: string | null;
   lastBusyDay: string;         // arrival, else expected end, else planned
   state: TripState;
+  lockedReason?: string | null;  // set by the route: why Free is not allowed (Loading has taken the order over)
   assumed: boolean;            // closed quietly on its planned last day (older than ASSUMED_AFTER_DAYS with no arrival)
 };
 
@@ -50,7 +51,7 @@ export type TripConflict = { orderNumber: string; startDay: string; withOrderNum
 export type VehicleTrips = {
   trips: Trip[];
   freeFrom: string | null;                       // the day after the vehicle's last busy day; null when it has no trips
-  vehicleState: 'free' | 'busy' | 'awaiting';    // busy = a trip is running today; awaiting = a trip is past its end with no arrival recorded
+  vehicleState: 'free' | 'busy' | 'awaiting';    // busy = a trip is running today; awaiting = a trip is due back (its last day has come) with no arrival recorded
   conflicts: TripConflict[];
 };
 
@@ -138,9 +139,10 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
     if (cancelled) state = 'cancelled';
     else if (arrivedOn) state = 'arrived';
     else if (startDay > today) state = 'planned';
-    else if (lastBusyDay >= today) state = 'on_trip';
-    else if (daysBetween(lastBusyDay, today) > ASSUMED_AFTER_DAYS) { state = 'closed'; assumed = true; }
-    else state = 'awaiting';
+    else if (lastBusyDay < today && daysBetween(lastBusyDay, today) > ASSUMED_AFTER_DAYS) { state = 'closed'; assumed = true; }
+    // Yellow from the trip's last day: a multi-day trip is due back that day; a one-day trip keeps the vehicle busy the whole day, so it is due the next day.
+    else if (startDay < lastBusyDay ? lastBusyDay <= today : lastBusyDay < today) state = 'awaiting';
+    else state = 'on_trip';
     // Free on the last day, unless an arrival was recorded with the same-day box explicitly unticked.
     const heldTillNextDay = !!arrivedOn && (primary.e.freeSameDay ?? all.find((b) => b.e.freeSameDay != null)?.e.freeSameDay) === false;
     const freeSameDay = !heldTillNextDay;

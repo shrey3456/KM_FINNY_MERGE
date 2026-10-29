@@ -656,6 +656,15 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
     );
     const stateByVehicleId = new Map(stateRows.map((r: any) => [r.vehicleId, r]));
 
+    // Which orders Loading has taken over (Free is greyed out for them): our slip decides when we have one; an order that only exists in Notion is judged by
+    // the status the last Refresh read.
+    const orderNos = Array.from(new Set(stateRows.flatMap((r: any) => ((r.orderHistory ?? []) as VehiclePlanningOrderEntry[]).map((e) => e.orderNumber))));
+    const lockSlips = orderNos.length ? (await pool.query(
+      `SELECT order_number AS "orderNumber", dispatched_at AS "dispatchedAt", notion_status AS "notionStatus", loading_stv AS "loadingStv",
+              loading_owner_code AS "loadingOwnerCode", loading_completed_at AS "loadingCompletedAt"
+         FROM proforma_slips WHERE order_number = ANY($1::text[])`, [orderNos])).rows : [];
+    const lockSlipByOrder = new Map<string, any>(lockSlips.map((s: any) => [s.orderNumber, s]));
+
     const rows = fleet.map((v) => {
       const state = stateByVehicleId.get(v.id);
       const history: VehiclePlanningOrderEntry[] = state?.orderHistory ?? [];
@@ -667,6 +676,9 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
 
       // Every trip with its state, the day the vehicle is free from, and any trip that starts before the vehicle is back.
       const vt = computeVehicleTrips(history);
+      for (const tr of vt.trips) {
+        tr.lockedReason = tr.members.map((m) => { const s = lockSlipByOrder.get(m.orderNumber); return s ? planningLock(s) : notionOnlyLock(m.status); }).find((x) => !!x) ?? null;
+      }
       const tripFields = { trips: vt.trips, freeFrom: vt.freeFrom, vehicleState: vt.vehicleState, conflicts: vt.conflicts };
 
       if (!v.vehicleNumber || !currentOrder) {
@@ -723,6 +735,13 @@ const dayOf = (v: unknown) => String(v ?? '').slice(0, 10);
 const WENT_OUT = new Set(['DISPATCHED', 'DELIVERED', 'UNLOADING', 'SHORTAGE']);
 
 // Planning does not change a load that Loading has taken over: once loading has started or the slip has gone out, the Loading page is the place.
+// An order that only exists in Notion (no slip here) has no Loading record, so the status the last Refresh read stands in: from LOADING onward the order is out of Planning's hands.
+const NOTION_ONLY_LOCKED = new Set(['LOADING', 'READY≈DESP', 'DISPATCHED', 'UNLOADING', 'SHORTAGE', 'DELIVERED']);
+function notionOnlyLock(status: string | null | undefined): string | null {
+  const s = String(status ?? '').trim().toUpperCase();
+  return NOTION_ONLY_LOCKED.has(s) ? `Notion already shows ${s} for this order, so its vehicle can no longer be changed here.` : null;
+}
+
 function planningLock(slip: any): string | null {
   if (slip.dispatchedAt || WENT_OUT.has(String(slip.notionStatus ?? '').trim().toUpperCase())) {
     return 'This order has already been dispatched. Change its vehicle on the Loading page.';
@@ -1135,18 +1154,20 @@ router.post('/vehicle-planning/trips/remove-vehicle', requirePageWrite('vehicle-
     const vehicleId = Number(req.body?.vehicleId);
     const orderNumber = String(req.body?.orderNumber ?? '').trim();
     if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
-    const slips = await slipsForChange(res, vehicleId, orderNumber, false);
-    if (!slips) return;
-    const slip = slips[0];
+    const { history, entry } = await loadTrip(vehicleId, orderNumber);
+    if (!entry) return res.status(404).json({ message: 'That trip is not on this vehicle.' });
+    // An order that only exists in Notion has no slip here: it is judged by the status the last Refresh read, and only the board and Notion change.
+    const slip = await storage.getProformaSlipByOrderNumber(orderNumber);
+    const locked = slip ? planningLock(slip) : notionOnlyLock(entry.status);
+    if (locked) return res.status(409).json({ code: 'LOCKED', message: locked });
     const { userCode, userName } = who(req);
     const vehicle = await storage.getVehicleInfo(vehicleId);
 
-    await storage.updateProformaSlip(slip.id, { vehicleNumber: null, vehicleInfoId: null, vehicleAssignedByCode: null, driverName: null } as any);
-    const { history } = await loadTrip(vehicleId, orderNumber);
+    if (slip) await storage.updateProformaSlip(slip.id, { vehicleNumber: null, vehicleInfoId: null, vehicleAssignedByCode: null, driverName: null } as any);
     await saveHistory(vehicleId, removeFromHistory(history, orderNumber));
     const outcome: NotionSyncOutcome = await settleNotionSync(syncOrderToNotion(orderNumber, { clearVehicle: true, clearDriver: true }, { userCode }));
     void watchStatusAfterVehicleChange(orderNumber, { userCode });
-    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_assignment', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId} removed from order #${orderNumber} (vehicle and driver cleared) by ${userName ?? userCode}; Notion: ${outcome.state}`, userCode, userName });
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_assignment', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId} removed from order #${orderNumber} (vehicle and driver cleared${slip ? '' : '; order not in our system'}) by ${userName ?? userCode}; Notion: ${outcome.state}`, userCode, userName });
     res.json({ notion: outcome, notionFailed: outcome.state === 'failed' || outcome.state === 'retrying', ...tripsView(await loadHistory(vehicleId)) });
   } catch (error) {
     console.error('Error removing the vehicle from vehicle planning:', error);
