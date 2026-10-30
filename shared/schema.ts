@@ -1020,6 +1020,7 @@ export const vehicleInfo = pgTable("vehicle_info", {
   engine: text("engine"),
   volume: real("volume"), // Notion: "Vol " (note trailing space in the real property name)
   vehiclePercent: real("vehicle_percent"), // Notion: "Vehi %"
+  bodyType: text("body_type"), // Notion: "Body Type :" (a select) - shown in Vehicle Planning only when a vehicle is selected
 
   // GPS
   gps: text("gps"),
@@ -1053,7 +1054,7 @@ export const vehicleInfo = pgTable("vehicle_info", {
 export const insertVehicleInfoSchema = createInsertSchema(vehicleInfo).pick({
   notionPageId: true, srNo: true, vehicleNumber: true, rtoNumber: true, series: true,
   companyType: true, acTruckUrl: true, company: true, manufacturer: true, modelYear: true, engine: true,
-  volume: true, vehiclePercent: true, gps: true, forGps: true, driver: true, recordDriver: true,
+  volume: true, vehiclePercent: true, bodyType: true, gps: true, forGps: true, driver: true, recordDriver: true,
   plant: true, status: true, remark: true, vehicleFitness: true,
   latestEntry: true, latestOrder: true, linkToVehicle: true, orderCurrent: true, orderBackup: true,
   lastEditedByCode: true, createdByCode: true,

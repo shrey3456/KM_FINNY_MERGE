@@ -42,6 +42,7 @@ import { useAuth, AuthProvider } from "@/hooks/use-auth";
 import PlantSettings from "./pages/PlantSettings";
 import StockOverview from "./pages/StockOverview";
 import VehicleMaster from "./pages/VehicleMaster";
+import DriverMaster from "./pages/DriverMaster";
 import VehiclePlanning from "./pages/VehiclePlanning";
 import LoadOperation from "./pages/Loading/LoadOperation";
 import Unloading from "./pages/Unloading/Unloading";
@@ -264,6 +265,7 @@ function Router() {
         <Route path="/" component={Home} />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requiredPage="notion-inventory" />
         <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
+        <ProtectedRoute path="/driver-master" component={DriverMaster} requiredPage="driver-master" />
         <ProtectedRoute path="/vehicle-planning" component={VehiclePlanning} requiredPage="vehicle-planning" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />

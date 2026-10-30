@@ -319,6 +319,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "vehicle-master",
         },
         {
+          label: "Driver Master",
+          icon: <UserRound className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/driver-master",
+          pageKey: "driver-master",
+        },
+        {
           label: "Vehicle Planning",
           icon: <CalendarClock className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/vehicle-planning",

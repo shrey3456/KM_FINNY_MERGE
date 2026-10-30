@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CalendarDays, CheckCircle2, Info, Loader2, RefreshCw, RotateCcw, Undo2 } from "lucide-react";
+import { AlertTriangle, CalendarDays, CheckCircle2, Info, Loader2, RefreshCw, RotateCcw, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -174,6 +174,10 @@ export function ResetBanner({ planningStartDate, lastReset, lastRefreshedAt, isA
   const [dateOpen, setDateOpen] = useState(false);
   const [draft, setDraft] = useState("");
   useEffect(() => { setDraft(planningStartDate ?? ""); }, [planningStartDate, dateOpen]);
+  // The X closes the line for this reset (remembered while the browser stays open).
+  const HIDE_KEY = "vehiclePlanning:resetBannerHidden";
+  const [hiddenId, setHiddenId] = useState<number | null>(() => { try { const raw = sessionStorage.getItem(HIDE_KEY); return raw ? Number(raw) : null; } catch { return null; } });
+  const hideBanner = () => { try { sessionStorage.setItem(HIDE_KEY, String(lastReset?.id ?? "")); } catch { /* storage unavailable */ } setHiddenId(lastReset?.id ?? null); };
 
   const undoMutation = useMutation({
     mutationFn: async () => {
@@ -201,10 +205,11 @@ export function ResetBanner({ planningStartDate, lastReset, lastRefreshedAt, isA
   // The line is only for the moment between the reset and the next Refresh from Notion; once a Refresh has run since, it goes away
   // (the start date and Reset planning stay in the Companies settings).
   if (!lastReset || (lastRefreshedAt && new Date(lastRefreshedAt) > new Date(lastReset.at))) return null;
+  if (hiddenId === lastReset.id) return null;   // closed with the X: stays closed for this reset
   const when = new Date(lastReset.at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true });
 
   return (
-    <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-amber-200 bg-amber-50 px-3 py-1 text-xs text-amber-900">
       <RotateCcw className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0">
         Planning was reset on <strong>{when}</strong>{lastReset.byName ? <> by {lastReset.byName}</> : null}. {planningStartDate ? <>Refresh from Notion starts from <strong>{fmtDay(planningStartDate)}</strong>.</> : <>Press Refresh from Notion to bring the orders in.</>}
@@ -241,6 +246,7 @@ export function ResetBanner({ planningStartDate, lastReset, lastRefreshedAt, isA
           <Button size="sm" variant="outline" className="h-7 border-red-200 bg-white px-2.5 text-xs text-red-700 hover:bg-red-50 hover:text-red-800" onClick={onResetAgain}><RotateCcw className="mr-1 h-3.5 w-3.5" /> Reset planning</Button>
         </span>
       )}
+      <button type="button" onClick={hideBanner} className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded text-amber-700 hover:bg-amber-100" aria-label="Close" title="Close"><X className="h-4 w-4" /></button>
     </div>
   );
 }
@@ -277,24 +283,29 @@ export function PlanningStartDateRow({ planningStartDate }: { planningStartDate:
 
 const REASONS = ["Breakdown", "Waiting to unload", "Road / traffic", "Party delay", "Other"] as const;
 
-export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm }: {
+const addIsoDays = (day: string, n: number) => { const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+
+// "Extend": the new last day (quick +1 / +2 / +3 days or a date) and the reason, both here. onNewEnd changes the day the page holds for this box.
+export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd }: {
   ask: { vehicleNumber: string | null; orders: string[]; oldEnd: string; newEnd: string; extraDays: number } | null;
   pending: boolean;
   onCancel: () => void;
   onConfirm: (reason: string) => void;
+  onNewEnd?: (day: string) => void;
 }) {
   const [chip, setChip] = useState<(typeof REASONS)[number] | "">("");
   const [text, setText] = useState("");
   useEffect(() => { if (ask) { setChip(""); setText(""); } }, [ask?.orders.join(","), ask?.newEnd]);
   const detail = text.trim();
-  const reason = chip === "Other" ? detail : chip ? (detail ? `${chip} - ${detail}` : chip) : "";
-  const valid = chip !== "" && reason.length >= 3;
+  // A reason is a quick choice, or just typed: either one is enough (Other needs the text).
+  const reason = chip === "Other" ? detail : chip ? (detail ? `${chip} - ${detail}` : chip) : detail;
+  const valid = reason.length >= 3;
 
   return (
     <Dialog open={!!ask} onOpenChange={(o) => { if (!o && !pending) onCancel(); }}>
       <DialogContent className="max-w-[calc(100vw-1rem)] overflow-x-hidden sm:max-w-md [&>*]:min-w-0">
         <DialogHeader>
-          <DialogTitle>Why is the trip extended?</DialogTitle>
+          <DialogTitle>{onNewEnd ? "Extend the trip" : "Why is the trip extended?"}</DialogTitle>
           <DialogDescription>
             {ask && (
               <>
@@ -307,6 +318,15 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm }: {
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
+          {onNewEnd && ask && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-gray-700">New last day</label>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Input type="date" value={ask.newEnd} min={addIsoDays(ask.oldEnd, 1)} onChange={(e) => e.target.value && e.target.value > ask.oldEnd && onNewEnd(e.target.value)} className="h-8 w-40 text-xs" />
+              </div>
+            </div>
+          )}
+          <label className="block text-xs font-semibold text-gray-700">Reason <span className="text-red-500">*</span> <span className="font-normal text-gray-500">(pick one, or type it below)</span></label>
           <div className="flex flex-wrap gap-1.5">
             {REASONS.map((r) => (
               <button key={r} type="button" onClick={() => setChip(r)}
@@ -316,10 +336,11 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm }: {
             ))}
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-semibold text-gray-700">{chip === "Other" ? "Reason (required)" : "More detail (optional)"}</label>
+            <label className="text-xs font-semibold text-gray-700">{chip === "" || chip === "Other" ? "Reason in your own words" : "More detail (optional)"}</label>
             <Input value={text} onChange={(e) => setText(e.target.value)} maxLength={200} placeholder="For example: the truck waited 2 days at the party's godown" className="h-9" />
           </div>
         </div>
+        {!valid && !pending && <p className="text-[11px] text-gray-500">Pick a reason or type one to save the extension.</p>}
         <DialogFooter className="gap-2 sm:gap-2">
           <Button variant="outline" disabled={pending} onClick={onCancel}>Cancel</Button>
           <Button disabled={!valid || pending} onClick={() => onConfirm(reason)}>

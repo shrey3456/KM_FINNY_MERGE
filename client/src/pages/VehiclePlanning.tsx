@@ -3,9 +3,8 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, ListFilter, MessageSquare, RefreshCw, RotateCcw, Search, Truck, Undo2,
+  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, MessageSquare, RefreshCw, RotateCcw, Search, SlidersHorizontal, Truck, Undo2, X,
 } from "lucide-react";
-import PageHeader from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -23,7 +22,9 @@ import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 import { SyncProgressDialog } from "@/components/SyncProgressDialog";
 import { withNotionNotice } from "@/lib/notionSyncNotice";
-import { ExtendReasonDialog, PlanningStartDateRow, ResetBanner, ResetPlanningDialog, type LastReset } from "@/components/VehiclePlanningReset";
+import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
+import { type FilterableColumn, type FilterCondition, isConditionEmpty, matchAllConditions } from "@/lib/columnFilters";
+import { ExtendReasonDialog, ResetBanner, ResetPlanningDialog, type LastReset } from "@/components/VehiclePlanningReset";
 
 // Vehicle Planning: a Gantt-style fleet timeline (rows = Krupa's vehicles, columns = days) plus
 // the assign-a-vehicle-to-an-order workflow. Each vehicle's bar spans its current order's start
@@ -61,6 +62,11 @@ type Trip = {
   lastBusyDay: string; state: TripState; assumed: boolean;
   lockedReason?: string | null;   // why Free is not allowed (Loading has taken the order over)
 };
+// The vehicle's own status on this page (maintenance, breakdown ...): our system only. days >= 1 keeps it out of Available for that many days.
+type ManualStatus = {
+  status: string; startDay: string; days: number; endDay: string | null; blocks: boolean; comment: string | null; byName: string | null;
+  daysLeft: number | null; availableFrom: string | null;
+};
 // One order a vehicle can be freed from (the Free box lists them; a locked one is greyed out with its reason).
 type FreeOption = { orderNumber: string; partyName: string | null; startDay: string; lastBusyDay: string; notInSystem: boolean; locked: string | null };
 type TripConflict = { orderNumber: string; startDay: string; withOrderNumber: string; withLastBusyDay: string };
@@ -78,6 +84,7 @@ type VehicleRow = {
   // The vehicle's company was added beyond the two defaults (for example DUMMY): listed even with no trips.
   showAlways?: boolean;
   dayNotes?: { day: string; text: string; byName: string | null; at: string }[];
+  volume?: number | null; bodyType?: string | null; manualStatus?: ManualStatus | null;
   trips?: Trip[]; freeFrom?: string | null; vehicleState?: "free" | "busy" | "awaiting"; conflicts?: TripConflict[];
 };
 
@@ -89,6 +96,8 @@ type AvailableOrder = {
 type Suggestion = AvailableOrder & { tripDaysGuess: number; samePlant: boolean; fits: boolean; runsInto: string | null };
 type AvailableOrdersResponse = {
   orders: AvailableOrder[]; date: string; suggestions: Suggestion[];
+  // Free orders dated while this vehicle is busy, each with the trip it would join (a shared load).
+  sharable?: (AvailableOrder & { joinOrder: string; joinParty: string | null })[];
   vehicle: { freeFrom: string | null; busyUntil: string | null; busyOrder: string | null; lastDriver: string | null; lastPlant: string | null } | null;
 };
 type NotionDriver = { id: string; name: string };
@@ -106,14 +115,19 @@ type HistoryEntry = {
 // keeps most of the width instead of the labels eating into it. Party Name is NOT here — it's
 // shown as a label on the busy bar itself now, not its own column (explicit request).
 const LABEL_COLS: { key: string; label: string; width: number }[] = [
-  { key: "vehicleNumber", label: "Vehicle", width: 64 },
-  { key: "rtoNumber", label: "RTO No.", width: 104 },
-  { key: "orderNumber", label: "Order No.", width: 78 },
-  { key: "state", label: "Plant / State", width: 92 },
-  { key: "driver", label: "Driver", width: 108 },
-  { key: "tripDays", label: "Trip Days", width: 68 },
+  { key: "vehicleNumber", label: "Vehicle", width: 78 },
+  { key: "rtoNumber", label: "RTO No.", width: 96 },
+  { key: "orderNumber", label: "Order No.", width: 100 },
+  { key: "state", label: "Plant / State", width: 114 },
+  { key: "driver", label: "Driver", width: 100 },
+  { key: "tripDays", label: "Trip Days", width: 88 },
+  { key: "status", label: "Status", width: 124 },
 ];
-const ROW_LABEL_WIDTH = LABEL_COLS.reduce((sum, c) => sum + c.width, 0);
+// Which filterable column each header's filter button belongs to (the same column filters the other pages have).
+const HEADER_FILTER_IDS: Record<string, string> = {
+  vehicleNumber: "vehicleNumber", rtoNumber: "rto", orderNumber: "order", state: "plantState", driver: "driver", tripDays: "tripDays", status: "status",
+};
+const ROW_MIN_HEIGHT = 64;   // label line, the dots, then the Assign / Extend buttons
 // px per day for the three column sizes. The board scrolls sideways when the days do not fit, so a wider column never squeezes the labels.
 const DAY_COL_MIN = 40, DAY_COL_MAX = 180, DAY_COL_DEFAULT = 90;
 const ACTION_COL_WIDTH = 92; // the Free / Arrived buttons at the end of the pinned label columns
@@ -140,8 +154,83 @@ function parseTripDate(raw: string | null): Date | null {
 // Is the vehicle free on `day`? Not when a trip covers that day: it starts on or before it and does not free the vehicle until after it (a trip frees the vehicle on
 // its last day). A vehicle planned to be back, or arrived, by that day counts as available.
 function isAvailableOn(v: VehicleRow, day: string): boolean {
+  const m = v.manualStatus;
+  if (m?.blocks && m.endDay && m.startDay <= day && day <= m.endDay) return false;   // under maintenance / breakdown that day
   const live = (v.trips ?? []).filter((t) => t.state !== "cancelled");
   return !live.some((t) => t.startDay <= day && day < t.freeFromDay);
+}
+
+const MANUAL_STATUSES = ["Gone for passing", "Parking maintenance", "Road maintenance", "Showroom maintenance", "Breakdown"] as const;
+const STATUS_TONES: Record<string, string> = {
+  "Gone for passing": "bg-indigo-100 text-indigo-800", "Parcing": "bg-indigo-100 text-indigo-800", "Parking": "bg-slate-100 text-slate-700", "Parking maintenance": "bg-orange-100 text-orange-800", "Road maintenance": "bg-orange-100 text-orange-800",
+  "Showroom maintenance": "bg-purple-100 text-purple-800", "Breakdown": "bg-red-100 text-red-700",
+};
+const isoDayDiff = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+
+// The day a member's dots stop: the slips that end with the trip follow its arrival / extension; a shorter slip of a shared load keeps its own last day.
+function memberEnd(t: Trip, m: TripMember): string {
+  if (m.plannedLastDay === t.plannedLastDay) return t.lastBusyDay;
+  return m.plannedLastDay < t.lastBusyDay ? m.plannedLastDay : t.lastBusyDay;
+}
+
+function dotClass(state: TripState, conflict: boolean): string {
+  if (conflict) return "bg-red-500";
+  switch (state) {
+    case "planned": return "border-2 border-dashed border-blue-600 bg-blue-100";   // new: not started yet
+    case "awaiting": return "bg-amber-400";                                          // overdue: past its last day, no arrival
+    case "arrived": return "bg-slate-400";                                           // past
+    case "closed": return "bg-slate-300";                                            // past
+    default: return "bg-emerald-600";                                                // current: on the trip now
+  }
+}
+
+const fmtShort = (iso: string) => format(parse(iso, "yyyy-MM-dd", new Date()), "d MMM");
+// What the Status and Days columns say about a vehicle today. A status set on this page wins; otherwise it follows the trips.
+// The Days column is only filled for a status with days (days left) and for Overdue (days late) - everything else leaves it blank.
+function computeStatus(v: VehicleRow, todayIso: string): { label: string; tone: string; daysText: string; title: string; note: string } {
+  const m = v.manualStatus;
+  if (m && (m.blocks || m.days === 0)) {
+    return {
+      label: m.status, tone: STATUS_TONES[m.status] ?? "bg-gray-100 text-gray-700", daysText: m.blocks ? `${m.daysLeft} d left` : "",
+      title: `${m.status}${m.blocks && m.availableFrom ? ` - available again from ${fmtShort(m.availableFrom)}` : ""}${m.comment ? ` - ${m.comment}` : ""}`,
+      note: [m.blocks && m.availableFrom ? `Available again from ${fmtShort(m.availableFrom)}` : "", m.comment ?? ""].filter(Boolean).join(" · "),
+    };
+  }
+  const trips = (v.trips ?? []).filter((x) => x.state !== "cancelled");
+  const covering = trips.find((x) => x.startDay <= todayIso && todayIso < x.freeFromDay);
+  if (covering) return { label: "On trip", tone: "bg-emerald-100 text-emerald-800", daysText: "", title: `Free from ${fmtShort(covering.freeFromDay)}`, note: `Free from ${fmtShort(covering.freeFromDay)}` };
+  const late = trips.find((x) => x.state === "awaiting");
+  if (late) {
+    const n = Math.max(1, isoDayDiff(late.lastBusyDay, todayIso));
+    return { label: "Overdue", tone: "bg-amber-100 text-amber-800", daysText: `${n} d late`, title: `${n} day${n === 1 ? "" : "s"} past its last day with no arrival recorded - the vehicle is available`, note: `${n} day${n === 1 ? "" : "s"} past its last day, no arrival recorded - available` };
+  }
+  if (trips.some((x) => x.arrivedOn === todayIso)) return { label: "Free now", tone: "bg-emerald-600 text-white", daysText: "", title: "Arrived today - available now", note: "Arrived today - available now" };
+  if (trips.some((x) => !x.arrivedOn && x.startDay < x.lastBusyDay && x.lastBusyDay === todayIso)) return { label: "Available", tone: "border border-emerald-400 bg-white text-emerald-700", daysText: "", title: "Today is the last day of the trip - the vehicle is available", note: "Last day of the trip - available" };
+  if (trips.some((x) => x.startDay > todayIso)) return { label: "Planned", tone: "bg-blue-100 text-blue-800", daysText: "", title: "Free now; an order is planned", note: "Free now; an order is planned" };
+  return { label: "Free", tone: "bg-emerald-50 text-emerald-700", daysText: "", title: "Free - available now", note: "Available now" };
+}
+
+// The day the vehicle can take its next order (its trips' last day, or the day after a maintenance / breakdown), and the trip an Extend would lengthen.
+function computeAvailability(v: VehicleRow, todayIso: string): { day: string; extendTrip: Trip | null; blocked: ManualStatus | null } {
+  let day = v.freeFrom && v.freeFrom > todayIso ? v.freeFrom : todayIso;
+  const blocked = v.manualStatus?.blocks ? v.manualStatus : null;
+  if (blocked?.availableFrom && blocked.availableFrom > day) day = blocked.availableFrom;
+  // A trip that finished by itself (nobody marked an arrival) can still be extended for a week: the vehicle is late and still out.
+  const justEnded = (x: Trip) => x.state === "closed" && x.assumed && isoDayDiff(x.lastBusyDay, todayIso) <= 7;
+  const extendable = (v.trips ?? []).filter((x) => !x.arrivedOn && (((x.state === "on_trip" || x.state === "planned") && x.freeFromDay === day) || x.state === "awaiting" || justEnded(x)));
+  const extendTrip = extendable.sort((a, b) => b.lastBusyDay.localeCompare(a.lastBusyDay))[0] ?? null;
+  return { day, extendTrip, blocked };
+}
+
+// A layout preference kept in this browser (it survives a reload and a new session), unlike the filters, which only live while the browser stays open.
+function useLocalPref<T>(key: string, initial: T): [T, (v: T | ((p: T) => T)) => void] {
+  const [value, setValue] = useState<T>(() => { try { const raw = localStorage.getItem(key); return raw === null ? initial : (JSON.parse(raw) as T); } catch { return initial; } });
+  const set = (v: T | ((p: T) => T)) => setValue((prev) => {
+    const next = typeof v === "function" ? (v as (p: T) => T)(prev) : v;
+    try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* storage unavailable */ }
+    return next;
+  });
+  return [value, set];
 }
 
 export default function VehiclePlanning() {
@@ -164,16 +253,21 @@ export default function VehiclePlanning() {
   const [reviewTicked, setReviewTicked] = useState<string[]>([]);
   const [reviewRun, setReviewRun] = useState<{ total: number; done: number; created: number; failed: { orderNumber: string; message: string }[]; finished: boolean } | null>(null);
   const [historyTarget, setHistoryTarget] = useState<VehicleRow | null>(null);
-  // A trip bar that was clicked (its details + Arrived / Undo), the Arrived date form, and a stretch that would run into the next trip.
+  // A trip dot that was clicked (its details + Arrived / Undo), and an extension that would run into the next trip.
   const [tripTarget, setTripTarget] = useState<{ vehicle: VehicleRow; trip: Trip } | null>(null);
-  const [arrivalTarget, setArrivalTarget] = useState<{ vehicle: VehicleRow; trip: Trip } | null>(null);
-  const [arrivalDay, setArrivalDay] = useState("");
-  const [arrivalNote, setArrivalNote] = useState("");
+  // The Status box of one vehicle (availability actions + a status set here: parking, maintenance, breakdown ...).
+  const [statusTarget, setStatusTarget] = useState<VehicleRow | null>(null);
+  const [stPick, setStPick] = useState("");
+  const [stDays, setStDays] = useState("");
+  const [stFrom, setStFrom] = useState("");   // the day the vehicle is available again (today + days)
+  const [stComment, setStComment] = useState("");
+  // The card that opens when a dot is clicked: the order and party of that assignment (and a Details button for the full box).
+  const [dotCard, setDotCard] = useState<{ vehicle: VehicleRow; trip: Trip; member: TripMember; x: number; y: number } | null>(null);
+  const assignStartRef = useRef<string | null>(null);   // the day the Assign box should open on (the day the vehicle is available)
   const [stretchAsk, setStretchAsk] = useState<{ vehicle: VehicleRow; trip: Trip; newEnd: string; clashes: Trip[]; reason?: string } | null>(null);
   // Moving a trip's last day LATER first asks why (ExtendReasonDialog); the clash question, when there is one, follows. And the admin's Reset planning dialog.
   const [extendAsk, setExtendAsk] = useState<{ vehicle: VehicleRow; trip: Trip; newEnd: string; clashes: Trip[] } | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
-  const [drag, setDrag] = useState<{ vehicleId: number; orderNumber: string; endIdx: number } | null>(null);
   // Change plan on one trip: move it to another vehicle, change its driver, or take the vehicle off.
   const [changeTarget, setChangeTarget] = useState<{ vehicle: VehicleRow; trip: Trip } | null>(null);
   const [moveSearch, setMoveSearch] = useState("");
@@ -181,7 +275,6 @@ export default function VehiclePlanning() {
   const [moveAsk, setMoveAsk] = useState<NotFreeAsk | null>(null);
   // Which order of a shared trip the Change dialog works on: "" = the whole trip.
   const [changeOrder, setChangeOrder] = useState("");
-  const [arrivalSameDay, setArrivalSameDay] = useState(true);
   const [changeDriverText, setChangeDriverText] = useState<string | null>(null);
   const [changeDriverExtra, setChangeDriverExtra] = useState<NotionDriver | null>(null);
   const [removeSure, setRemoveSure] = useState(false);
@@ -190,16 +283,18 @@ export default function VehiclePlanning() {
   const [availableOn, setAvailableOn] = usePersistentFilter<string>("vehiclePlanning:availableOn", "");
   const [availableOpen, setAvailableOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [refreshOpen, setRefreshOpen] = useState(false);
+  const [refreshFrom, setRefreshFrom] = useState("");   // the day Refresh from Notion reads orders from (empty = each vehicle's latest order)
+  // The blue "orders are in Notion but not in our system" line: closed with its X until the number changes.
+  const [missingHidden, setMissingHidden] = usePersistentFilter<number>("vehiclePlanning:missingHidden", -1);
   // Which vehicles to list: only those with orders (default), all of them, or only those with no orders (the ones free to assign).
   const [orderView, setOrderView] = usePersistentFilter<"with" | "all" | "none">("vehiclePlanning:orderView", "with");
   const [search, setSearch] = useState("");
-  // Plant / State / Driver — each a simple multi-select (empty array = no restriction), same
-  // "show only what's checked" idea as the Companies filter, just derived from whatever values
-  // are actually present in the current fleet rather than its own settings table.
-  const [plantFilter, setPlantFilter] = usePersistentFilter<string[]>("vehiclePlanning:plantFilter", []);
-  const [stateFilter, setStateFilter] = usePersistentFilter<string[]>("vehiclePlanning:stateFilter", []);
-  const [driverFilter, setDriverFilter] = usePersistentFilter<string[]>("vehiclePlanning:driverFilter", []);
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  // Excel-style column filters, the same as the other pages (Scan History, Stock Overview ...): a filter button on every column header and a "+ Filter" button.
+  // Client-side; kept while the browser stays open.
+  const [columnConditions, setColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("vehiclePlanning:columnFilters", {});
+  const setColumnCondition = (columnId: string, condition: FilterCondition) => setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
+  const clearColumnCondition = (columnId: string) => setColumnConditions((prev) => { const next = { ...prev }; delete next[columnId]; return next; });
   // Sort — click Vehicle or Order No. to toggle; switching to a column that wasn't already
   // sorted always starts ascending (never inherits whatever direction the other column was on),
   // clicking the same column again flips asc<->desc. null = whatever order the server returned.
@@ -216,13 +311,19 @@ export default function VehiclePlanning() {
   // today every time.
   const [windowDays, setWindowDays] = usePersistentFilter<number>("vehiclePlanning:windowDays", 14);
   // How wide one day is: Compact (as before), Normal (default) or Large. Remembered for the session.
-  const [dayColW, setDayColW] = usePersistentFilter<number>("vehiclePlanning:dayColW", DAY_COL_DEFAULT);
+  const [dayColW, setDayColW] = useLocalPref<number>("vehiclePlanning:dayColW", DAY_COL_DEFAULT);
+  // Column widths: hidden by default. The "Columns" button shows a drag handle on every heading (and one on the days); "Done" hides them again. Kept in this browser.
+  const [colWidths, setColWidths] = useLocalPref<Record<string, number>>("vehiclePlanning:colWidths", {});
+  const [adjustMode, setAdjustMode] = useState(false);
+  const widthOf = (key: string): number => colWidths[key] ?? (key === "actions" ? ACTION_COL_WIDTH : LABEL_COLS.find((c) => c.key === key)?.width ?? 90);
+  const labelTotal = LABEL_COLS.reduce((sum, c) => sum + widthOf(c.key), 0) + (canWrite ? widthOf("actions") : 0);
   const narrowDays = dayColW < 64; // too narrow for the full weekday and "29 Oct"
   // A day note being written / read: which vehicle and day, and the text in the box.
   const [noteTarget, setNoteTarget] = useState<{ vehicle: VehicleRow; day: string } | null>(null);
   const [noteText, setNoteText] = useState("");
   // Free a vehicle from an order (the row's Free button): which trip, and which order of a shared load.
-  const [freeAsk, setFreeAsk] = useState<{ vehicle: VehicleRow; order: string; options: FreeOption[] } | null>(null);
+  const [freeAsk, setFreeAsk] = useState<{ vehicle: VehicleRow; orders: string[]; options: FreeOption[] } | null>(null);
+  const [freeBusy, setFreeBusy] = useState(false);
   const [windowStartIso, setWindowStartIso] = usePersistentFilter<string>(
     "vehiclePlanning:windowStart", startOfDay(new Date()).toISOString(),
   );
@@ -376,14 +477,17 @@ export default function VehiclePlanning() {
       return res.json();
     },
     onSuccess: (data: any, body) => {
-      toast({ title: body.undo ? "Arrival removed" : "Arrival saved", description: `Order #${body.orderNumber}` });
+      const veh = allVehicles.find((x) => x.id === body.vehicleId);
+      if (body.undo) toast({ title: "Arrival removed", description: `Order #${body.orderNumber}` });
+      else toast({
+        title: "Arrived - free now", description: `${veh?.vehicleNumber ?? "Vehicle"} · order #${body.orderNumber}`,
+        action: <ToastAction altText="Undo the arrival" onClick={() => arrivalMutation.mutate({ vehicleId: body.vehicleId, orderNumber: body.orderNumber, undo: true })}>Undo</ToastAction>,
+      });
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
       // Back earlier than planned: say when it is free and how many orders are waiting for a vehicle.
-      if (!body.undo && data?.early && data?.waiting > 0 && data?.freeFrom && arrivalTarget) {
-        setEarlyAsk({ vehicle: arrivalTarget.vehicle, freeFrom: data.freeFrom, waiting: data.waiting });
-      }
-      setArrivalTarget(null);
+      if (!body.undo && data?.early && data?.waiting > 0 && data?.freeFrom && veh) setEarlyAsk({ vehicle: veh, freeFrom: data.freeFrom, waiting: data.waiting });
       setTripTarget(null);
+      setStatusTarget(null);
     },
     onError: (err: any) => toast({ title: "Could not save", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
@@ -417,7 +521,7 @@ export default function VehiclePlanning() {
       }
       const m = t.members.find((x) => x.orderNumber === changeOrder);
       const res = await apiRequest("POST", "/api/vehicle-planning/assign", {
-        orderNumber: changeOrder, vehicleId: destId, force: force || undefined, sameTripAs: sameTripAs || undefined,
+        orderNumber: changeOrder, vehicleId: destId, force: force || undefined, sameTripAs: sameTripAs || undefined, move: true,
         driverName: m?.driver || undefined, driverPageId: m?.driverNotionId || undefined,
       });
       return res.json();
@@ -467,6 +571,21 @@ export default function VehiclePlanning() {
     onError: (err: any) => toast({ title: "Could not remove the vehicle", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
+  // The vehicle's own status (maintenance, breakdown ...): save, or clear with an empty status. Our system only.
+  const statusMutation = useMutation({
+    mutationFn: async (body: { vehicleId: number; status: string | null; days: number; comment: string }) => {
+      const res = await apiRequest("POST", "/api/vehicle-planning/status", body);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to save the status");
+      return res.json();
+    },
+    onSuccess: (_d, body) => {
+      toast({ title: body.status ? "Status saved" : "Status cleared" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+      setStatusTarget(null);
+    },
+    onError: (err: any) => toast({ title: "Could not save the status", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
   // A day note: save (or, with empty text, remove) the note for one vehicle on one day.
   const noteMutation = useMutation({
     mutationFn: async (body: { vehicleId: number; day: string; text: string }) => {
@@ -495,7 +614,7 @@ export default function VehiclePlanning() {
   });
 
   useEffect(() => {
-    setAssignDate(""); setAssignSearch(""); setAssignPick(null); setDriverText(null); setDriverExtra(null); setAssignAsk(null);
+    setAssignDate(assignStartRef.current ?? ""); assignStartRef.current = null; setAssignSearch(""); setAssignPick(null); setDriverText(null); setDriverExtra(null); setAssignAsk(null);
   }, [assignTarget?.id]);
   useEffect(() => {
     setChangeOrder(""); setMoveSearch(""); setMoveDest(null); setMoveAsk(null); setChangeDriverText(null); setChangeDriverExtra(null); setRemoveSure(false);
@@ -506,12 +625,12 @@ export default function VehiclePlanning() {
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/vehicle-planning/sync");
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to sync from Notion");
-      return res.json() as Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number }>;
+      return res.json() as Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number; fetchedOrders?: number }>;
     },
     onSuccess: (result) => {
       toast({
         title: "Refreshed from Notion",
-        description: `${result.syncedVehicles} vehicle(s) checked${result.mismatches > 0 ? ` · ${result.mismatches} vehicle mismatch(es) found` : ""}${result.notInSystem > 0 ? ` · ${result.notInSystem} order(s) assigned in Notion but not in our system` : ""}`,
+        description: `${result.syncedVehicles} vehicle(s) checked${result.fetchedOrders != null ? ` · ${result.fetchedOrders} order(s) read` : ""}${result.mismatches > 0 ? ` · ${result.mismatches} vehicle mismatch(es) found` : ""}${result.notInSystem > 0 ? ` · ${result.notInSystem} order(s) assigned in Notion but not in our system` : ""}`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
       if (result.notInSystem > 0) openReview();
@@ -608,20 +727,23 @@ export default function VehiclePlanning() {
     settingsMutation.mutate(nextChecked.map((c) => c.toLowerCase()));
   }
 
-  // Distinct values actually present in the current fleet — what the Plant/State/Driver filter
-  // checkboxes offer, so the list only ever shows real options, never a stale/empty one.
-  const availablePlants = useMemo(
-    () => Array.from(new Set(allVehicles.map((v) => v.currentOrder?.plant).filter((x): x is string => !!x))).sort(),
-    [allVehicles],
-  );
-  const availableStates = useMemo(
-    () => Array.from(new Set(allVehicles.map((v) => v.state).filter((x): x is string => !!x))).sort(),
-    [allVehicles],
-  );
-  const availableDrivers = useMemo(
-    () => Array.from(new Set(allVehicles.map((v) => v.driver).filter((x): x is string => !!x))).sort(),
-    [allVehicles],
-  );
+  // The columns the filters can use. The Values checklist lists what is really in the current fleet.
+  const filterableColumns: FilterableColumn<VehicleRow>[] = useMemo((): FilterableColumn<VehicleRow>[] => {
+    const opts = (get: (v: VehicleRow) => string | null | undefined) =>
+      Array.from(new Set(allVehicles.map(get).filter((x): x is string => !!x))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).map((x) => ({ value: x, label: x }));
+    const todayIso = isoOf(new Date());
+    const plantState = (v: VehicleRow) => (v.currentOrder?.plant ? `${v.currentOrder.plant}${v.state ? `, ${v.state}` : ""}` : null);
+    return [
+      { id: "vehicleNumber", label: "Vehicle", filterType: "text", options: opts((v) => v.vehicleNumber), accessor: (v) => v.vehicleNumber },
+      { id: "rto", label: "RTO No.", filterType: "text", options: opts((v) => v.rtoNumber), accessor: (v) => v.rtoNumber },
+      { id: "order", label: "Order No.", filterType: "text", options: opts((v) => v.currentOrder?.orderNumber), accessor: (v) => v.currentOrder?.orderNumber },
+      { id: "plantState", label: "Plant / State", filterType: "text", options: opts(plantState), accessor: plantState },
+      { id: "driver", label: "Driver", filterType: "text", options: opts((v) => v.driver), accessor: (v) => v.driver },
+      { id: "tripDays", label: "Trip Days", filterType: "number", options: [], disableValues: true, accessor: (v) => (v.tripDays != null && v.tripDays !== "" && !Number.isNaN(Number(v.tripDays)) ? Number(v.tripDays) : null) },
+      { id: "status", label: "Status", filterType: "text", options: opts((v) => computeStatus(v, todayIso).label), accessor: (v) => computeStatus(v, todayIso).label },
+    ];
+  }, [allVehicles]);
+  const conditionList = Object.values(columnConditions).filter((c) => !isConditionEmpty(c));
 
   // Hidden by default (no sync history yet for this vehicle) unless the toggle is on or the
   // vehicle itself matches an active search — so a search can still surface one on demand.
@@ -631,12 +753,11 @@ export default function VehiclePlanning() {
       const matchesSearch = !searchLower
         || [v.vehicleNumber, v.driver, v.currentOrder?.orderNumber].some((f) => (f ?? "").toLowerCase().includes(searchLower));
       if (!matchesSearch) return false;
-      if (plantFilter.length > 0 && !plantFilter.includes(v.currentOrder?.plant ?? "")) return false;
-      if (stateFilter.length > 0 && !stateFilter.includes(v.state ?? "")) return false;
-      if (driverFilter.length > 0 && !driverFilter.includes(v.driver ?? "")) return false;
+      if (conditionList.length > 0 && !matchAllConditions(v, conditionList, filterableColumns)) return false;
       if (tripFilter === "awaiting" && v.vehicleState !== "awaiting") return false;
       if (tripFilter === "conflicts" && !(v.conflicts?.length)) return false;
       if (availableOn && !isAvailableOn(v, availableOn)) return false;
+      if (availableOn) return true;   // Available on a day lists EVERY vehicle free that day (with or without orders) - of the selected companies only
       // A vehicle with no orders is free on every day, so when the Available filter is on it is listed even with the switch off.
       if (orderView === "none") return !v.hasHistory;
       if (orderView === "all") return true;
@@ -667,62 +788,118 @@ export default function VehiclePlanning() {
   const dayIdx = (day: string) => differenceInCalendarDays(parse(day, "yyyy-MM-dd", new Date()), windowStart);
   const dayLabel = (day: string) => format(parse(day, "yyyy-MM-dd", new Date()), "d MMM");
 
-  // The trips to draw for one vehicle, each on a lane: trips that overlap in time (a conflict) go on separate lanes
-  // so neither bar hides the other. Cancelled trips are not drawn.
-  // A trip of two or more days ends at the MIDDLE of its last day (the vehicle is back by then and can go out again), and a trip that starts on
-  // such a day begins at the middle - so the previous and the new trip sit end to end on that day. A one-day trip fills its day.
-  const endsHalf = (t: Trip) => t.freeFromDay === t.lastBusyDay && t.startDay < t.lastBusyDay;
-  function tripLanes(v: VehicleRow): { trip: Trip; lane: number; startIdx: number; endIdx: number; drawStart: number; drawEnd: number; labelEndIdx: number; conflict: boolean }[] {
-    const shown = (v.trips ?? []).filter((t) => t.state !== "cancelled");
-    const laneEnds: number[] = [];
-    const conflictSet = new Set((v.conflicts ?? []).map((c) => c.orderNumber));
-    const placed = shown.map((trip) => {
-      const s0 = dayIdx(trip.startDay);
-      const e0 = dayIdx(trip.lastBusyDay) + 1; // exclusive: the bar covers the last busy day itself
-      const startHalf = shown.some((q) => q !== trip && endsHalf(q) && q.lastBusyDay === trip.startDay);
-      const sf = s0 + (startHalf ? 0.5 : 0);
-      const ef = e0 - (endsHalf(trip) ? 0.5 : 0);
-      let lane = laneEnds.findIndex((end) => end <= sf);
-      if (lane < 0) { lane = laneEnds.length; laneEnds.push(ef); } else laneEnds[lane] = ef;
-      return { trip, lane, s0, e0, sf, ef, conflict: conflictSet.has(trip.orderNumber) };
-    });
-    return placed
-      .filter((p) => p.e0 > 0 && p.s0 < windowDays)
-      .map((p) => {
-        const nextOnLane = placed.filter((q) => q.lane === p.lane && q.sf > p.sf).map((q) => q.sf).sort((a, b) => a - b)[0];
-        return {
-          trip: p.trip, lane: p.lane, conflict: p.conflict,
-          startIdx: Math.max(0, p.s0), endIdx: Math.min(windowDays, p.e0),
-          drawStart: p.s0 < 0 ? 0 : p.sf, drawEnd: p.e0 > windowDays ? windowDays : p.ef,
-          labelEndIdx: Math.min(windowDays, nextOnLane ?? windowDays),
-        };
-      });
-  }
-
-  const LANE_HEIGHT = 42;
-
-  function tripBarClass(state: TripState, conflict: boolean) {
-    if (conflict) return "bg-red-500";
-    switch (state) {
-      case "planned": return "border border-dashed border-blue-600 bg-blue-200";   // new: not started yet
-      case "awaiting": return "bg-amber-400";
-      case "arrived": return "bg-slate-400";                                          // past
-      case "closed": return "bg-slate-300";                                           // past
-      default: return "bg-emerald-600";                                               // current: on the trip now
-    }
-  }
   const stateText: Record<TripState, string> = {
-    planned: "Planned", on_trip: "On the trip", awaiting: "Arrival due - waiting for arrival", arrived: "Arrived", closed: "Closed (no arrival recorded)", cancelled: "Cancelled",
+    planned: "Planned", on_trip: "On the trip", awaiting: "Overdue - past its last day, no arrival recorded", arrived: "Arrived", closed: "Closed (no arrival recorded)", cancelled: "Cancelled",
   };
 
-  // Called when the right edge of a bar is let go on a new day. A stretch into the next trip asks first; anything else is saved straight away.
-  function finishStretch(v: VehicleRow, trip: Trip, newEnd: string) {
-    if (newEnd === trip.lastBusyDay) return;
-    const clashes = (v.trips ?? []).filter((t) => t.orderNumber !== trip.orderNumber && t.state !== "cancelled" && t.state !== "arrived" && t.state !== "closed"
-      && t.startDay > trip.startDay && t.startDay <= newEnd);
-    if (newEnd > trip.lastBusyDay) { setExtendAsk({ vehicle: v, trip, newEnd, clashes }); return; }   // a longer trip needs a reason first
-    if (clashes.length > 0) { setStretchAsk({ vehicle: v, trip, newEnd, clashes }); return; }
-    expectedEndMutation.mutate({ vehicleId: v.id, orderNumber: trip.orderNumber, expectedEnd: newEnd === trip.plannedLastDay ? null : newEnd });
+  // One dot per active order per day: a shared load shows two dots until its shorter slip ends. `labels` = where each trip's party name is written (above its first dot).
+  function dotsFor(v: VehicleRow) {
+    const byIdx: { trip: Trip; member: TripMember; conflict: boolean; extended: boolean }[][] = days.map(() => []);
+    const labels: { trip: Trip; startIdx: number; endIdx: number }[] = [];
+    // The days an extension added (after the planned last day, up to the extended end or the arrival): marked, with the reason written over them.
+    const extLabels: { trip: Trip; startIdx: number; endIdx: number; reason: string | null }[] = [];
+    const conflictSet = new Set((v.conflicts ?? []).map((c) => c.orderNumber));
+    const shown = (v.trips ?? []).filter((x) => x.state !== "cancelled").sort((a, b) => a.startDay.localeCompare(b.startDay));
+    for (const tr of shown) {
+      let first = Number.POSITIVE_INFINITY, last = -1;
+      const extFrom = dayIdx(tr.plannedLastDay) + 1;
+      const extTo = tr.expectedEnd && tr.expectedEnd > tr.plannedLastDay ? dayIdx(tr.lastBusyDay < tr.expectedEnd ? tr.lastBusyDay : tr.expectedEnd) : -1;
+      for (const m of tr.members) {
+        const s = dayIdx(m.startDay), e = dayIdx(memberEnd(tr, m));
+        const followsTrip = m.plannedLastDay === tr.plannedLastDay;
+        for (let i = Math.max(0, s); i <= Math.min(windowDays - 1, e); i++) byIdx[i].push({ trip: tr, member: m, conflict: conflictSet.has(tr.orderNumber), extended: followsTrip && i >= extFrom && i <= extTo });
+        first = Math.min(first, s); last = Math.max(last, e);
+      }
+      if (last >= 0 && first < windowDays) labels.push({ trip: tr, startIdx: Math.max(0, first), endIdx: Math.min(windowDays - 1, last) });
+      if (extTo >= extFrom && extTo >= 0 && extFrom < windowDays) extLabels.push({ trip: tr, startIdx: Math.max(0, extFrom), endIdx: Math.min(windowDays - 1, extTo), reason: tr.expectedEndReason ?? null });
+    }
+    return { byIdx, labels, extLabels };
+  }
+
+  // The trips an extension to `newEnd` would run into (they start before the longer trip is back).
+  function clashesFor(v: VehicleRow, trip: Trip, newEnd: string): Trip[] {
+    return (v.trips ?? []).filter((x) => x.orderNumber !== trip.orderNumber && x.state !== "cancelled" && x.state !== "arrived" && x.state !== "closed"
+      && x.startDay > trip.startDay && x.startDay <= newEnd);
+  }
+  // The Extend button: opens the box with +1 day chosen; the reason is asked there, then the clash question when the longer trip runs into the next one.
+  function openExtend(v: VehicleRow, trip: Trip) {
+    // A late vehicle (the trip already ended) is still out today, so the new last day starts at today; otherwise the day after the current end.
+    const base = trip.lastBusyDay < isoOf(new Date()) ? format(addDays(new Date(), -1), "yyyy-MM-dd") : trip.lastBusyDay;
+    const next = format(addDays(parse(base, "yyyy-MM-dd", new Date()), 1), "yyyy-MM-dd");
+    setExtendAsk({ vehicle: v, trip, newEnd: next, clashes: [] });
+  }
+  // Arrived is only ever TODAY: one click, the vehicle is free now (and can go out again the same day). An Undo message follows.
+  function arriveToday(v: VehicleRow, trip: Trip) {
+    arrivalMutation.mutate({ vehicleId: v.id, orderNumber: trip.orderNumber, arrivedOn: isoOf(new Date()), freeSameDay: true });
+  }
+  function openAssign(v: VehicleRow, day?: string) { assignStartRef.current = day ?? null; setAssignTarget(v); }
+  // Frees every ticked order of the vehicle (one after the other); a single one keeps the usual message.
+  async function freeSelected() {
+    if (!freeAsk || freeAsk.orders.length === 0) return;
+    const { vehicle, orders } = freeAsk;
+    if (orders.length === 1) { removeMutation.mutate({ vehicleId: vehicle.id, orderNumber: orders[0] }); return; }
+    setFreeBusy(true);
+    const failed: string[] = [];
+    for (const no of orders) {
+      try {
+        const res = await apiRequest("POST", "/api/vehicle-planning/trips/remove-vehicle", { vehicleId: vehicle.id, orderNumber: no });
+        if (!res.ok) throw new Error("failed");
+      } catch { failed.push(`#${no}`); }
+    }
+    setFreeBusy(false);
+    queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/available-orders"] });
+    toast(failed.length
+      ? { title: `${orders.length - failed.length} of ${orders.length} orders freed`, description: `Could not free ${failed.join(", ")} (it may already be dispatched or loading).`, variant: "destructive" }
+      : { title: `${orders.length} orders freed`, description: `${vehicle.vehicleNumber} has no vehicle or driver on them any more.` });
+    setFreeAsk(null);
+  }
+  // Drag the right edge of a heading: one label column, or (target "day") the width of every day column.
+  function startResize(e: { clientX: number; preventDefault(): void; stopPropagation(): void }, target: string) {
+    e.preventDefault(); e.stopPropagation();
+    const x0 = e.clientX;
+    const start = target === "day" ? dayColW : widthOf(target);
+    const move = (ev: PointerEvent) => {
+      const w = Math.round(start + ev.clientX - x0);
+      if (target === "day") setDayColW(Math.max(DAY_COL_MIN, Math.min(DAY_COL_MAX, w)));
+      else setColWidths((prev) => ({ ...prev, [target]: Math.max(40, Math.min(420, w)) }));
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  // Refresh now: an admin's chosen day is saved as the start date first, then Notion is read.
+  async function startRefresh() {
+    const saved = (fleetQuery.data?.planningStartDate ?? "").slice(0, 10);
+    if (canWrite && isAdmin && refreshFrom !== saved) {
+      try {
+        const res = await apiRequest("POST", "/api/vehicle-planning/start-date", { startDate: refreshFrom || null });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Could not save the day");
+        await queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+      } catch (err: any) {
+        toast({ title: "Could not save the day", description: parseApiErrorMessage(err), variant: "destructive" });
+        return;
+      }
+    }
+    setRefreshOpen(false);
+    syncMutation.mutate();
+  }
+  function openStatus(v: VehicleRow) {
+    const n = v.manualStatus?.blocks ? Math.max(1, v.manualStatus.daysLeft ?? 1) : 0;
+    setStatusTarget(v); setStPick(v.manualStatus?.status ?? ""); setStComment(v.manualStatus?.comment ?? "");
+    setStDays(n ? String(n) : ""); setStFrom(n ? format(addDays(new Date(), n), "yyyy-MM-dd") : "");
+  }
+  // Days and the "available again" date are one setting: changing either updates the other (days counted from today).
+  function changeStDays(value: string) {
+    setStDays(value);
+    const n = Math.floor(Number(value));
+    setStFrom(n >= 1 && n <= 365 ? format(addDays(new Date(), n), "yyyy-MM-dd") : "");
+  }
+  function changeStFrom(value: string) {
+    setStFrom(value);
+    const n = value ? differenceInCalendarDays(parse(value, "yyyy-MM-dd", new Date()), startOfDay(new Date())) : 0;
+    setStDays(n >= 1 ? String(n) : "");
   }
 
   const chipCls = (on: boolean) => `rounded-full px-3 py-1 text-xs font-medium ${on ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`;
@@ -745,7 +922,7 @@ export default function VehiclePlanning() {
   function openFree(v: VehicleRow, trips: Trip[]) {
     const options = freeOptionsOf(trips);
     const open = options.filter((o) => !o.locked);
-    setFreeAsk({ vehicle: v, options, order: options.length === 1 ? options[0].orderNumber : open.length === 1 ? open[0].orderNumber : "" });
+    setFreeAsk({ vehicle: v, options, orders: options.length === 1 ? [options[0].orderNumber] : open.length === 1 ? [open[0].orderNumber] : [] });
   }
 
   // The label over a trip's bar: one party, or for a shared load both names when there is room ("Party A + Party B") and the first with "+1" when there is not.
@@ -810,27 +987,18 @@ export default function VehiclePlanning() {
     );
   }
 
-  function openArrival(v: VehicleRow, t: Trip) {
-    const todayIso = format(new Date(), "yyyy-MM-dd");
-    setArrivalDay(t.lastBusyDay < todayIso && t.lastBusyDay >= t.startDay ? t.lastBusyDay : todayIso);
-    setArrivalNote("");
-    setArrivalSameDay(true);
-    setArrivalTarget({ vehicle: v, trip: t });
-  }
-
   return (
-    <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
-      <PageHeader
-        icon={CalendarClock}
-        title="Vehicle Planning"
-      />
-
+    <div className="mx-auto w-full max-w-none px-2 pb-3 pt-10 sm:px-3">
       {/* After a Reset planning: when, by whom, the day Refresh from Notion starts from, and Undo (7 days). */}
       <ResetBanner planningStartDate={fleetQuery.data?.planningStartDate ?? null} lastReset={fleetQuery.data?.lastReset ?? null} lastRefreshedAt={fleetQuery.data?.lastRefreshedAt ?? null} isAdmin={canWrite && isAdmin} onRefreshNow={() => syncMutation.mutate()} onResetAgain={() => setResetOpen(true)} />
 
       {/* Fleet controls - search at the left; Companies (with the planning settings); at the right Filter, Available and Refresh from Notion
           (the only thing that ever talks to Notion; the page itself just reads vehicle_planning_state). */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <h2 className="mr-1 flex items-center gap-2 text-lg font-bold leading-none text-[#001d6e]">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#001d6e] text-white"><CalendarClock className="h-4 w-4" /></span>
+          Vehicle Planning
+        </h2>
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
           <Input
@@ -870,7 +1038,6 @@ export default function VehiclePlanning() {
             </div>
             {canWrite && isAdmin && (
               <div className="space-y-3 border-t pt-3">
-                <PlanningStartDateRow planningStartDate={fleetQuery.data?.planningStartDate ?? null} />
                 <Button size="sm" variant="outline" className="h-8 w-full rounded-full border-red-200 px-3 text-xs text-red-700 hover:bg-red-50 hover:text-red-800"
                   title="Clear our planning board and start again from a day. Notion is not changed."
                   onClick={() => { setFilterOpen(false); setResetOpen(true); }}>
@@ -890,53 +1057,14 @@ export default function VehiclePlanning() {
         )}
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {/* Plant / State / Driver in one Filter button - purely client-side, they only narrow what is displayed. */}
-          <Popover open={filtersOpen} onOpenChange={setFiltersOpen}>
-            <PopoverTrigger asChild>
-              <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${plantFilter.length + stateFilter.length + driverFilter.length > 0 ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : ""}`}>
-                <ListFilter className="mr-1.5 h-3.5 w-3.5" />
-                Filter{plantFilter.length + stateFilter.length + driverFilter.length > 0 ? ` (${plantFilter.length + stateFilter.length + driverFilter.length})` : ""}
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-[34rem] max-w-[calc(100vw-1rem)] space-y-2" align="end">
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Show only</div>
-                {plantFilter.length + stateFilter.length + driverFilter.length > 0 && (
-                  <button type="button" className="text-[11px] text-gray-400 hover:text-red-500" onClick={() => { setPlantFilter([]); setStateFilter([]); setDriverFilter([]); }}>
-                    Clear all
-                  </button>
-                )}
-              </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                {([
-                  { label: "Plant", options: availablePlants, active: plantFilter, setActive: setPlantFilter },
-                  { label: "State", options: availableStates, active: stateFilter, setActive: setStateFilter },
-                  { label: "Driver", options: availableDrivers, active: driverFilter, setActive: setDriverFilter },
-                ] as const).map((f) => (
-                  <div key={f.label} className="min-w-0">
-                    <div className="mb-1 flex items-center justify-between border-b pb-1">
-                      <span className="text-xs font-semibold text-gray-700">{f.label}{f.active.length > 0 ? ` (${f.active.length})` : ""}</span>
-                      {f.active.length > 0 && (
-                        <button type="button" className="text-[11px] text-gray-400 hover:text-red-500" onClick={() => f.setActive([])}>Clear</button>
-                      )}
-                    </div>
-                    <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1">
-                      {f.options.map((opt) => (
-                        <label key={opt} className="flex items-center gap-2 text-xs text-gray-700">
-                          <Checkbox
-                            checked={f.active.includes(opt)}
-                            onCheckedChange={(next) => f.setActive(next ? [...f.active, opt] : f.active.filter((x) => x !== opt))}
-                          />
-                          <span className="truncate">{opt}</span>
-                        </label>
-                      ))}
-                      {f.options.length === 0 && <div className="py-2 text-center text-xs text-gray-400">None found</div>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </PopoverContent>
-          </Popover>
+          {/* "+ Filter": pick a column, then the same Values / Condition builder the other pages have. Every column header has its own filter button too. */}
+          <AddColumnFilterButton
+            columns={filterableColumns}
+            conditions={columnConditions}
+            onApply={setColumnCondition}
+            onClear={clearColumnCondition}
+            className="h-8 gap-1 rounded-full border-dashed border-[#001d6e]/40 bg-white px-3 text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+          />
 
           {/* Available: the vehicles that are free on a day you pick (by their arrival / trip end). */}
           <Popover open={availableOpen} onOpenChange={setAvailableOpen}>
@@ -968,20 +1096,35 @@ export default function VehiclePlanning() {
               ? new Date(fleetQuery.data.lastRefreshedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true })
               : "never"}
           </span>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-8 rounded-full px-3 text-xs"
-            onClick={() => syncMutation.mutate()}
-            disabled={syncMutation.isPending}
-          >
-            <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
-            {syncMutation.isPending ? "Refreshing…" : "Refresh from Notion"}
-          </Button>
+          {/* Refresh from Notion: press it to choose the day to read orders from (every order on or after that day, for the selected companies' vehicles; empty = each
+              vehicle's latest order), then Refresh now. */}
+          <Popover open={refreshOpen} onOpenChange={(open) => { setRefreshOpen(open); if (open) setRefreshFrom((fleetQuery.data?.planningStartDate ?? "").slice(0, 10)); }}>
+            <PopoverTrigger asChild>
+              <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs" disabled={syncMutation.isPending}>
+                <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
+                {syncMutation.isPending ? "Refreshing…" : "Refresh from Notion"}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-72 space-y-2.5" align="end">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Read orders from</div>
+              {canWrite && isAdmin ? (
+                <div className="flex items-center gap-2">
+                  <Input type="date" value={refreshFrom} max={format(new Date(), "yyyy-MM-dd")} onChange={(e) => setRefreshFrom(e.target.value)} className="h-9" />
+                  {refreshFrom && <button type="button" className="shrink-0 text-[11px] text-gray-500 underline decoration-dotted hover:text-gray-800" onClick={() => setRefreshFrom("")}>Latest only</button>}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-700">{fleetQuery.data?.planningStartDate ? dayLabel(fleetQuery.data.planningStartDate.slice(0, 10)) : "Each vehicle's latest order"} (an admin can change the day)</p>
+              )}
+              <p className="text-[11px] text-gray-500">Every order on or after that day is brought in for the selected companies' vehicles. With no day, only each vehicle's latest order is read.</p>
+              <Button size="sm" className="w-full" disabled={syncMutation.isPending} onClick={() => void startRefresh()}>
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Refresh now
+              </Button>
+            </PopoverContent>
+          </Popover>
         </div>
       </div>
 
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         {/* Which vehicles to list - same pill style as the 14 / 30 days switch. */}
         <div className="flex overflow-hidden rounded-full border border-gray-200 bg-white text-xs font-medium" role="group" aria-label="Vehicles to show">
           {([
@@ -1004,7 +1147,6 @@ export default function VehiclePlanning() {
         {/* Quick filters for the two things that need a person: a vehicle past its planned end with no arrival recorded,
             and a vehicle with two trips that cannot both happen. */}
         {([
-          { key: "awaiting" as const, label: "Awaiting arrival", count: awaitingCount, on: "border-amber-400 bg-amber-50 text-amber-800", off: "text-amber-700" },
           { key: "conflicts" as const, label: "Conflicts", count: conflictCount, on: "border-red-400 bg-red-50 text-red-700", off: "text-red-600" },
         ]).map((c) => (
           <button
@@ -1018,42 +1160,11 @@ export default function VehiclePlanning() {
           </button>
         ))}
 
-        {/* What the bar colours mean. */}
-        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-600" aria-label="Bar colours">
-          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-emerald-600" /> Current</span>
-          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full border border-dashed border-blue-600 bg-blue-200" /> New</span>
-          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-slate-400" /> Past</span>
-          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-amber-400" /> Waiting for arrival</span>
-          <span className="flex items-center gap-1"><span className="h-2 w-5 rounded-full bg-red-500" /> Clash</span>
-        </div>
-      </div>
-
-      {/* Window controls — 14/30 day toggle, a calendar picker for an exact single date or
-          range, and Prev/Today/Next to stretch the view into the past or future a page (one
-          window's width) at a time. */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="flex overflow-hidden rounded-full border border-gray-200 bg-white text-xs font-medium">
-          {([14, 30] as const).map((n) => (
-            <button
-              key={n}
-              type="button"
-              onClick={() => setWindowDays(n)}
-              className={`px-3 py-1.5 ${windowDays === n ? "bg-[#001d6e] text-white" : "text-gray-600 hover:bg-gray-50"}`}
-            >
-              {n} days
-            </button>
-          ))}
-        </div>
-
-        {/* How wide each day is: drag to fit more days on the screen or to give each day more room. */}
-        <div className="flex h-8 items-center gap-2 rounded-full border border-gray-200 bg-white px-3 text-xs text-gray-600" title="How wide each day column is">
-          <span>Day width</span>
-          <input type="range" min={DAY_COL_MIN} max={DAY_COL_MAX} step={5} value={dayColW} onChange={(e) => setDayColW(Number(e.target.value))}
-            aria-label="Day column width" className="h-1.5 w-28 cursor-pointer accent-[#001d6e]" />
-          <span className="w-9 tabular-nums text-gray-500">{dayColW}px</span>
-          {dayColW !== DAY_COL_DEFAULT && <button type="button" className="text-[11px] text-gray-400 underline decoration-dotted hover:text-gray-700" onClick={() => setDayColW(DAY_COL_DEFAULT)}>Reset</button>}
-        </div>
-
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+        <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${adjustMode ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : ""}`}
+          onClick={() => setAdjustMode((p) => !p)} aria-pressed={adjustMode} title={adjustMode ? "Hide the column width handles" : "Show the column width handles"}>
+          <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" /> {adjustMode ? "Done" : "Columns"}
+        </Button>
         <Popover
           open={dateOpen}
           onOpenChange={(open) => {
@@ -1128,8 +1239,7 @@ export default function VehiclePlanning() {
             )}
           </PopoverContent>
         </Popover>
-
-        <div className="ml-auto flex items-center gap-1">
+        <div className="flex items-center gap-1">
           <Button size="sm" variant="outline" className="h-8 w-8 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -windowDays))} aria-label="Back a full window" title="Back a full window">
             <ChevronsLeft className="h-4 w-4" />
           </Button>
@@ -1146,12 +1256,38 @@ export default function VehiclePlanning() {
             <ChevronsRight className="h-4 w-4" />
           </Button>
         </div>
+        </div>
       </div>
 
-      {missingCount > 0 && (
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+      {conditionList.length > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
+          {Object.entries(columnConditions).filter(([, c]) => !isConditionEmpty(c)).map(([id, condition]) => (
+            <ColumnFilterChipView key={id} columnId={id} condition={condition} columns={filterableColumns} onEdit={(c) => setColumnCondition(id, c)} onRemove={() => clearColumnCondition(id)} />
+          ))}
+          <button type="button" className="text-xs text-gray-500 underline decoration-dotted hover:text-red-600" onClick={() => setColumnConditions({})}>Clear all</button>
+        </div>
+      )}
+
+      {adjustMode && (
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-[#001d6e]/20 bg-[#001d6e]/5 px-3 py-1.5 text-xs text-[#001d6e]">
+          <span className="font-medium">Resize columns: drag the right edge of a heading (the light strip). Dragging a day heading changes every day.</span>
+          <label className="flex items-center gap-2">
+            Day width
+            <input type="range" min={DAY_COL_MIN} max={DAY_COL_MAX} step={5} value={dayColW} onChange={(e) => setDayColW(Number(e.target.value))} aria-label="Day column width" className="h-1.5 w-28 cursor-pointer accent-[#001d6e]" />
+            <span className="w-9 tabular-nums">{dayColW}px</span>
+          </label>
+          <button type="button" className="underline decoration-dotted hover:text-[#001d6e]/70" onClick={() => { setColWidths({}); setDayColW(DAY_COL_DEFAULT); }}>Reset widths</button>
+          <Button size="sm" className="ml-auto h-7 px-3 text-xs" onClick={() => setAdjustMode(false)}>Done</Button>
+        </div>
+      )}
+
+      {missingCount > 0 && missingHidden !== missingCount && (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-1 text-xs text-sky-900">
           <span className="flex items-center gap-1.5"><DatabaseZap className="h-3.5 w-3.5" /> {missingCount} order{missingCount === 1 ? " is" : "s are"} in Notion but not in our system.</span>
-          <Button size="sm" variant="outline" className="h-7 border-sky-300 px-3 text-xs" onClick={openReview}>Review</Button>
+          <span className="flex items-center gap-1">
+            <Button size="sm" variant="outline" className="h-7 border-sky-300 px-3 text-xs" onClick={openReview}>Review</Button>
+            <button type="button" onClick={() => setMissingHidden(missingCount)} className="flex h-6 w-6 items-center justify-center rounded text-sky-700 hover:bg-sky-100" aria-label="Close" title="Close (it comes back if the number changes)"><X className="h-4 w-4" /></button>
+          </span>
         </div>
       )}
 
@@ -1175,7 +1311,7 @@ export default function VehiclePlanning() {
       ) : (
         <div
           ref={ganttRef}
-          className={`max-h-[calc(100vh-9rem)] overflow-auto overscroll-x-contain border bg-white shadow-sm focus:outline-none ${ganttActive ? "border-[#001d6e]/40 ring-2 ring-[#001d6e]/30" : "border-gray-200"}`}
+          className={`max-h-[calc(100vh-10rem)] overflow-auto overscroll-x-contain border bg-white shadow-sm focus:outline-none ${ganttActive ? "border-[#001d6e]/40 ring-2 ring-[#001d6e]/30" : "border-gray-200"}`}
           tabIndex={0}
           title={ganttActive ? "Swipe sideways or use the arrow keys to move the date range" : "Click, then swipe sideways or use the arrow keys to move the date range"}
           onFocus={() => setGanttActive(true)}
@@ -1191,7 +1327,7 @@ export default function VehiclePlanning() {
             else if (e.key === "ArrowRight") { e.preventDefault(); setWindowStart((d) => addDays(d, SCROLL_STEP_DAYS)); }
           }}
         >
-          <div style={{ minWidth: ROW_LABEL_WIDTH + (canWrite ? ACTION_COL_WIDTH : 0) + windowDays * dayColW }}>
+          <div style={{ minWidth: labelTotal + windowDays * dayColW }}>
             {/* Day header — one continuous bar with date ticks, not a row of separately
                 bordered boxes (that read as "many small columns" rather than one timeline). */}
             <div className="sticky top-0 z-30 flex border-b border-gray-200 bg-[#001d6e] text-white">
@@ -1199,29 +1335,41 @@ export default function VehiclePlanning() {
               <div className="sticky left-0 z-20 flex shrink-0 bg-[#001d6e] shadow-[2px_0_4px_-1px_rgba(0,0,0,0.25)]">
               {LABEL_COLS.map((c) => {
                 const sortKey = c.key === "vehicleNumber" || c.key === "orderNumber" ? c.key : null;
+                const col = filterableColumns.find((f) => f.id === HEADER_FILTER_IDS[c.key]);
                 return (
                   <div
                     key={c.key}
-                    style={{ width: c.width }}
-                    className={`shrink-0 truncate border-r border-white/10 px-2 py-2.5 text-[10px] font-semibold uppercase tracking-wide ${sortKey ? "cursor-pointer select-none" : ""}`}
-                    onClick={sortKey ? () => toggleVpSort(sortKey) : undefined}
+                    style={{ width: widthOf(c.key) }}
+                    className="relative flex shrink-0 items-center gap-1 overflow-hidden border-r border-white/10 px-2 py-2.5 text-[10px] font-semibold uppercase tracking-wide"
                   >
-                    {c.label}
-                    {sortKey && sortBy === sortKey && (
-                      sortOrder === "asc" ? <ChevronUp className="ml-0.5 inline h-3 w-3" /> : <ChevronDown className="ml-0.5 inline h-3 w-3" />
+                    <span className={`min-w-0 truncate ${sortKey ? "cursor-pointer select-none" : ""}`} onClick={sortKey ? () => toggleVpSort(sortKey) : undefined}>
+                      {c.label}
+                      {sortKey && sortBy === sortKey && (
+                        sortOrder === "asc" ? <ChevronUp className="ml-0.5 inline h-3 w-3" /> : <ChevronDown className="ml-0.5 inline h-3 w-3" />
+                      )}
+                    </span>
+                    {col && (
+                      <ColumnHeaderFilterButton column={col} condition={columnConditions[col.id]} onChange={(cond) => setColumnCondition(col.id, cond)} onRemove={() => clearColumnCondition(col.id)} />
                     )}
+                    {adjustMode && <span onPointerDown={(e) => startResize(e, c.key)} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none bg-white/30 hover:bg-white/70" title="Drag to resize this column" />}
                   </div>
                 );
               })}
-              {canWrite && <div style={{ width: ACTION_COL_WIDTH }} className="shrink-0 border-r border-white/10 px-2 py-2.5 text-[10px] font-semibold uppercase tracking-wide">Actions</div>}
+              {canWrite && (
+                <div style={{ width: widthOf("actions") }} className="relative shrink-0 overflow-hidden border-r border-white/10 px-2 py-2.5 text-[10px] font-semibold uppercase tracking-wide">
+                  Actions
+                  {adjustMode && <span onPointerDown={(e) => startResize(e, "actions")} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none bg-white/30 hover:bg-white/70" title="Drag to resize this column" />}
+                </div>
+              )}
               </div>
               <div className="flex flex-1">
                 {days.map((d, i) => (
                   <div
                     key={i}
                     style={{ width: `${100 / windowDays}%`, minWidth: dayColW }}
-                    className={`shrink-0 border-l border-white/10 text-center ${narrowDays ? "py-1.5 text-[11px]" : "py-2 text-xs"} ${isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
+                    className={`relative shrink-0 border-l border-white/10 text-center ${narrowDays ? "py-1.5 text-[11px]" : "py-2 text-xs"} ${isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
                   >
+                    {adjustMode && <span onPointerDown={(e) => startResize(e, "day")} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none bg-white/25 hover:bg-white/60" title="Drag to change the width of every day" />}
                     <div className="opacity-70">{format(d, narrowDays ? "EEE" : "EEEE")}</div>
                     <div className={narrowDays ? "" : "text-sm font-semibold"}>{format(d, narrowDays ? "d/M" : "d MMM")}</div>
                   </div>
@@ -1231,10 +1379,14 @@ export default function VehiclePlanning() {
 
             {/* Vehicle rows */}
             {vehicles.map((v, rowIdx) => {
-              const lanes = tripLanes(v);
-              const laneCount = Math.max(1, ...lanes.map((l) => l.lane + 1));
-              const freeIdx = v.freeFrom ? dayIdx(v.freeFrom) : null;
-              const canAssign = canWrite; // now shown on a busy row too, not just a free one
+              const { byIdx, labels, extLabels } = dotsFor(v);
+              // Two (or more) orders on one day are stacked up and down: the row grows with the tallest stack and the Assign / Extend buttons sit below it.
+              const maxStack = Math.max(1, ...byIdx.map((c) => c.length));
+              const btnTop = Math.max(38, 22 + maxStack * 14 + (maxStack - 1) * 3 + 4);
+              const rowH = btnTop + 26;
+              const todayIso = isoOf(today);
+              const av = computeAvailability(v, todayIso);
+              const st = computeStatus(v, todayIso);
               const stripe = rowIdx % 2 === 1;
               return (
                 <div key={v.id} className={`flex border-b border-gray-100 last:border-0 ${stripe ? "bg-slate-50/70" : "bg-white"}`}>
@@ -1258,7 +1410,7 @@ export default function VehiclePlanning() {
                   ] as const).map((c) => (
                     <div
                       key={c.key}
-                      style={{ width: LABEL_COLS.find((l) => l.key === c.key)!.width }}
+                      style={{ width: widthOf(c.key) }}
                       className={`shrink-0 cursor-pointer border-r border-gray-100 px-2 py-2.5 text-[11px] hover:bg-[#001d6e]/5 ${c.key === "driver" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1" : ""}`}
                       title={c.key === "orderNumber" ? "Click for this vehicle's order history" : (c.value ?? undefined)}
                       onClick={() => setHistoryTarget(v)}
@@ -1276,15 +1428,20 @@ export default function VehiclePlanning() {
                       {/* Driver names run longer than this column is wide — wraps onto 2 lines
                           instead of cutting off with an ellipsis like every other column here. */}
                       <span className={c.key === "driver" ? "line-clamp-2 break-words leading-tight" : "truncate"}>{c.value ?? "—"}</span>
+                      {c.key === "vehicleNumber" && v.volume != null && <span className="block text-[9px] font-normal leading-none text-gray-400" title="Vehicle volume">Vol {v.volume}</span>}
                     </div>
                   ))}
+                  <div style={{ width: widthOf("status") }} className="shrink-0 cursor-pointer border-r border-gray-100 px-1.5 py-2 hover:bg-[#001d6e]/5" title={st.title} onClick={() => openStatus(v)}>
+                    <span className={`inline-block max-w-full truncate rounded-full px-2 py-0.5 align-middle text-[10px] font-semibold ${st.tone}`}>{st.label}</span>
+                    {st.daysText && <div className={`mt-0.5 truncate text-[10px] ${st.label === "Overdue" ? "font-semibold text-amber-700" : "text-gray-500"}`}>{st.daysText}</div>}
+                  </div>
                   {canWrite && (() => {
                     const at = actionTrips(v);
                     const freeable = at.live.filter((x) => !x.lockedReason);
                     const allLocked = at.live.length > 0 && freeable.length === 0;
                     const dueNow = at.out?.state === "awaiting";
                     return (
-                      <div style={{ width: ACTION_COL_WIDTH }} className="flex shrink-0 flex-col justify-center gap-1 border-r border-gray-100 px-1.5 py-1">
+                      <div style={{ width: widthOf("actions") }} className="flex shrink-0 flex-col justify-center gap-1 border-r border-gray-100 px-1.5 py-1">
                         {at.live.length > 0 && (
                           <button type="button" disabled={allLocked} onClick={() => openFree(v, at.live)}
                             className="rounded-md border border-red-200 bg-white px-1.5 py-0.5 text-[11px] font-semibold leading-tight text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400 disabled:hover:bg-white"
@@ -1293,9 +1450,9 @@ export default function VehiclePlanning() {
                           </button>
                         )}
                         {at.live.length > 0 && (
-                          <button type="button" disabled={!at.out} onClick={() => at.out && openArrival(v, at.out)}
+                          <button type="button" disabled={!at.out} onClick={() => at.out && arriveToday(v, at.out)}
                             className={`rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-tight disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-white disabled:text-gray-400 ${dueNow ? "border-amber-400 bg-amber-100 text-amber-900 hover:bg-amber-200" : "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"}`}
-                            title={at.out ? `${v.vehicleNumber} came back from order #${at.out.members.map((m) => m.orderNumber).join(" + #")}` : at.planned ? `Order #${at.planned.orderNumber} starts on ${dayLabel(at.planned.startDay)}. Nothing is out yet.` : undefined}>
+                            title={at.out ? `${v.vehicleNumber} came back today from order #${at.out.members.map((m) => m.orderNumber).join(" + #")} - free now` : at.planned ? `Order #${at.planned.orderNumber} starts on ${dayLabel(at.planned.startDay)}. Nothing is out yet.` : undefined}>
                             Arrived
                           </button>
                         )}
@@ -1303,14 +1460,17 @@ export default function VehiclePlanning() {
                     );
                   })()}
                   </div>
-                  <div data-track className="relative flex-1" style={{ minHeight: 10 + laneCount * LANE_HEIGHT }}>
-                    {/* One continuous area. A thin, light vertical line at each day (a little firmer at the start of a week, Monday) lines the bars up
-                        with the dates in the header without turning it into a boxed grid; today keeps its faint tint. */}
+                  <div data-track className="relative flex-1" style={{ minHeight: Math.max(ROW_MIN_HEIGHT, rowH) }}>
+                    {/* One continuous area. A thin, light vertical line at each day (a little firmer at the start of a week, Monday) lines the dots up
+                        with the dates in the header; today keeps its faint tint. Each day a vehicle is out has one dot per order (a shared load: two). */}
                     <div className="absolute inset-0 flex">
                       {days.map((d, i) => {
                         const dayIso = isoOf(d);
                         const note = (v.dayNotes ?? []).find((n) => n.day === dayIso);
                         const clickable = canWrite || !!note;
+                        const cellDots = byIdx[i] ?? [];
+                        const ms = v.manualStatus;
+                        const blockedDay = !!ms?.blocks && !!ms.endDay && ms.startDay <= dayIso && dayIso <= ms.endDay;
                         return (
                           <div
                             key={i}
@@ -1319,6 +1479,33 @@ export default function VehiclePlanning() {
                             title={note ? `${note.text}${note.byName ? `\n— ${note.byName}` : ""}` : canWrite ? `Click to add a note for ${v.vehicleNumber} on ${format(d, "d MMM")}` : undefined}
                             onClick={clickable ? () => { setNoteTarget({ vehicle: v, day: dayIso }); setNoteText(note?.text ?? ""); } : undefined}
                           >
+                            {(cellDots.length > 0 || blockedDay) && (
+                              <div className="absolute inset-x-0 top-[22px] flex flex-col items-center justify-center gap-[3px]">
+                                {cellDots.map((dd, k) => {
+                                  const dotKey = `${dd.member.orderNumber}-${k}`;
+                                  // A shared load: each slip's party is written next to its own dot (on the day that slip starts).
+                                  const showName = dd.trip.members.length > 1 && !narrowDays && (dd.member.startDay === dayIso || (i === 0 && dd.member.startDay < dayIso));
+                                  const dot = (
+                                    <button
+                                    key={dotKey}
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.member, x: r.left + r.width / 2, y: r.bottom }); }}
+                                    className={`${cellDots.length > 2 ? "h-2.5 w-2.5" : "h-3.5 w-3.5"} shrink-0 rounded-full shadow-sm ${dotClass(dd.trip.state, dd.conflict)} ${dd.extended ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
+                                    title={`#${dd.member.orderNumber} · ${dd.member.partyName ?? "—"} · ${dayLabel(dd.member.startDay)} to ${dayLabel(memberEnd(dd.trip, dd.member))} · ${dd.conflict ? "Vehicle not back yet" : stateText[dd.trip.state]}${dd.trip.notionNote ? " · Notion not updated" : ""}${dd.extended ? ` · Extended${dd.trip.expectedEndReason ? `: ${dd.trip.expectedEndReason}` : ""}` : ""}`}
+                                  />
+                                  );
+                                  return showName ? (
+                                    <div key={dotKey} className="flex w-full min-w-0 items-center gap-1 px-1">
+                                      {dot}
+                                      <span className="min-w-0 truncate text-[9px] font-medium leading-none text-gray-800" title={dd.member.partyName ?? undefined}>{dd.member.partyName ?? "—"}</span>
+                                    </div>
+                                  ) : dot;
+                                })}
+                                {blockedDay && cellDots.length === 0 && (
+                                  <span className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-red-400 bg-white" title={`${ms!.status}${ms!.comment ? ` - ${ms!.comment}` : ""}`} />
+                                )}
+                              </div>
+                            )}
                             {note && (
                               <span className="pointer-events-none absolute inset-x-0.5 bottom-0.5 flex items-center gap-0.5 truncate rounded bg-amber-100 px-1 text-[9px] leading-4 text-amber-900">
                                 <MessageSquare className="h-2.5 w-2.5 shrink-0" />
@@ -1329,121 +1516,66 @@ export default function VehiclePlanning() {
                         );
                       })}
                     </div>
-                    {/* One bar per trip. Each bar sits on its own lane (overlapping trips stack), has the party name above it
-                        (as wide as the free space up to the next trip on the lane), opens the trip's details on click, and - when
-                        the trip has not arrived - has a handle on its right edge to drag the expected last day. */}
-                    {lanes.map((l) => {
-                      const t = l.trip;
-                      const dragging = drag && drag.vehicleId === v.id && drag.orderNumber === t.orderNumber ? drag : null;
-                      const endIdx = dragging ? dragging.endIdx : l.endIdx;
-                      // Where the bar is drawn (half days included); the drag itself still moves whole days (endIdx).
-                      const drawEnd = dragging ? dragging.endIdx - (dragging.endIdx - 1 > dayIdx(t.startDay) && dragging.endIdx <= windowDays ? 0.5 : 0) : l.drawEnd;
-                      const canStretch = canWrite && (t.state === "planned" || t.state === "on_trip" || t.state === "awaiting");
+                    {/* The party name of each trip, written once above its first dot (as wide as the room up to the next trip). */}
+                    {labels.map((l, li) => {
+                      const nextStart = labels[li + 1]?.startIdx ?? windowDays;
+                      if (l.trip.members.length > 1 && !narrowDays) return null;   // a shared load: each party is written beside its own dot
+                      const ext = extLabels.find((x) => x.trip === l.trip);
+                      if (ext && ext.startIdx <= l.startIdx) return null;   // every visible day is an extended one: the extension label is written there
+                      const spanDays = Math.max(1, Math.min(l.endIdx, nextStart - 1, ext ? ext.startIdx - 1 : windowDays) - l.startIdx + 1);
                       return (
-                        <div key={t.orderNumber} className="absolute flex flex-col gap-0.5" style={{ top: 4 + l.lane * LANE_HEIGHT, left: `${(l.drawStart / windowDays) * 100}%`, width: `${((Math.max(l.labelEndIdx, drawEnd) - l.drawStart) / windowDays) * 100}%` }}>
-                          <div className="truncate text-[10px] font-medium leading-[1.15] text-black" title={t.partyName ?? undefined}>
-                            {barLabel(t, l.labelEndIdx - l.drawStart)}
-                          </div>
-                          <div className="relative h-2.5" style={{ width: `${((drawEnd - l.drawStart) / (Math.max(l.labelEndIdx, drawEnd) - l.drawStart)) * 100}%` }}>
-                            <button
-                              type="button"
-                              onClick={() => setTripTarget({ vehicle: v, trip: t })}
-                              className={`h-full w-full rounded-full shadow-sm ${tripBarClass(t.state, l.conflict)}`}
-                              title={`#${t.members.map((m) => m.orderNumber).join(" + #")} · ${t.members.map((m) => m.partyName ?? "—").join(" + ")} · ${dayLabel(t.startDay)} to ${dayLabel(t.lastBusyDay)} · ${l.conflict ? "Vehicle not back yet" : stateText[t.state]}${t.notionNote ? " · Notion not updated" : ""}`}
-                            />
-                            {/* A shared load whose slips end on different days: a notch on the bar at each shorter slip's last day. */}
-                            {t.members.length > 1 && drawEnd > l.drawStart && t.members.filter((m) => m.plannedLastDay < t.lastBusyDay).map((m) => {
-                              const pos = (dayIdx(m.plannedLastDay) + 1 - l.drawStart) / (drawEnd - l.drawStart);
-                              if (!(pos > 0 && pos < 1)) return null;
-                              return (
-                                <span key={m.orderNumber} className="absolute top-[-2px] z-[1] h-[calc(100%+4px)] w-2 -translate-x-1/2" style={{ left: `${pos * 100}%` }}
-                                  title={`#${m.orderNumber} ${m.partyName ?? ""} ends ${dayLabel(m.plannedLastDay)} (${m.tripDays} day${m.tripDays === 1 ? "" : "s"})`}>
-                                  <span className="mx-auto block h-full w-0.5 rounded bg-white" />
-                                </span>
-                              );
-                            })}
-                            {t.notionNote && <AlertTriangle className="pointer-events-none absolute -top-3 right-0 h-3 w-3 text-amber-500" />}
-                            {canStretch && (
-                              <div
-                                className="absolute -right-1.5 top-1/2 h-4 w-3 -translate-y-1/2 cursor-ew-resize touch-none rounded-sm border border-gray-500 bg-white/90"
-                                title="Drag to change the expected last day"
-                                onClick={(e) => e.stopPropagation()}
-                                onPointerDown={(e) => {
-                                  e.stopPropagation();
-                                  const track = (e.currentTarget as HTMLElement).closest("[data-track]") as HTMLElement | null;
-                                  if (!track) return;
-                                  const dayW = track.getBoundingClientRect().width / windowDays;
-                                  const x0 = e.clientX;
-                                  const base = l.endIdx;
-                                  let last = base;
-                                  setDrag({ vehicleId: v.id, orderNumber: t.orderNumber, endIdx: base });
-                                  const move = (ev: PointerEvent) => {
-                                    last = Math.max(l.startIdx + 1, Math.min(windowDays, base + Math.round((ev.clientX - x0) / dayW)));
-                                    setDrag({ vehicleId: v.id, orderNumber: t.orderNumber, endIdx: last });
-                                  };
-                                  const up = () => {
-                                    window.removeEventListener("pointermove", move);
-                                    window.removeEventListener("pointerup", up);
-                                    setDrag(null);
-                                    if (last !== base) finishStretch(v, t, format(addDays(windowStart, last - 1), "yyyy-MM-dd"));
-                                  };
-                                  window.addEventListener("pointermove", move);
-                                  window.addEventListener("pointerup", up);
-                                }}
-                              />
-                            )}
-                          </div>
+                        <div key={l.trip.orderNumber} className="pointer-events-none absolute truncate text-[10px] font-medium leading-[1.15] text-black"
+                          style={{ top: 4, left: `calc(${(l.startIdx / windowDays) * 100}% + 3px)`, width: `calc(${(spanDays / windowDays) * 100}% - 6px)` }}
+                          title={l.trip.partyName ?? undefined}>
+                          {barLabel(l.trip, spanDays)}
                         </div>
                       );
                     })}
-                    {/* Assign sits right after the last bar and says when the vehicle is free. While a trip is due back (yellow) the same spot says "Arrived" instead: mark the
-                        arrival first, then Assign comes back. An admin can still assign anyway. */}
-                    {canAssign && (() => {
-                      const idx = freeIdx == null ? 0 : Math.max(0, Math.min(windowDays - 1, freeIdx));
-                      // The vehicle is free from the MIDDLE of the day when the trip that frees it last is a multi-day one.
-                      const halfFree = !!v.freeFrom && (v.trips ?? []).some((q) => q.state !== "cancelled" && q.freeFromDay === v.freeFrom && endsHalf(q));
-                      const pillAt = idx + (halfFree && freeIdx != null && freeIdx >= 0 && freeIdx < windowDays ? 0.5 : 0);
-                      const freeNow = !v.freeFrom || dayIdx(v.freeFrom) <= todayIdx;
-                      const due = (v.trips ?? []).filter((q) => q.state === "awaiting" && !q.arrivedOn).sort((a, b) => a.startDay.localeCompare(b.startDay))[0] ?? null;
-                      // The Arrived pill sits where the trip that is due back ends (not after a planned order behind it); Assign sits after the last bar.
-                      const dueIdx = due ? dayIdx(due.freeFromDay) : 0;
-                      const dueAt = Math.max(0, Math.min(windowDays - 1, dueIdx)) + (due && endsHalf(due) && dueIdx >= 0 && dueIdx < windowDays ? 0.5 : 0);
-                      const at = due ? dueAt : pillAt;
-                      const pos = at >= windowDays - 2 ? { right: 4, top: 17 } : { left: `calc(${(at / windowDays) * 100}% + 4px)`, top: 17 };
-                      if (due) {
-                        return (
-                          <div className="absolute flex items-start gap-1.5" style={pos}>
-                            <button type="button" onClick={() => openArrival(v, due)}
-                              className="rounded-lg border border-amber-400 bg-amber-100 px-2 py-0.5 text-center text-[11px] font-semibold leading-tight text-amber-900 hover:bg-amber-200"
-                              title={`Order #${due.members.map((m) => m.orderNumber).join(" + #")} is due back. Mark the arrival first, then assign the next order.`}>
-                              Arrived
-                              <div className="text-[9px] font-normal text-amber-700">Mark arrival first</div>
-                            </button>
-                            {isAdmin && (
-                              <button type="button" onClick={() => setAssignTarget(v)} className="pt-1 text-[10px] text-gray-500 underline decoration-dotted hover:text-gray-800" title="Assign an order without marking the arrival">
-                                Assign anyway
-                              </button>
-                            )}
-                          </div>
-                        );
-                      }
+                    {/* An extended trip: "Extended - reason" written over the days the extension added (their dots have a violet ring). */}
+                    {extLabels.map((x) => (
+                      <div key={`ext-${x.trip.orderNumber}`} className="pointer-events-none absolute truncate text-[10px] font-semibold leading-[1.15] text-violet-700"
+                        style={{ top: 4, left: `calc(${(x.startIdx / windowDays) * 100}% + 3px)`, width: `calc(${((x.endIdx - x.startIdx + 1) / windowDays) * 100}% - 6px)` }}
+                        title={`Extended${x.reason ? `: ${x.reason}` : ""}`}>
+                        Extended{x.reason ? ` · ${x.reason}` : ""}
+                      </div>
+                    ))}
+                    {/* A status set on this page (maintenance, breakdown ...): its name over the days it keeps the vehicle out. */}
+                    {v.manualStatus?.blocks && v.manualStatus.endDay && (() => {
+                      const s0 = Math.max(0, dayIdx(v.manualStatus!.startDay)), e0 = Math.min(windowDays - 1, dayIdx(v.manualStatus!.endDay!));
+                      if (e0 < s0) return null;
                       return (
-                        <button
-                          type="button"
-                          onClick={() => setAssignTarget(v)}
-                          className="absolute rounded-lg border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-center text-[11px] font-semibold leading-tight text-emerald-700 hover:bg-emerald-100"
-                          style={pos}
-                          title={v.freeFrom ? `Free from ${halfFree ? "the middle of " : ""}${dayLabel(v.freeFrom)}` : "No trips yet"}
-                        >
-                          Assign
-                          <div className="text-[9px] font-normal text-emerald-600">{freeNow ? "Free now" : `Free ${dayLabel(v.freeFrom!)}${halfFree ? " pm" : ""}`}</div>
-                        </button>
+                        <div className="pointer-events-none absolute truncate text-[10px] font-semibold leading-[1.15] text-red-700"
+                          style={{ top: 4, left: `calc(${(s0 / windowDays) * 100}% + 3px)`, width: `calc(${((e0 - s0 + 1) / windowDays) * 100}% - 6px)` }}>
+                          {v.manualStatus!.status} · {v.manualStatus!.daysLeft} d left
+                        </div>
                       );
                     })()}
-                    {/* Today's highlight, drawn LAST so it sits on top of the bar above instead of
-                        being hidden underneath it (the background tint earlier in this same row
-                        is UNDER the bar) — pointer-events-none so it never blocks the bar's own
-                        title tooltip or the Assign button sitting on/after it. */}
+                    {/* The day the vehicle becomes available (the trip's last day - automatic, no arrival needed): Assign opens on that day; Extend lengthens the trip. */}
+                    {canWrite && (() => {
+                      const idx = dayIdx(av.day);
+                      if (idx >= windowDays) {
+                        return <span className="pointer-events-none absolute right-1 rounded bg-white/80 px-1 text-[10px] text-gray-500" style={{ top: btnTop + 2 }}>Free from {dayLabel(av.day)} →</span>;
+                      }
+                      const at = Math.max(0, idx);
+                      const style = at >= windowDays - 2 ? { right: 4, top: btnTop } : { left: `calc(${(at / windowDays) * 100}% + 4px)`, top: btnTop };
+                      return (
+                        <div className="absolute z-10 flex items-center gap-1" style={style}>
+                          <button type="button" onClick={() => openAssign(v, av.day)}
+                            className="rounded-md border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold leading-tight text-emerald-700 hover:bg-emerald-100"
+                            title={av.day === todayIso ? "Available now - assign an order" : `Available from ${dayLabel(av.day)} - assign an order`}>
+                            Assign
+                          </button>
+                          {av.extendTrip && (
+                            <button type="button" onClick={() => openExtend(v, av.extendTrip!)}
+                              className="rounded-md border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-semibold leading-tight text-amber-800 hover:bg-amber-50"
+                              title={`Extend order #${av.extendTrip.orderNumber} (a reason is asked)`}>
+                              Extend
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    {/* Today's highlight, drawn LAST so it sits on top of the dots instead of being hidden underneath - pointer-events-none so it never blocks a click. */}
                     {todayInView && (
                       <div
                         className="pointer-events-none absolute top-0 h-full border-l-2 border-blue-500/70 bg-[#001d6e]/[0.04]"
@@ -1458,33 +1590,6 @@ export default function VehiclePlanning() {
               <div className="px-4 py-10 text-center text-sm text-gray-400">No Krupa fleet vehicles found.</div>
             )}
           </div>
-        </div>
-      )}
-
-      {/* Scroll bar for the date range — drag the slider (or tap the arrows) to slide the calendar
-          left/right without needing the keyboard or a focused chart. Spans 90 days back to 270
-          ahead of today; the arrows nudge a day at a time and hold-click repeats via the browser. */}
-      {!fleetQuery.isLoading && (
-        <div className="sticky bottom-2 z-30 mt-2 flex items-center gap-2 rounded-full border border-gray-300 bg-white/95 px-2 py-1.5 shadow-md backdrop-blur">
-          <Button size="sm" variant="outline" className="h-7 w-7 shrink-0 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -SCROLL_STEP_DAYS))} aria-label="Scroll calendar left" title="Scroll left">
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <input
-            type="range"
-            min={-90}
-            max={270}
-            step={1}
-            value={Math.max(-90, Math.min(270, differenceInCalendarDays(windowStart, today)))}
-            onChange={(e) => setWindowStart(addDays(today, Number(e.target.value)))}
-            aria-label="Scroll calendar left or right"
-            className="h-2 min-w-0 flex-1 cursor-pointer accent-[#001d6e]"
-          />
-          <span className="hidden shrink-0 text-[11px] font-medium text-gray-600 sm:inline">
-            {format(windowStart, "d MMM")} – {format(addDays(windowStart, windowDays - 1), "d MMM yyyy")}
-          </span>
-          <Button size="sm" variant="outline" className="h-7 w-7 shrink-0 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, SCROLL_STEP_DAYS))} aria-label="Scroll calendar right" title="Scroll right">
-            <ChevronRight className="h-4 w-4" />
-          </Button>
         </div>
       )}
 
@@ -1515,7 +1620,6 @@ export default function VehiclePlanning() {
                     <div className="text-sm font-semibold text-[#001d6e]">#{o.orderNumber} <span className="text-xs font-normal text-gray-400">{o.orderDate ? dayLabel(o.orderDate.slice(0, 10)) : ""}</span></div>
                     <div className="truncate text-xs text-gray-500">
                       {o.partyName ?? "—"} · {o.plant ?? "—"}
-                      {o.vehicleNumber && <span className="ml-1">(currently {o.vehicleNumber})</span>}
                     </div>
                   </div>
                   {extra}
@@ -1531,6 +1635,9 @@ export default function VehiclePlanning() {
                       ? <>Busy until {dayLabel(info.busyUntil)}{info.busyOrder ? ` (order #${info.busyOrder})` : ""}. Free from {dayLabel(info.freeFrom!)}.</>
                       : "This vehicle is free."}
                   </DialogDescription>
+                  {(assignTarget?.volume != null || assignTarget?.bodyType) && (
+                    <p className="text-xs text-gray-500">{assignTarget?.volume != null ? `Volume ${assignTarget.volume}` : ""}{assignTarget?.bodyType ? `${assignTarget?.volume != null ? " · " : ""}Body type ${assignTarget.bodyType}` : ""}</p>
+                  )}
                 </DialogHeader>
 
                 {(data?.suggestions?.length ?? 0) > 0 && (
@@ -1546,8 +1653,29 @@ export default function VehiclePlanning() {
                   </div>
                 )}
 
+                {(data?.sharable?.length ?? 0) > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">On the same dates as a trip on this vehicle - add it to that trip (shared load)</div>
+                    <div className="max-h-44 space-y-1.5 overflow-y-auto">
+                      {data!.sharable!.map((o) => (
+                        <div key={o.orderNumber} className="flex items-center justify-between gap-2 rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2">
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-[#001d6e]">#{o.orderNumber} <span className="text-xs font-normal text-gray-400">{o.orderDate ? dayLabel(o.orderDate.slice(0, 10)) : ""}</span></div>
+                            <div className="truncate text-xs text-gray-500">{o.partyName ?? "—"} · {o.plant ?? "—"}</div>
+                            <div className="truncate text-[11px] text-sky-800">Joins #{o.joinOrder}{o.joinParty ? ` (${o.joinParty})` : ""}</div>
+                          </div>
+                          <Button size="sm" variant="outline" className="h-7 shrink-0 border-sky-300 px-2.5 text-xs" disabled={assignMutation.isPending}
+                            onClick={() => assignMutation.mutate({ orderNumber: o.orderNumber, sameTripAs: o.joinOrder })}>
+                            Add to trip
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-1.5">
-                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Or pick another order</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Or pick another free order</div>
                   <div className="flex gap-2">
                     <Input type="date" value={shownDate} onChange={(e) => setAssignDate(e.target.value)} className="h-9 w-40" />
                     <Input value={assignSearch} onChange={(e) => setAssignSearch(e.target.value)} placeholder="Order no. or party" className="h-9 flex-1" />
@@ -1556,7 +1684,7 @@ export default function VehiclePlanning() {
                     {availableOrdersQuery.isLoading ? (
                       <SectionSkeleton lines={3} />
                     ) : (data?.orders ?? []).length === 0 ? (
-                      <p className="py-4 text-center text-sm text-gray-400">No orders for this date.</p>
+                      <p className="py-4 text-center text-sm text-gray-400">No free orders for this date (an order already on a vehicle is not listed).</p>
                     ) : (
                       data!.orders.map((o) => rowButton(o, o.beforeFree ? <span className="shrink-0 text-[10px] text-gray-500">before free date</span> : undefined))
                     )}
@@ -1606,7 +1734,7 @@ export default function VehiclePlanning() {
 
       {/* A trip bar was clicked: its details, and Arrived / Undo arrival. */}
       <Dialog open={!!tripTarget} onOpenChange={(open) => { if (!open) setTripTarget(null); }}>
-        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
+        <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           {tripTarget && (() => {
             const { vehicle: v, trip: t } = tripTarget;
             const inConflict = (v.conflicts ?? []).find((c) => c.orderNumber === t.orderNumber);
@@ -1657,7 +1785,7 @@ export default function VehiclePlanning() {
                     <span className="text-gray-500">Driver</span><span>{t.driver ?? "—"}</span>
                   </div>
                 </div>
-                <DialogFooter className="gap-2 sm:gap-2">
+                <DialogFooter className="flex-wrap gap-2 sm:justify-end sm:gap-2 sm:space-x-0">
                   <Button variant="outline" onClick={() => setTripTarget(null)}>Close</Button>
                   {canWrite && t.arrivedOn && (
                     <Button variant="outline" disabled={arrivalMutation.isPending} onClick={() => arrivalMutation.mutate({ vehicleId: v.id, orderNumber: t.orderNumber, undo: true })}>
@@ -1667,7 +1795,7 @@ export default function VehiclePlanning() {
                   {canWrite && inConflict && (() => {
                     const blocker = v.trips?.find((x) => x.orderNumber === inConflict.withOrderNumber);
                     return blocker && !blocker.arrivedOn && (blocker.state === "on_trip" || blocker.state === "awaiting") ? (
-                      <Button variant="outline" onClick={() => { setTripTarget(null); openArrival(v, blocker); }}>Mark #{blocker.orderNumber} arrived</Button>
+                      <Button variant="outline" onClick={() => arriveToday(v, blocker)}>Mark #{blocker.orderNumber} arrived today</Button>
                     ) : null;
                   })()}
                   {canWrite && !t.arrivedOn && t.state !== "closed" && t.state !== "cancelled" && !t.notInSystem && (
@@ -1677,9 +1805,12 @@ export default function VehiclePlanning() {
                     <Button variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={!!t.lockedReason} title={t.lockedReason ?? undefined}
                       onClick={() => { setTripTarget(null); openFree(v, [t]); }}>Free</Button>
                   )}
-                  {canWrite && !t.arrivedOn && t.state !== "planned" && t.state !== "cancelled" && (
-                    <Button onClick={() => { setTripTarget(null); openArrival(v, t); }}>
-                      <CheckCircle2 className="mr-1.5 h-4 w-4" /> Arrived
+                  {canWrite && !t.arrivedOn && (t.state === "on_trip" || t.state === "awaiting" || t.state === "planned" || (t.state === "closed" && t.assumed && isoDayDiff(t.lastBusyDay, isoOf(new Date())) <= 7)) && (
+                    <Button variant="outline" onClick={() => { setTripTarget(null); openExtend(v, t); }}>{t.state === "closed" ? "Extend (still out)" : "Extend"}</Button>
+                  )}
+                  {canWrite && !t.arrivedOn && t.state !== "planned" && t.state !== "cancelled" && t.state !== "closed" && (
+                    <Button disabled={arrivalMutation.isPending} onClick={() => arriveToday(v, t)}>
+                      <CheckCircle2 className="mr-1.5 h-4 w-4" /> Arrived today
                     </Button>
                   )}
                 </DialogFooter>
@@ -1725,46 +1856,63 @@ export default function VehiclePlanning() {
         </DialogContent>
       </Dialog>
 
-      {/* Free: take the vehicle off ONE order (assigned by mistake). The order goes back to "no vehicle"; the vehicle and driver are cleared on our slip (when we have
-          one) and in Notion. An order Loading has taken over is greyed out with its reason. */}
-      <Dialog open={!!freeAsk} onOpenChange={(open) => { if (!open && !removeMutation.isPending) setFreeAsk(null); }}>
+      {/* Free: take the vehicle off one or several orders (assigned by mistake). Each order goes back to "no vehicle"; the vehicle and driver are cleared on our slip
+          (when we have one) and in Notion. An order Loading has taken over is greyed out with its reason. */}
+      <Dialog open={!!freeAsk} onOpenChange={(open) => { if (!open && !removeMutation.isPending && !freeBusy) setFreeAsk(null); }}>
         <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           {freeAsk && (() => {
-            const picked = freeAsk.options.find((o) => o.orderNumber === freeAsk.order);
             const single = freeAsk.options.length === 1 ? freeAsk.options[0] : null;
+            const chosen = freeAsk.options.filter((o) => freeAsk.orders.includes(o.orderNumber));
+            const unlocked = freeAsk.options.filter((o) => !o.locked);
+            const busy = removeMutation.isPending || freeBusy;
+            const toggle = (no: string) => setFreeAsk({ ...freeAsk, orders: freeAsk.orders.includes(no) ? freeAsk.orders.filter((x) => x !== no) : [...freeAsk.orders, no] });
             return (
               <>
                 <DialogHeader>
-                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> Free {freeAsk.vehicle.vehicleNumber}</DialogTitle>
+                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> {single ? `Free ${freeAsk.vehicle.vehicleNumber}` : "Which order do you want to free?"}</DialogTitle>
                   <DialogDescription>
-                    {single ? `Take ${freeAsk.vehicle.vehicleNumber} off order #${single.orderNumber}${single.partyName ? ` (${single.partyName})` : ""}? Use this when it was assigned by mistake.` : "Pick the order to take this vehicle off. Use this when it was assigned by mistake."}
+                    {single
+                      ? `Take ${freeAsk.vehicle.vehicleNumber} off order #${single.orderNumber}${single.partyName ? ` (${single.partyName})` : ""}? Use this when it was assigned by mistake.`
+                      : `${freeAsk.vehicle.vehicleNumber} has ${freeAsk.options.length} orders. Tick the one(s) to take it off - for example one assigned by mistake. The others stay.`}
                   </DialogDescription>
                 </DialogHeader>
                 {!single && (
                   <div className="space-y-1.5">
-                    {freeAsk.options.map((o) => (
-                      <button key={o.orderNumber} type="button" disabled={!!o.locked} onClick={() => setFreeAsk({ ...freeAsk, order: o.orderNumber })}
-                        className={`w-full rounded-lg border px-3 py-2 text-left text-xs disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400 ${freeAsk.order === o.orderNumber ? "border-red-400 bg-red-50 text-red-800" : "border-gray-200 hover:bg-gray-50"}`}>
-                        <span className="flex items-center justify-between gap-2">
-                          <span className="font-medium">#{o.orderNumber}</span>
-                          <span className="truncate text-gray-600">{o.partyName ?? "—"}</span>
-                        </span>
-                        <span className="block text-[11px] text-gray-500">{dayLabel(o.startDay)} – {dayLabel(o.lastBusyDay)}{o.notInSystem ? " · only in Notion" : ""}</span>
-                        {o.locked && <span className="block text-[11px] text-red-600">{o.locked}</span>}
-                      </button>
-                    ))}
+                    {unlocked.length > 1 && (
+                      <div className="flex justify-end text-[11px]">
+                        <button type="button" className="text-[#001d6e] underline decoration-dotted" onClick={() => setFreeAsk({ ...freeAsk, orders: freeAsk.orders.length === unlocked.length ? [] : unlocked.map((o) => o.orderNumber) })}>
+                          {freeAsk.orders.length === unlocked.length ? "Clear" : "Select all"}
+                        </button>
+                      </div>
+                    )}
+                    {freeAsk.options.map((o) => {
+                      const on = freeAsk.orders.includes(o.orderNumber);
+                      return (
+                        <button key={o.orderNumber} type="button" disabled={!!o.locked || busy} onClick={() => toggle(o.orderNumber)} aria-pressed={on}
+                          className={`flex w-full items-start gap-2 rounded-lg border px-3 py-2 text-left text-xs disabled:cursor-not-allowed disabled:bg-gray-50 disabled:text-gray-400 ${on ? "border-red-400 bg-red-50 text-red-800" : "border-gray-200 hover:bg-gray-50"}`}>
+                          <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${on ? "border-red-500 bg-red-500 text-white" : "border-gray-300 bg-white"}`}>{on && <CheckCircle2 className="h-3 w-3" />}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-center justify-between gap-2">
+                              <span className="font-medium">#{o.orderNumber}</span>
+                              <span className="truncate text-gray-600">{o.partyName ?? "—"}</span>
+                            </span>
+                            <span className="block text-[11px] text-gray-500">{dayLabel(o.startDay)} – {dayLabel(o.lastBusyDay)}{o.notInSystem ? " · only in Notion" : ""}</span>
+                            {o.locked && <span className="block text-[11px] text-red-600">{o.locked}</span>}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
                 {single?.locked && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{single.locked}</div>}
                 <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                  The order goes back to "no vehicle" and its driver is cleared too. Notion's vehicle and driver are cleared to match; its status is not changed.
-                  {(picked ?? single)?.notInSystem && " This order is only in Notion (not in our system), so Notion is cleared as well - otherwise the next Refresh would bring it back."}
+                  Each freed order goes back to "no vehicle" and its driver is cleared too. Notion's vehicle and driver are cleared to match; its status is not changed.
+                  {chosen.some((o) => o.notInSystem) && " An order that is only in Notion (not in our system) is cleared in Notion as well - otherwise the next Refresh would bring it back."}
                 </div>
                 <DialogFooter className="gap-2 sm:gap-2">
-                  <Button variant="outline" disabled={removeMutation.isPending} onClick={() => setFreeAsk(null)}>No</Button>
-                  <Button className="bg-red-600 hover:bg-red-700" disabled={removeMutation.isPending || !freeAsk.order || !!(picked ?? single)?.locked}
-                    onClick={() => removeMutation.mutate({ vehicleId: freeAsk.vehicle.id, orderNumber: freeAsk.order })}>
-                    {removeMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Yes, free the vehicle"}
+                  <Button variant="outline" disabled={busy} onClick={() => setFreeAsk(null)}>No</Button>
+                  <Button className="bg-red-600 hover:bg-red-700" disabled={busy || chosen.length === 0 || chosen.some((o) => !!o.locked)} onClick={() => void freeSelected()}>
+                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : chosen.length > 1 ? `Free selected (${chosen.length})` : "Yes, free the vehicle"}
                   </Button>
                 </DialogFooter>
               </>
@@ -1773,38 +1921,140 @@ export default function VehiclePlanning() {
         </DialogContent>
       </Dialog>
 
-      {/* Arrived: the day the vehicle really came back (default today). It is free from the next day. */}
-      <Dialog open={!!arrivalTarget} onOpenChange={(open) => { if (!open) setArrivalTarget(null); }}>
-        <DialogContent className="sm:max-w-sm max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-1.5"><CheckCircle2 className="h-4 w-4 text-emerald-600" /> Vehicle arrived</DialogTitle>
-            <DialogDescription>
-              {arrivalTarget?.vehicle.vehicleNumber} · order #{arrivalTarget?.trip.orderNumber}. Untick the box below if it cannot go out again that day.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <div>
-              <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Arrived on</label>
-              <Input type="date" value={arrivalDay} min={arrivalTarget?.trip.startDay} max={format(new Date(), "yyyy-MM-dd")} onChange={(e) => setArrivalDay(e.target.value)} className="h-9" />
-            </div>
-            <label className="flex items-center gap-2 text-xs text-gray-700">
-              <Checkbox checked={arrivalSameDay} onCheckedChange={(on) => setArrivalSameDay(on === true)} />
-              Can go out again the same day
-            </label>
-            <div>
-              <label className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Note (optional)</label>
-              <Input value={arrivalNote} onChange={(e) => setArrivalNote(e.target.value)} placeholder="For example: came back early" className="h-9" />
-            </div>
-          </div>
-          <DialogFooter className="gap-2 sm:gap-2">
-            <Button variant="outline" onClick={() => setArrivalTarget(null)} disabled={arrivalMutation.isPending}>Cancel</Button>
-            <Button
-              disabled={arrivalMutation.isPending || !arrivalDay}
-              onClick={() => arrivalMutation.mutate({ vehicleId: arrivalTarget!.vehicle.id, orderNumber: arrivalTarget!.trip.orderNumber, arrivedOn: arrivalDay, note: arrivalNote.trim() || undefined, freeSameDay: arrivalSameDay })}
+      {/* A dot was clicked: the full details of that assignment (the whole party name, dates, days, status, driver ...), then Details for the actions. */}
+      {dotCard && (() => {
+        const { vehicle, trip, member } = dotCard;
+        const row = (label: string, value: ReactNode, tone = "text-gray-700") => (
+          <><span className="text-gray-400">{label}</span><span className={`min-w-0 break-words ${tone}`}>{value}</span></>
+        );
+        const extended = !!trip.expectedEnd && trip.expectedEnd > trip.plannedLastDay;
+        return (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setDotCard(null)} />
+            <div
+              className="fixed z-50 max-h-[80vh] w-80 overflow-y-auto rounded-lg border border-gray-200 bg-white p-3 text-xs shadow-xl"
+              style={{ left: Math.max(8, Math.min(dotCard.x - 160, window.innerWidth - 328)), top: Math.max(8, Math.min(dotCard.y + 8, window.innerHeight - 420)) }}
             >
-              {arrivalMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save arrival"}
-            </Button>
-          </DialogFooter>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-sm font-semibold text-[#001d6e]">#{member.orderNumber}</span>
+                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-700">{stateText[trip.state]}</span>
+                  </div>
+                  <div className="mt-1 break-words text-sm font-semibold leading-snug text-gray-900">{member.partyName ?? "—"}</div>
+                </div>
+                <button type="button" className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700" aria-label="Close" onClick={() => setDotCard(null)}><X className="h-4 w-4" /></button>
+              </div>
+              <div className="mt-2.5 grid grid-cols-[6.5rem,1fr] gap-x-3 gap-y-1">
+                {row("Vehicle", vehicle.vehicleNumber ?? "—")}
+                {row("Plant", `${member.plant ?? "—"}${vehicle.state ? `, ${vehicle.state}` : ""}`)}
+                {row("Order date", member.startDay ? dayLabel(member.startDay) : "—")}
+                {row("Trip days", `${member.tripDays} day${member.tripDays === 1 ? "" : "s"}`)}
+                {row("Planned last day", dayLabel(member.plannedLastDay))}
+                {extended && row("Extended to", `${dayLabel(trip.expectedEnd!)}${trip.expectedEndReason ? ` · ${trip.expectedEndReason}` : ""}`, "font-medium text-violet-700")}
+                {trip.arrivedOn && row("Arrived on", `${dayLabel(trip.arrivedOn)}${trip.freeSameDay ? " (can go out the same day)" : ""}`, "text-emerald-700")}
+                {row("Vehicle free from", dayLabel(trip.freeFromDay))}
+                {row("Notion status", member.status ?? "—")}
+                {row("Driver", member.driver ?? trip.driver ?? "—")}
+                {row("In our system", member.notInSystem ? "No - only in Notion (no slip here)" : "Yes", member.notInSystem ? "text-amber-700" : "text-gray-700")}
+              </div>
+              {trip.members.length > 1 && (
+                <div className="mt-2 rounded bg-sky-50 px-2 py-1.5 text-[11px] text-sky-900">
+                  <div className="font-semibold">Shared load - {trip.members.length} orders on one trip</div>
+                  {trip.members.filter((m) => m.orderNumber !== member.orderNumber).map((m) => (
+                    <div key={m.orderNumber} className="break-words">#{m.orderNumber} · {m.partyName ?? "—"} · {m.tripDays} day{m.tripDays === 1 ? "" : "s"}, ends {dayLabel(m.plannedLastDay)}</div>
+                  ))}
+                </div>
+              )}
+              {trip.lockedReason && <div className="mt-2 rounded bg-gray-50 px-2 py-1.5 text-[11px] text-gray-600">{trip.lockedReason}</div>}
+              {trip.notionNote && <div className="mt-2 rounded bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">Notion not updated. {trip.notionNote}</div>}
+              <div className="mt-3 flex justify-end">
+                <Button size="sm" variant="outline" className="h-7 px-3 text-xs" onClick={() => { setDotCard(null); setTripTarget({ vehicle, trip }); }}>Details and actions</Button>
+              </div>
+            </div>
+          </>
+        );
+      })()}
+
+      {/* Vehicle status: what the board says about the vehicle today, one-click Arrived / Extend, and a status set here (parking, maintenance, breakdown). Our system only. */}
+      <Dialog open={!!statusTarget} onOpenChange={(open) => { if (!open && !statusMutation.isPending) setStatusTarget(null); }}>
+        <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
+          {statusTarget && (() => {
+            const sv = allVehicles.find((x) => x.id === statusTarget.id) ?? statusTarget;
+            const todayIso = isoOf(new Date());
+            const cs = computeStatus(sv, todayIso);
+            const av = computeAvailability(sv, todayIso);
+            const at = actionTrips(sv);
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> {sv.vehicleNumber} · status</DialogTitle>
+                  <DialogDescription>
+                    <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold ${cs.tone}`}>{cs.label}</span>
+                    {cs.note && <span className="ml-2 text-xs text-gray-500">{cs.note}</span>}
+                  </DialogDescription>
+                  {(sv.volume != null || sv.bodyType) && (
+                    <p className="text-xs text-gray-500">{sv.volume != null ? `Volume ${sv.volume}` : ""}{sv.bodyType ? `${sv.volume != null ? " · " : ""}Body type ${sv.bodyType}` : ""}</p>
+                  )}
+                </DialogHeader>
+                {canWrite && (at.out || av.extendTrip) && (
+                  <div className="flex flex-wrap gap-2">
+                    {at.out && (
+                      <Button size="sm" disabled={arrivalMutation.isPending} onClick={() => arriveToday(sv, at.out!)}>
+                        <CheckCircle2 className="mr-1.5 h-4 w-4" /> Arrived today
+                      </Button>
+                    )}
+                    {av.extendTrip && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openExtend(sv, av.extendTrip!); }}>Extend</Button>}
+                  </div>
+                )}
+                {canWrite ? (
+                  <div className="space-y-2.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Set a status</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {MANUAL_STATUSES.map((s) => (
+                        <button key={s} type="button" onClick={() => setStPick(s)}
+                          className={`rounded-full px-3 py-1 text-xs font-medium ${stPick === s ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}>
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-end gap-3">
+                      <div className="space-y-1">
+                        <label className="text-xs font-semibold text-gray-700">Days <span className="text-red-500">*</span></label>
+                        <Input type="number" min={1} max={365} value={stDays} onChange={(e) => changeStDays(e.target.value)} placeholder="e.g. 3" className="h-8 w-24 text-xs" />
+                      </div>
+                      <span className="pb-2 text-xs text-gray-400">or</span>
+                      <div className="space-y-1">
+                        <label className="text-xs font-semibold text-gray-700">Available again from</label>
+                        <Input type="date" value={stFrom} min={format(addDays(new Date(), 1), "yyyy-MM-dd")} onChange={(e) => changeStFrom(e.target.value)} className="h-8 w-40 text-xs" />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-gray-500">The vehicle is not available until then, and the Available filter leaves it out. Days count from today.</p>
+                    <Textarea value={stComment} onChange={(e) => setStComment(e.target.value)} maxLength={300} rows={2} placeholder="Comment (for example: gearbox repair at the showroom)" />
+                    <p className="text-[11px] text-gray-400">Only on this page. Notion is not changed.</p>
+                  </div>
+                ) : sv.manualStatus?.comment ? (
+                  <div className="whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm">{sv.manualStatus.comment}</div>
+                ) : null}
+                <DialogFooter className="flex-wrap gap-2 sm:justify-end sm:gap-2 sm:space-x-0">
+                  {canWrite && sv.manualStatus && (
+                    <Button variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={statusMutation.isPending}
+                      onClick={() => statusMutation.mutate({ vehicleId: sv.id, status: null, days: 0, comment: "" })}>Clear status</Button>
+                  )}
+                  {canWrite && isAdmin && av.blocked && (
+                    <Button variant="outline" onClick={() => { setStatusTarget(null); openAssign(sv); }}>Assign anyway</Button>
+                  )}
+                  <Button variant="outline" disabled={statusMutation.isPending} onClick={() => setStatusTarget(null)}>{canWrite ? "Cancel" : "Close"}</Button>
+                  {canWrite && (
+                    <Button disabled={!stPick || !(Math.floor(Number(stDays)) >= 1) || statusMutation.isPending}
+                      onClick={() => statusMutation.mutate({ vehicleId: sv.id, status: stPick, days: Math.floor(Number(stDays)), comment: stComment })}>
+                      {statusMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save status"}
+                    </Button>
+                  )}
+                </DialogFooter>
+              </>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 
@@ -1819,9 +2069,11 @@ export default function VehiclePlanning() {
         } : null}
         pending={expectedEndMutation.isPending}
         onCancel={() => setExtendAsk(null)}
+        onNewEnd={(day) => setExtendAsk((p) => (p ? { ...p, newEnd: day } : p))}
         onConfirm={(reason) => {
           if (!extendAsk) return;
-          const { vehicle, trip, newEnd, clashes } = extendAsk;
+          const { vehicle, trip, newEnd } = extendAsk;
+          const clashes = clashesFor(vehicle, trip, newEnd);
           if (clashes.length > 0) { setExtendAsk(null); setStretchAsk({ vehicle, trip, newEnd, clashes, reason }); return; }
           expectedEndMutation.mutate({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd, reason });
         }}
@@ -2133,6 +2385,9 @@ export default function VehiclePlanning() {
               <History className="h-4 w-4" /> {historyTarget?.vehicleNumber} — order history
             </DialogTitle>
             <DialogDescription>Every order this vehicle has carried, most recent first.</DialogDescription>
+            {(historyTarget?.volume != null || historyTarget?.bodyType) && (
+              <p className="text-xs text-gray-500">{historyTarget?.volume != null ? `Volume ${historyTarget.volume}` : ""}{historyTarget?.bodyType ? `${historyTarget?.volume != null ? " · " : ""}Body type ${historyTarget.bodyType}` : ""}</p>
+            )}
           </DialogHeader>
           <div className="max-h-96 space-y-2 overflow-y-auto">
             {historyQuery.isLoading ? (

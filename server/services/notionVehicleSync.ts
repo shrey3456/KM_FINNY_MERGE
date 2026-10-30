@@ -25,7 +25,7 @@ export const VEHICLE_FIELD_LABELS: Record<string, string> = {
   srNo: 'Sr. No.', vehicleNumber: 'Vehicle No', rtoNumber: 'RTO Number', series: 'Series',
   companyType: 'Company Type', acTruckUrl: 'AC Track (URL)', company: 'Company',
   manufacturer: 'Manufacturer', modelYear: 'Model Year',
-  engine: 'Engine', volume: 'Volume', vehiclePercent: 'Vehicle %',
+  engine: 'Engine', volume: 'Volume', vehiclePercent: 'Vehicle %', bodyType: 'Body Type',
   gps: 'GPS', forGps: 'For GPS', driver: 'Driver', recordDriver: 'Driver Records',
   plant: 'Plant', status: 'Status', remark: 'Remark', vehicleFitness: 'Vehicle File Management',
   latestEntry: 'Latest Entry', latestOrder: 'Latest Order', linkToVehicle: 'Link to Vehicle No.',
@@ -117,6 +117,7 @@ function mapNotionPageToVehicleFields(page: any) {
     engine:          firstOf(p, 'Engine :'),
     volume:          extractFloat(p['Vol ']),
     vehiclePercent:  extractFloat(p['Vehi %']),
+    bodyType:        firstOf(p, 'Body Type :'),
     gps:             firstOf(p, 'GPS :'),
     forGps:          firstOf(p, 'For GPS'),
     driver:          firstOf(p, 'Driver :'),
@@ -138,7 +139,7 @@ function buildVehicleData(fields: ReturnType<typeof mapNotionPageToVehicleFields
   };
   const optional = [
     'rtoNumber', 'series', 'companyType', 'acTruckUrl', 'company', 'manufacturer', 'modelYear', 'engine',
-    'volume', 'vehiclePercent', 'gps', 'forGps', 'driver', 'recordDriver', 'plant', 'status',
+    'volume', 'vehiclePercent', 'bodyType', 'gps', 'forGps', 'driver', 'recordDriver', 'plant', 'status',
     'remark', 'latestEntry', 'latestOrder', 'linkToVehicle',
   ];
   for (const key of optional) {
@@ -160,7 +161,7 @@ function buildVehicleData(fields: ReturnType<typeof mapNotionPageToVehicleFields
 const USED_PROPERTY_NAMES = [
   'Vehicle No. :', 'Link to Sr. No:', 'Sr. No. :', 'Link to RTO No. :', 'Series :',
   'Company Type :', 'AC Track :', 'Company :', 'Manufacturer :', 'Model Year :', 'Engine :',
-  'Vol ', 'Vehi %', 'GPS :', 'For GPS', 'Driver :', 'Dri Records :', 'Plant :', 'Status :',
+  'Vol ', 'Vehi %', 'Body Type :', 'GPS :', 'For GPS', 'Driver :', 'Dri Records :', 'Plant :', 'Status :',
   'REMARK', 'Latest Entry :', 'Latest Order :', 'Link to Vehicle No. :',
 ];
 
@@ -211,6 +212,45 @@ async function fetchAllVehiclePages(): Promise<any[]> {
     console.log(`[Notion Vehicle Sync] Fetched ${pages.length} page(s) so far...`);
   } while (cursor);
   return pages;
+}
+
+// The specs Vehicle Planning shows for a selected vehicle - body type and volume - read from Notion for every vehicle that has a Notion page, asking Notion for ONLY
+// those properties (so it is quick, unlike the full sync). Body type is filled / updated from Notion; volume is only filled when ours is empty (a volume somebody
+// corrected here is never overwritten). Called at the end of Vehicle Planning's Refresh; `dryRun` counts what would change without writing.
+export async function refreshVehicleSpecsFromNotion(opts: { dryRun?: boolean } = {}): Promise<{ checked: number; bodyTypeWithValue: number; bodyTypeChanged: number; volumeFilled: number; bodyTypes: string[] }> {
+  const empty = { checked: 0, bodyTypeWithValue: 0, bodyTypeChanged: 0, volumeFilled: 0, bodyTypes: [] as string[] };
+  if (!NOTION_VEHICLE_DATABASE_ID) return empty;
+  const database: any = await notion.databases.retrieve({ database_id: NOTION_VEHICLE_DATABASE_ID });
+  const ids = ['Body Type :', 'Vol ', 'Vehicle No. :'].map((n) => database.properties?.[n]?.id).filter(Boolean) as string[];
+  const bySpec = new Map<string, { bodyType: string | null; volume: number | null }>();
+  let cursor: string | undefined;
+  do {
+    const response: any = await queryWithRetry({ database_id: NOTION_VEHICLE_DATABASE_ID, page_size: 100, filter_properties: ids, ...(cursor ? { start_cursor: cursor } : {}) });
+    for (const page of response.results) {
+      const bodyType = (firstOf(page.properties, 'Body Type :') ?? '').toString().trim() || null;
+      bySpec.set(page.id, { bodyType, volume: extractFloat(page.properties['Vol ']) ?? null });
+    }
+    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+  } while (cursor);
+
+  const result = { ...empty };
+  const types = new Set<string>();
+  for (const v of await storage.getAllVehicleInfo()) {
+    const spec = v.notionPageId ? bySpec.get(v.notionPageId) : undefined;
+    if (!spec) continue;
+    result.checked++;
+    if (spec.bodyType) { result.bodyTypeWithValue++; types.add(spec.bodyType); }
+    if (spec.bodyType && spec.bodyType !== ((v as any).bodyType ?? null)) {
+      result.bodyTypeChanged++;
+      if (!opts.dryRun) await pool.query(`UPDATE vehicle_info SET body_type = $1 WHERE id = $2`, [spec.bodyType, v.id]);
+    }
+    if (spec.volume != null && (v.volume == null)) {
+      result.volumeFilled++;
+      if (!opts.dryRun) await pool.query(`UPDATE vehicle_info SET volume = $1 WHERE id = $2`, [spec.volume, v.id]);
+    }
+  }
+  result.bodyTypes = Array.from(types).sort();
+  return result;
 }
 
 // On-demand lookup for Loading's Create Operation vehicle picker (server/routes/loading.ts's

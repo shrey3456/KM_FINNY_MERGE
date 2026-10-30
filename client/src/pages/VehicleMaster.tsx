@@ -149,6 +149,14 @@ export default function VehicleMaster() {
   const [deleteTarget, setDeleteTarget] = useState<EnrichedVehicle | null>(null);
   const [fullSyncConfirm, setFullSyncConfirm] = useState(false);
 
+  // The drivers of Driver Master, offered in the Driver box of the Add / Edit vehicle form (read from our own table, not from Notion).
+  const driverOptions = useQuery<{ drivers: { id: string; name: string; company: string | null }[] }>({
+    queryKey: ["/api/driver-master/options"],
+    queryFn: async () => (await apiRequest("GET", "/api/driver-master/options")).json(),
+    enabled: showAddEdit,
+    staleTime: 5 * 60 * 1000,
+  });
+
   const vehiclesQuery = useQuery<EnrichedVehicle[]>({
     queryKey: ["/api/vehicle-info"],
     queryFn: async () => {
@@ -735,10 +743,14 @@ export default function VehicleMaster() {
                   value={form[key] ?? ""}
                   onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
                   type={key === "volume" || key === "vehiclePercent" || key === "srNo" ? "number" : "text"}
+                  list={key === "driver" ? "vm-driver-options" : undefined}
+                  placeholder={key === "driver" ? "Pick a driver or type a name" : undefined}
                 />
               </div>
             ))}
           </div>
+          {/* The drivers of Driver Master (read from our own table, not from Notion). */}
+          <datalist id="vm-driver-options">{(driverOptions.data?.drivers ?? []).map((d) => <option key={d.id} value={d.name} label={d.company ?? undefined} />)}</datalist>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowAddEdit(false)}>Cancel</Button>
             <Button

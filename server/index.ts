@@ -485,6 +485,37 @@ app.use((req, res, next) => {
         undone_at TIMESTAMP
       )
     `);
+    // Driver Master: every driver of the Notion driver database, kept here so a driver can be assigned without reading Notion each time.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS driver_master (
+        id SERIAL PRIMARY KEY,
+        notion_page_id TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        company TEXT,
+        phone TEXT,
+        phone2 TEXT,
+        licence_type TEXT,
+        licence_exp TEXT,
+        driver_no TEXT,
+        in_notion BOOLEAN NOT NULL DEFAULT true,
+        synced_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    // Vehicle body type (from the Vehicle Master sync) and Vehicle Planning's own vehicle status (maintenance / breakdown ...): our system only, never sent to Notion.
+    await pool.query(`ALTER TABLE vehicle_info ADD COLUMN IF NOT EXISTS body_type TEXT`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_planning_status (
+        vehicle_id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        start_day DATE NOT NULL,
+        days INTEGER NOT NULL DEFAULT 0,
+        comment TEXT,
+        set_by_code TEXT,
+        set_by_name TEXT,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
     // Vehicle Planning day notes: one short note per vehicle per day, written by clicking that day on the board.
     await pool.query(`
       CREATE TABLE IF NOT EXISTS vehicle_planning_day_notes (

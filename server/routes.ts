@@ -111,6 +111,7 @@ import notionInventorySyncRoutes from "./routes/notion-inventory-sync";
 import vehicleInfoRoutes from "./routes/vehicle-info";
 import loadingRoutes from "./routes/loading";
 import vehiclePlanningRoutes from "./routes/vehicle-planning";
+import driverMasterRoutes from "./routes/driver-master";
 import sortSlipRoutes from "./routes/sort-slips";
 import loadingCsvUploadRoutes from "./routes/loading-csv-upload";
 import dailyReportsRoutes from "./routes/daily-reports";
@@ -8208,6 +8209,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Mount Vehicle Master (vehicle_info CRUD + Notion vehicle sync) routes
   apiRouter.use(vehicleInfoRoutes);
+
+  // Driver Master (the Notion drivers kept in our own table)
+  apiRouter.use(driverMasterRoutes);
 
   // Mount Loading routes (link a Vehicle Master vehicle onto a Proforma Slip) — new feature,
   // own file, no dependency on the legacy Load Operations routes.

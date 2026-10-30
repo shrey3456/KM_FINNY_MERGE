@@ -43,7 +43,7 @@ export type Trip = {
   lastBusyDay: string;         // arrival, else expected end, else planned
   state: TripState;
   lockedReason?: string | null;  // set by the route: why Free is not allowed (Loading has taken the order over)
-  assumed: boolean;            // closed quietly on its planned last day (older than ASSUMED_AFTER_DAYS with no arrival)
+  assumed: boolean;            // closed quietly on its planned last day (nobody marked an arrival; see ASSUMED_AFTER_DAYS)
 };
 
 export type TripConflict = { orderNumber: string; startDay: string; withOrderNumber: string; withLastBusyDay: string };
@@ -51,13 +51,13 @@ export type TripConflict = { orderNumber: string; startDay: string; withOrderNum
 export type VehicleTrips = {
   trips: Trip[];
   freeFrom: string | null;                       // the day after the vehicle's last busy day; null when it has no trips
-  vehicleState: 'free' | 'busy' | 'awaiting';    // busy = a trip is running today; awaiting = a trip is due back (its last day has come) with no arrival recorded
+  vehicleState: 'free' | 'busy' | 'awaiting';    // busy = a trip is running today; awaiting = a trip is overdue (past its last day, no arrival recorded)
   conflicts: TripConflict[];
 };
 
-// A trip whose last day passed more than this many days ago with no arrival is treated as arrived on its planned last day, so old trips do not
-// fill the board with warnings.
-export const ASSUMED_AFTER_DAYS = 7;
+// Nobody has to mark an arrival: a trip whose last day has passed with no arrival and no extension is treated as arrived on its planned last day (it turns Past).
+// Arrived is only for a vehicle that comes back EARLY, and Extend for one that is still out (late) - so there is no "overdue" waiting state any more (0 days).
+export const ASSUMED_AFTER_DAYS = 0;
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const toUtc = (day: string) => { const [y, m, d] = day.split('-').map(Number); return Date.UTC(y, m - 1, d); };
@@ -139,10 +139,10 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
     if (cancelled) state = 'cancelled';
     else if (arrivedOn) state = 'arrived';
     else if (startDay > today) state = 'planned';
-    else if (lastBusyDay < today && daysBetween(lastBusyDay, today) > ASSUMED_AFTER_DAYS) { state = 'closed'; assumed = true; }
-    // Yellow from the trip's last day: a multi-day trip is due back that day; a one-day trip keeps the vehicle busy the whole day, so it is due the next day.
-    else if (startDay < lastBusyDay ? lastBusyDay <= today : lastBusyDay < today) state = 'awaiting';
-    else state = 'on_trip';
+    else if (lastBusyDay >= today) state = 'on_trip';
+    else if (daysBetween(lastBusyDay, today) > ASSUMED_AFTER_DAYS) { state = 'closed'; assumed = true; }
+    // Overdue: past its last day with no arrival and no extension. Information only - the vehicle is already available (it is free from its last day).
+    else state = 'awaiting';
     // Free on the last day, unless an arrival was recorded with the same-day box explicitly unticked.
     const heldTillNextDay = !!arrivedOn && (primary.e.freeSameDay ?? all.find((b) => b.e.freeSameDay != null)?.e.freeSameDay) === false;
     const freeSameDay = !heldTillNextDay;

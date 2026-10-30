@@ -1,5 +1,6 @@
 import { Client } from '@notionhq/client';
 import { findOrderPageIds } from './notionOrderStatusSync';
+import { pool } from '../db';
 
 // What Vehicle Planning reads from Notion on request (never on a timer): the driver list (name + page id, because the order's "Driver :" is a
 // relation and needs the page id), and one order's trip days and driver.
@@ -36,7 +37,13 @@ async function fetchDrivers(): Promise<NotionDriver[]> {
   return Array.from(out.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// The driver list comes from Driver Master (our own table, filled by its "Sync from Notion"), so Notion is not read each time a driver is picked. Only while that table
+// is still empty does it fall back to reading Notion, as before.
 export async function listNotionDrivers(): Promise<NotionDriver[]> {
+  try {
+    const { rows } = await pool.query(`SELECT notion_page_id AS id, name FROM driver_master WHERE in_notion ORDER BY name`);
+    if (rows.length > 0) return rows as NotionDriver[];
+  } catch { /* the table is not there yet: use Notion */ }
   if (driverCache && Date.now() - driverCache.at < DRIVER_LIST_TTL_MS) return driverCache.drivers;
   if (!driverRefresh) {
     driverRefresh = fetchDrivers()

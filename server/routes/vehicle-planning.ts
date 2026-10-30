@@ -7,6 +7,7 @@ import { listNotionDrivers, readNotionOrderInfo } from '../services/vehiclePlann
 import { fetchProformaOrdersFromNotion, writeOrderToDb } from '../services/proformaNotionSync';
 import { syncOrderToNotion, settleNotionSync, watchStatusAfterVehicleChange, type NotionSyncOutcome } from '../services/notionOrderStatusSync';
 import type { VehiclePlanningOrderEntry } from '@shared/schema';
+import { refreshVehicleSpecsFromNotion } from '../services/notionVehicleSync';
 import { computeVehicleTrips, groupEntries, groupPrimaryOf, mergeLocalTripFields, checkArrival, checkExpectedEnd, toDmy, addDays, todayIst } from '../lib/vehicleTrips';
 
 // Vehicle Planning — a Gantt-style "when is each vehicle free" view over a configurable slice of
@@ -67,6 +68,29 @@ type LiveOrder = {
   status: string | null; tripCompletesOn: string | null; tripDays: string | null;
 };
 
+// One Notion order page as a LiveOrder (null when it has no order number).
+function liveOrderFromPage(page: any): LiveOrder | null {
+  const orderNumber = extractPropertyValue(page.properties['Order No. :']);
+  if (!orderNumber) return null;
+  return {
+    orderNumber, orderDate: extractPropertyValue(page.properties['Ord Date :']),
+    partyName: extractPropertyValue(page.properties['Party Name :']),
+    partyState: extractPropertyValue(page.properties['State :']),
+    // Confirmed live against this database (same way "Trip Complets on" above was) —
+    // a `select`, not text; the plant this order is loading FROM, not the party's own
+    // state (which is what 'State :' above actually is, despite the name).
+    plant: extractPropertyValue(page.properties['Stk Plant :']),
+    // Vehicle Master's own `driver` field is empty for the whole Krupa fleet — the real
+    // driver turns out to be recorded per TRIP (order), not per vehicle. "Driver :" itself
+    // is a relation; "Link to Driver :" is a formula that already resolves it to the
+    // plain name, confirmed live the same way.
+    driver: extractPropertyValue(page.properties['Link to Driver :']),
+    status: extractPropertyValue(page.properties['Finny Status :']),
+    tripCompletesOn: extractPropertyValue(page.properties['Trip Complets on']),
+    tripDays: extractPropertyValue(page.properties['Party Trips (Days)']),
+  };
+}
+
 // Each qualifying vehicle's CURRENT order, found entirely live from Notion via the order
 // database's "Vehi  No. :" relation — explicit request: proforma_slips isn't reliably synced,
 // so it must never be consulted to decide which order is "current," not even as a starting
@@ -120,25 +144,8 @@ async function fetchCurrentOrdersByVehicle(vehicleNotionPageIds: string[]): Prom
         });
         for (const page of resp.results) {
           const relatedVehicleIds: string[] = (page.properties['Vehi  No. :']?.relation ?? []).map((r: any) => r.id);
-          const orderNumber = extractPropertyValue(page.properties['Order No. :']);
-          if (!orderNumber) continue;
-          const order: LiveOrder = {
-            orderNumber, orderDate: extractPropertyValue(page.properties['Ord Date :']),
-            partyName: extractPropertyValue(page.properties['Party Name :']),
-            partyState: extractPropertyValue(page.properties['State :']),
-            // Confirmed live against this database (same way "Trip Complets on" above was) —
-            // a `select`, not text; the plant this order is loading FROM, not the party's own
-            // state (which is what 'State :' above actually is, despite the name).
-            plant: extractPropertyValue(page.properties['Stk Plant :']),
-            // Vehicle Master's own `driver` field is empty for the whole Krupa fleet — the real
-            // driver turns out to be recorded per TRIP (order), not per vehicle. "Driver :" itself
-            // is a relation; "Link to Driver :" is a formula that already resolves it to the
-            // plain name, confirmed live the same way.
-            driver: extractPropertyValue(page.properties['Link to Driver :']),
-            status: extractPropertyValue(page.properties['Finny Status :']),
-            tripCompletesOn: extractPropertyValue(page.properties['Trip Complets on']),
-            tripDays: extractPropertyValue(page.properties['Party Trips (Days)']),
-          };
+          const order = liveOrderFromPage(page);
+          if (!order) continue;
           for (const vehicleId of relatedVehicleIds) {
             // Only the FIRST (= newest, thanks to the sort) match per vehicle is kept — a later
             // match in descending order is by definition older, so it's never an update.
@@ -155,6 +162,51 @@ async function fetchCurrentOrdersByVehicle(vehicleNotionPageIds: string[]): Prom
   }));
 
   return latestByVehicle;
+}
+
+// EVERY order dated on or after `sinceIso` (YYYY-MM-DD) on the given vehicles, newest first, found the same way (the order database's "Vehi  No. :" relation).
+// Used by Refresh from Notion when a start date is set: all the orders from that day, not only each vehicle's latest. Pages through everything; nothing is written here.
+export async function fetchOrdersSince(vehicleNotionPageIds: string[], sinceIso: string): Promise<Map<string, LiveOrder[]>> {
+  const byVehicle = new Map<string, LiveOrder[]>();
+  if (!ORDER_DATABASE_ID || vehicleNotionPageIds.length === 0) return byVehicle;
+  const CHUNK_SIZE = 50;
+  const chunks: string[][] = [];
+  for (let i = 0; i < vehicleNotionPageIds.length; i += CHUNK_SIZE) chunks.push(vehicleNotionPageIds.slice(i, i + CHUNK_SIZE));
+  await Promise.all(chunks.map(async (chunk) => {
+    try {
+      const wanted = new Set(chunk);
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const resp: any = await notion.databases.query({
+          database_id: ORDER_DATABASE_ID,
+          filter: {
+            and: [
+              { or: chunk.map((id) => ({ property: 'Vehi  No. :', relation: { contains: id } })) },
+              { property: 'Ord Date :', date: { on_or_after: sinceIso } },
+            ],
+          },
+          sorts: [{ property: 'Ord Date :', direction: 'descending' }],
+          page_size: 100,
+          ...(cursor ? { start_cursor: cursor } : {}),
+        });
+        for (const page of resp.results) {
+          const order = liveOrderFromPage(page);
+          if (!order) continue;
+          for (const r of (page.properties['Vehi  No. :']?.relation ?? []) as { id: string }[]) {
+            if (!wanted.has(r.id)) continue;
+            const list = byVehicle.get(r.id) ?? [];
+            if (!list.some((o) => o.orderNumber === order.orderNumber)) list.push(order);
+            byVehicle.set(r.id, list);
+          }
+        }
+        cursor = resp.has_more ? resp.next_cursor ?? undefined : undefined;
+      } while (cursor && ++pages < 80);
+    } catch (err) {
+      console.error('[Vehicle Planning] Reading the orders since', sinceIso, 'failed for a batch of vehicles:', err);
+    }
+  }));
+  return byVehicle;
 }
 
 // ─── Company filter settings ───────────────────────────────────────────────
@@ -319,10 +371,10 @@ let isVehiclePlanningSyncing = false;
 // matching the saved company filter, finds its current order, links it to a proforma slip that is ALREADY in our system
 // (it never creates one), and upserts the result into vehicle_planning_state. Called by the manual "Sync from Notion" button
 // and by the 24h automatic timer in server/index.ts — never by the page-load GET.
-export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number }> {
+export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number; fetchedOrders: number; specsUpdated?: number }> {
   if (isVehiclePlanningSyncing) {
     console.log('[Vehicle Planning] Sync already in progress, skipping this run');
-    return { syncedVehicles: 0, mismatches: 0, notInSystem: 0 };
+    return { syncedVehicles: 0, mismatches: 0, notInSystem: 0, fetchedOrders: 0 };
   }
   isVehiclePlanningSyncing = true;
   console.log('[Vehicle Planning] Sync started');
@@ -343,31 +395,46 @@ export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number
     });
 
     const vehiclesWithNotionId = fleet.filter((v): v is typeof v & { notionPageId: string } => !!v.notionPageId);
-    const currentOrderByVehicle = await fetchCurrentOrdersByVehicle(vehiclesWithNotionId.map((v) => v.notionPageId));
+    // With a start date set (the "From" date next to Refresh, or the day a reset started from): EVERY order dated on or after it, for each of the selected
+    // companies' vehicles. Without one: just each vehicle's latest order, as before.
+    const planningStart = await getPlanningStartDate();
+    const notionIds = vehiclesWithNotionId.map((v) => v.notionPageId);
+    const ordersSinceByVehicle = planningStart ? await fetchOrdersSince(notionIds, planningStart) : null;
+    const currentOrderByVehicle = ordersSinceByVehicle ? null : await fetchCurrentOrdersByVehicle(notionIds);
 
     const allPlants = await storage.getAllPlants();
     const stateByPlant = new Map(allPlants.map((p) => [p.name.trim().toLowerCase(), p.state] as const));
 
     let mismatches = 0;
     let notInSystem = 0;
-    // After "Reset planning": an order dated before the start day is not brought back.
-    const planningStart = await getPlanningStartDate();
+    let fetchedOrders = 0;
     for (const v of fleet) {
-      const currentOrder = v.notionPageId ? currentOrderByVehicle.get(v.notionPageId) ?? null : null;
-      if (!currentOrder || (planningStart && String(currentOrder.orderDate ?? '').slice(0, 10) < planningStart)) {
+      const latest = !ordersSinceByVehicle && v.notionPageId ? currentOrderByVehicle?.get(v.notionPageId) ?? null : null;
+      const orders: LiveOrder[] = ordersSinceByVehicle
+        ? (v.notionPageId ? ordersSinceByVehicle.get(v.notionPageId) ?? [] : [])
+        : (latest ? [latest] : []);
+      const usable = orders.filter((o) => !planningStart || String(o.orderDate ?? '').slice(0, 10) >= planningStart);
+      if (usable.length === 0) {
         await pool.query(`UPDATE vehicle_planning_state SET last_synced_at = now() WHERE vehicle_id = $1`, [v.id]);
         continue;
       }
-      const entry = await buildHistoryEntry(v, currentOrder, stateByPlant);
-      if (entry.vehicleMismatch) mismatches++;
-      if (entry.notInSystem) notInSystem++;
-      await upsertHistoryEntry(v.id, entry);
+      for (const order of usable) {
+        const entry = await buildHistoryEntry(v, order, stateByPlant);
+        if (entry.vehicleMismatch) mismatches++;
+        if (entry.notInSystem) notInSystem++;
+        await upsertHistoryEntry(v.id, entry);
+        fetchedOrders++;
+      }
     }
     // Every vehicle has now had its first pass.
     await pool.query(`UPDATE vehicle_planning_state SET setup_done = true WHERE vehicle_id = ANY($1::int[]) AND setup_done = false`, [fleet.map((v) => v.id)]);
 
-    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${mismatches} mismatch(es), ${notInSystem} order(s) not in our system`);
-    return { syncedVehicles: fleet.length, mismatches, notInSystem };
+    // The vehicles' body type and volume come in with the same Refresh (best effort: a failure here never fails the Refresh).
+    let specsUpdated = 0;
+    try { const s = await refreshVehicleSpecsFromNotion(); specsUpdated = s.bodyTypeChanged + s.volumeFilled; } catch (err) { console.error('[Vehicle Planning] Could not read body type / volume from Notion:', err instanceof Error ? err.message : err); }
+
+    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${fetchedOrders} order(s) read${planningStart ? ` from ${planningStart}` : ' (latest per vehicle)'}, ${mismatches} mismatch(es), ${notInSystem} order(s) not in our system`);
+    return { syncedVehicles: fleet.length, mismatches, notInSystem, fetchedOrders, specsUpdated };
   } finally {
     isVehiclePlanningSyncing = false;
   }
@@ -536,6 +603,42 @@ function tripEntries(history: VehiclePlanningOrderEntry[], orderNumber: string) 
   const first = [...group].sort((a, b) => String(a.orderDate ?? '').localeCompare(String(b.orderDate ?? '')))[0];
   return { group, first };
 }
+
+// POST /api/vehicle-planning/status - body { vehicleId, status | null, days, comment }: the vehicle's own status on this page (parking, maintenance, breakdown ...).
+// days >= 1 keeps it out of Available for that many days from today; 0 is just a label. status null (or empty) clears it. Our system only: Notion is untouched.
+const VEHICLE_STATUSES = ['Gone for passing', 'Parcing', 'Parking', 'Parking maintenance', 'Road maintenance', 'Showroom maintenance', 'Breakdown'];
+router.post('/vehicle-planning/status', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const vehicleId = Number(req.body?.vehicleId);
+    if (!vehicleId) return res.status(400).json({ message: 'vehicleId is required' });
+    const vehicle = await storage.getVehicleInfo(vehicleId);
+    if (!vehicle) return res.status(404).json({ message: 'Vehicle not found' });
+    const { userCode, userName } = who(req);
+    const status = String(req.body?.status ?? '').trim();
+    if (!status) {
+      await pool.query(`DELETE FROM vehicle_planning_status WHERE vehicle_id = $1`, [vehicleId]);
+      if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'delete', entityType: 'vehicle_status', entityId: String(vehicleId), details: `Status of ${vehicle.vehicleNumber ?? vehicleId} cleared by ${userName ?? userCode}`, userCode, userName });
+      return res.json({ cleared: true });
+    }
+    if (!VEHICLE_STATUSES.includes(status)) return res.status(400).json({ message: 'Unknown status' });
+    // Every status needs its days (or the date the vehicle is available again, which the page turns into days): 1 to 365.
+    const days = Math.floor(Number(req.body?.days));
+    if (!(days >= 1)) return res.status(400).json({ message: 'Enter the number of days (or pick the date it is available again).' });
+    if (days > 365) return res.status(400).json({ message: 'Days can be at most 365.' });
+    const comment = String(req.body?.comment ?? '').trim().slice(0, 300) || null;
+    await pool.query(
+      `INSERT INTO vehicle_planning_status (vehicle_id, status, start_day, days, comment, set_by_code, set_by_name, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       ON CONFLICT (vehicle_id) DO UPDATE SET status = EXCLUDED.status, start_day = EXCLUDED.start_day, days = EXCLUDED.days, comment = EXCLUDED.comment,
+         set_by_code = EXCLUDED.set_by_code, set_by_name = EXCLUDED.set_by_name, updated_at = NOW()`,
+      [vehicleId, status, todayIst(), days, comment, userCode ?? null, userName ?? null],
+    );
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_status', entityId: String(vehicleId), details: `${vehicle.vehicleNumber ?? vehicleId}: ${status}${days ? ` for ${days} day${days === 1 ? '' : 's'}` : ''}${comment ? ` - ${comment}` : ''} (set by ${userName ?? userCode})`, userCode, userName });
+    res.json({ status, days });
+  } catch (error) {
+    console.error('Error saving the vehicle status:', error);
+    res.status(500).json({ message: 'Failed to save the status' });
+  }
+});
 
 // POST /api/vehicle-planning/day-notes - body { vehicleId, day: 'YYYY-MM-DD', text }: the note for that vehicle on that day. An empty text removes it. Only our board; Notion is untouched.
 router.post('/vehicle-planning/day-notes', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
@@ -759,7 +862,31 @@ router.get('/vehicle-planning/vehicles', requirePageAccess('vehicle-planning'), 
       if (!notesByVehicle.has(n.vehicleId)) notesByVehicle.set(n.vehicleId, []);
       notesByVehicle.get(n.vehicleId)!.push({ day: n.day, text: n.text, byName: n.byName ?? null, at: new Date(n.at).toISOString() });
     }
-    const rowsWithNotes = rows.map((r) => ({ ...r, dayNotes: notesByVehicle.get(r.id) ?? [] }));
+    // Vehicle status set on this page (maintenance, breakdown ...): our system only. A status with days blocks the vehicle for that many days from the day it was
+    // set (the Available filter and the Assign button follow); with 0 days it is just a label. A status whose days are over is simply gone.
+    const { rows: statusRows } = await pool.query(
+      `SELECT vehicle_id AS "vehicleId", status, start_day::text AS "startDay", days, comment, set_by_name AS "byName" FROM vehicle_planning_status WHERE vehicle_id = ANY($1::int[])`,
+      [fleet.map((v) => v.id)],
+    );
+    const todayStr = todayIst();
+    const dayDiff = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+    const manualByVehicle = new Map<number, any>();
+    for (const s of statusRows as any[]) {
+      const endDay = s.days >= 1 ? addDays(s.startDay, s.days - 1) : null;
+      if (endDay && endDay < todayStr) continue;
+      const blocks = !!endDay && endDay >= todayStr;
+      manualByVehicle.set(s.vehicleId, {
+        status: s.status, startDay: s.startDay, days: s.days, endDay, blocks, comment: s.comment ?? null, byName: s.byName ?? null,
+        daysLeft: blocks ? dayDiff(s.startDay > todayStr ? s.startDay : todayStr, endDay!) + 1 : null,
+        availableFrom: blocks ? addDays(endDay!, 1) : null,
+      });
+    }
+    const vehicleById = new Map(fleet.map((v) => [v.id, v] as const));
+    const rowsWithNotes = rows.map((r) => ({
+      ...r, dayNotes: notesByVehicle.get(r.id) ?? [],
+      volume: vehicleById.get(r.id)?.volume ?? null, bodyType: vehicleById.get(r.id)?.bodyType ?? null,
+      manualStatus: manualByVehicle.get(r.id) ?? null,
+    }));
 
     // When the data was last read from Notion (the page shows it next to the Refresh button, since nothing refreshes it by itself).
     const lastRefreshedAt = stateRows.reduce((m: Date | null, r: any) => (r.lastSyncedAt && (!m || new Date(r.lastSyncedAt) > m) ? new Date(r.lastSyncedAt) : m), null as Date | null);
@@ -823,6 +950,8 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
     let lastDriver: string | null = null;
     let lastPlant: string | null = null;
     let upcoming: { orderNumber: string; startDay: string }[] = [];
+    // The trips this vehicle is busy with (not arrived): a free order dated inside one of them can ride along as a shared load.
+    let busyTrips: { orderNumber: string; partyName: string | null; startDay: string; freeFromDay: string }[] = [];
     if (vehicleId) {
       const vt = computeVehicleTrips(await loadHistory(vehicleId));
       freeFrom = vt.freeFrom;
@@ -832,6 +961,8 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
       lastDriver = [...live].sort((a, b) => b.startDay.localeCompare(a.startDay)).find((t) => t.driver)?.driver ?? null;
       lastPlant = latest?.plant ?? null;
       upcoming = live.filter((t) => t.state === 'planned' || t.state === 'on_trip').map((t) => ({ orderNumber: t.orderNumber, startDay: t.startDay }));
+      busyTrips = live.filter((t) => !t.arrivedOn && (t.state === 'planned' || t.state === 'on_trip' || t.state === 'awaiting'))
+        .map((t) => ({ orderNumber: t.orderNumber, partyName: t.members.map((m) => m.partyName).filter(Boolean).join(' + ') || null, startDay: t.startDay, freeFromDay: t.freeFromDay }));
       if (!lastDriver) lastDriver = (await storage.getVehicleInfo(vehicleId))?.driver ?? null;
     }
     const defaultDate = freeFrom && freeFrom > today ? freeFrom : today;
@@ -846,7 +977,9 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
               notion_status AS "notionStatus", driver_name AS "driverName"
        FROM proforma_slips
        WHERE (order_date AT TIME ZONE 'Asia/Kolkata')::date = $1::date${search}
-       ORDER BY (vehicle_number IS NOT NULL AND vehicle_number <> ''), order_number
+         AND (vehicle_number IS NULL OR vehicle_number = '')
+         AND UPPER(COALESCE(notion_status,'')) <> 'CANCELLED'
+       ORDER BY order_number
        LIMIT 200`,
       params,
     );
@@ -879,8 +1012,30 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
         suggestions.push({ ...c, tripDaysGuess: days, samePlant: !!lastPlant && c.plant === lastPlant, fits: !runsInto, runsInto });
       }
     }
+    // Free orders dated on days this vehicle is already busy: offered as "add to that trip" (a shared load), each with the trip it would join.
+    const sharable: any[] = [];
+    if (busyTrips.length) {
+      const from = busyTrips.reduce((m, t) => (t.startDay < m ? t.startDay : m), busyTrips[0].startDay);
+      const to = addDays(busyTrips.reduce((m, t) => (t.freeFromDay > m ? t.freeFromDay : m), busyTrips[0].freeFromDay), -1);
+      if (to >= from) {
+        const { rows: cand } = await pool.query(
+          `SELECT order_number AS "orderNumber", party_name AS "partyName", plant, order_date::text AS "orderDate"
+             FROM proforma_slips
+            WHERE (vehicle_number IS NULL OR vehicle_number = '')
+              AND (order_date AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $1::date AND $2::date
+              AND UPPER(COALESCE(notion_status,'')) <> 'CANCELLED'
+            ORDER BY order_date, order_number LIMIT 60`,
+          [from, to],
+        );
+        for (const c of cand) {
+          const d = dayOf(c.orderDate);
+          const trip = busyTrips.find((t) => t.startDay <= d && d < t.freeFromDay);
+          if (trip) sharable.push({ ...c, joinOrder: trip.orderNumber, joinParty: trip.partyName });
+        }
+      }
+    }
     res.json({
-      orders, date,
+      orders, date, sharable,
       vehicle: vehicleId ? { freeFrom, busyUntil: freeFrom ? addDays(freeFrom, -1) : null, busyOrder, lastDriver, lastPlant } : null,
       suggestions,
     });
@@ -947,7 +1102,7 @@ function removeFromHistory(history: VehiclePlanningOrderEntry[], orderNumber: st
   return rest;
 }
 
-type AssignInput = { orderNumber: string; vehicleId: number; driverName?: string | null; driverPageId?: string | null; force?: boolean; sameTripAs?: string | null };
+type AssignInput = { orderNumber: string; vehicleId: number; driverName?: string | null; driverPageId?: string | null; force?: boolean; sameTripAs?: string | null; move?: boolean };
 type AssignActor = { userCode?: string; userName?: string; isAdmin: boolean };
 
 // The whole assignment, as a function so "Move all" can run it once per order of a shared trip.
@@ -963,6 +1118,15 @@ async function performAssign(inp: AssignInput, actor: AssignActor): Promise<{ st
   const vehicle = await storage.getVehicleInfo(vehicleId);
   if (!vehicle) return fail(404, { message: 'Vehicle not found' });
   if (!vehicle.vehicleNumber) return fail(400, { message: 'This vehicle has no vehicle number set in Vehicle Master.' });
+
+  // One slip, one vehicle (a vehicle may hold many slips): an order whose SLIP already has another vehicle is not taken over by a plain assign. Free it there first,
+  // or move it on purpose (Change -> Move, which sends `move`). Only the slip counts: a copy of the order that an old Refresh left on some board (Notion-only) does not.
+  if (!inp.move) {
+    const onOtherSlip = (!!slip.vehicleInfoId && slip.vehicleInfoId !== vehicle.id) || (!!slip.vehicleNumber && slip.vehicleNumber !== vehicle.vehicleNumber);
+    if (onOtherSlip) {
+      return fail(409, { code: 'ALREADY_ASSIGNED', message: `Order #${orderNumber} is already on ${slip.vehicleNumber ?? 'another vehicle'}. An order can be on only one vehicle: free it there first, or use Change → Move.` });
+    }
+  }
 
   const { userCode, userName } = actor;
   const previousVehicleId = slip.vehicleInfoId ?? null;
@@ -1091,6 +1255,7 @@ router.post('/vehicle-planning/assign', requirePageWrite('vehicle-planning'), as
     const r = await performAssign({
       orderNumber, vehicleId, driverName: req.body?.driverName, driverPageId: req.body?.driverPageId, force: !!req.body?.force,
       sameTripAs: typeof req.body?.sameTripAs === 'string' && req.body.sameTripAs.trim() ? req.body.sameTripAs.trim() : null,
+      move: !!req.body?.move,
     }, { ...who(req), isAdmin: isAdminUser(req) });
     res.status(r.status).json(r.body);
   } catch (error) {
@@ -1122,10 +1287,10 @@ router.post('/vehicle-planning/trips/move-group', requirePageWrite('vehicle-plan
     let last: { status: number; body: any } = { status: 200, body: {} };
     for (let i = 0; i < ordered.length; i++) {
       const m = ordered[i];
-      last = await performAssign({ orderNumber: m.orderNumber, vehicleId: toVehicleId, driverName: m.driver, driverPageId: m.driverNotionId, force: !!req.body?.force, sameTripAs: i === 0 ? null : primary }, actor);
+      last = await performAssign({ orderNumber: m.orderNumber, vehicleId: toVehicleId, driverName: m.driver, driverPageId: m.driverNotionId, force: !!req.body?.force, sameTripAs: i === 0 ? null : primary, move: true }, actor);
       if (last.status !== 200) {
         // Not the first? Put the ones already moved back so the trip is not split across two vehicles.
-        for (let k = 0; k < i; k++) await performAssign({ orderNumber: ordered[k].orderNumber, vehicleId, driverName: ordered[k].driver, driverPageId: ordered[k].driverNotionId, force: true, sameTripAs: k === 0 ? null : primary }, { ...actor, isAdmin: true }).catch(() => null);
+        for (let k = 0; k < i; k++) await performAssign({ orderNumber: ordered[k].orderNumber, vehicleId, driverName: ordered[k].driver, driverPageId: ordered[k].driverNotionId, force: true, sameTripAs: k === 0 ? null : primary, move: true }, { ...actor, isAdmin: true }).catch(() => null);
         return res.status(last.status).json(last.body);
       }
     }
