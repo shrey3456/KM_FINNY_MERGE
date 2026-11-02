@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import Lenis from "lenis";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
@@ -159,6 +160,7 @@ function isAvailableOn(v: VehicleRow, day: string): boolean {
   return !live.some((t) => t.startDay <= day && day < t.freeFromDay);
 }
 
+const OTHER_STATUS = "Other";
 const MANUAL_STATUSES = ["Gone for passing", "Parking maintenance", "Road maintenance", "Showroom maintenance", "Breakdown"] as const;
 const STATUS_TONES: Record<string, string> = {
   "Gone for passing": "bg-indigo-100 text-indigo-800", "Parcing": "bg-indigo-100 text-indigo-800", "Parking": "bg-slate-100 text-slate-700", "Parking maintenance": "bg-orange-100 text-orange-800", "Road maintenance": "bg-orange-100 text-orange-800",
@@ -389,6 +391,7 @@ export default function VehiclePlanning() {
   // The Status box of one vehicle (availability actions + a status set here: parking, maintenance, breakdown ...).
   const [statusTarget, setStatusTarget] = useState<VehicleRow | null>(null);
   const [stPick, setStPick] = useState("");
+  const [stOther, setStOther] = useState("");   // the typed status when "Other" is picked
   const [stDays, setStDays] = useState("");
   const [stFrom, setStFrom] = useState("");   // the day the vehicle is available again (today + days)
   const [stComment, setStComment] = useState("");
@@ -487,29 +490,6 @@ export default function VehiclePlanning() {
   // moves smoothly day by day and a fast flick covers many days. Registered natively (non-
   // passive): React's onWheel is passive and can't preventDefault, which is what stops the
   // browser's own back/forward swipe navigation from firing on a sideways gesture.
-  const wheelAccum = useRef(0);
-  useEffect(() => {
-    const el = ganttRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
-      if (!horizontal) return; // vertical scroll is the board's own (the day header stays put); only a sideways gesture moves the dates
-      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-      if (delta === 0) return;
-      e.preventDefault();
-      wheelAccum.current += delta;
-      // One day per WHEEL_PX_PER_DAY of finger travel (a column is only 42 px wide, which made a sideways swipe race through dates), and never more than
-      // WHEEL_MAX_DAYS_PER_EVENT days from one wheel event, so even a hard flick stays controllable.
-      const raw = Math.trunc(wheelAccum.current / WHEEL_PX_PER_DAY);
-      if (raw === 0) return;
-      const days = Math.max(-WHEEL_MAX_DAYS_PER_EVENT, Math.min(WHEEL_MAX_DAYS_PER_EVENT, raw));
-      wheelAccum.current = raw === days ? wheelAccum.current - days * WHEEL_PX_PER_DAY : 0;
-      setWindowStart((d) => addDays(d, days));
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  });
-
   // Calendar date picker — single date or a from/to range, same single/range toggle pattern
   // Scan History's own date filter uses. A single date just moves the window's start (the
   // 14/30-day toggle still controls its length); a range sets BOTH the start and the exact
@@ -543,6 +523,41 @@ export default function VehiclePlanning() {
     queryKey: ["/api/vehicle-planning/vehicles"],
     queryFn: async () => (await apiRequest("GET", "/api/vehicle-planning/vehicles")).json(),
   });
+
+  // Both axes of the board are smoothed by Lenis (one instance per axis; each ignores the other axis's gestures), so a sideways swipe scrolls the
+  // board natively. Only when the swipe pushes past the first / last day shown does it move the date window, one day per WHEEL_PX_PER_DAY.
+  const boardLoading = fleetQuery.isLoading;
+  const edgeAccum = useRef(0);
+  useEffect(() => {
+    const el = ganttRef.current;
+    if (!el || boardLoading) return;
+    const onWheel = (e: WheelEvent) => {
+      const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
+      if (!horizontal) return;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (delta === 0) return;
+      const atStart = el.scrollLeft <= 0 && delta < 0;
+      const atEnd = el.scrollLeft >= el.scrollWidth - el.clientWidth - 1 && delta > 0;
+      if (!atStart && !atEnd) { edgeAccum.current = 0; return; } // mid-board: the smooth native scroll handles it
+      e.preventDefault(); // also stops the browser's back/forward swipe
+      edgeAccum.current += delta;
+      const days = Math.trunc(edgeAccum.current / WHEEL_PX_PER_DAY);
+      if (days === 0) return;
+      edgeAccum.current -= days * WHEEL_PX_PER_DAY;
+      startTransition(() => setWindowStart((d) => addDays(d, Math.max(-WHEEL_MAX_DAYS_PER_EVENT, Math.min(WHEEL_MAX_DAYS_PER_EVENT, days)))));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return () => el.removeEventListener("wheel", onWheel);
+    const content = el.firstElementChild as HTMLElement | null;
+    if (!content) return () => el.removeEventListener("wheel", onWheel);
+    const common = { wrapper: el, content, smoothWheel: true, lerp: 0.1 } as const;
+    const lenisY = new Lenis({ ...common, orientation: "vertical", gestureOrientation: "vertical" });
+    const lenisX = new Lenis({ ...common, orientation: "horizontal", gestureOrientation: "horizontal" });
+    let raf = 0;
+    const tick = (t: number) => { lenisY.raf(t); lenisX.raf(t); raf = requestAnimationFrame(tick); };
+    raf = requestAnimationFrame(tick);
+    return () => { el.removeEventListener("wheel", onWheel); cancelAnimationFrame(raf); lenisY.destroy(); lenisX.destroy(); };
+  }, [boardLoading]);
 
   const historyQuery = useQuery<{ history: HistoryEntry[] }>({
     queryKey: ["/api/vehicle-planning/vehicles", historyTarget?.id, "history"],
@@ -1080,7 +1095,7 @@ export default function VehiclePlanning() {
   }
   function openStatus(v: VehicleRow) {
     const n = v.manualStatus?.blocks ? Math.max(1, v.manualStatus.daysLeft ?? 1) : 0;
-    setStatusTarget(v); setStPick(v.manualStatus?.status ?? ""); setStComment(v.manualStatus?.comment ?? "");
+    setStatusTarget(v); { const cur = v.manualStatus?.status ?? ""; const custom = !!cur && !(MANUAL_STATUSES as readonly string[]).includes(cur); setStPick(custom ? OTHER_STATUS : cur); setStOther(custom ? cur : ""); } setStComment(v.manualStatus?.comment ?? "");
     setStDays(n ? String(n) : ""); setStFrom(n ? format(addDays(new Date(), n), "yyyy-MM-dd") : "");
   }
   // Days and the "available again" date are one setting: changing either updates the other (days counted from today).
@@ -1723,12 +1738,16 @@ export default function VehiclePlanning() {
                       const ext = extLabels.find((x) => x.trip === l.trip);
                       if (ext && ext.startIdx <= l.startIdx) return null;   // every visible day is an extended one: the extension label is written there
                       const spanDays = Math.max(1, Math.min(l.endIdx, nextStart - 1, ext ? ext.startIdx - 1 : windowDays) - l.startIdx + 1);
-                      // A trip of only one or two days: the name stays inside its first day column and wraps onto two lines (instead of running across both days and being cut short).
-                      const short = spanDays <= 2;
+                      // The name stays inside the trip's first day cell on one line, cut with "..." when it is longer (the full name is in the tooltip).
                       return (
-                        <div key={l.trip.orderNumber} className={`pointer-events-none absolute text-[10px] font-medium text-black ${short ? "line-clamp-2 break-words leading-[1.1]" : "truncate leading-[1.15]"}`}
-                          style={{ top: 4, left: `calc(${(l.startIdx / windowDays) * 100}% + 3px)`, width: `calc(${((short ? 1 : spanDays) / windowDays) * 100}% - 6px)` }}
-                          title={l.trip.partyName ?? undefined}>
+                        <div key={l.trip.orderNumber} className="absolute truncate text-[10px] font-medium leading-[1.15] text-black"
+                          style={{ top: 4, left: `calc(${(l.startIdx / windowDays) * 100}% + 3px)`, width: `calc(${(1 / windowDays) * 100}% - 6px)` }}
+                          title={barLabel(l.trip, spanDays)}
+                          // Hoverable for the full name, so a click is passed on to the day cell underneath.
+                          onClick={(e) => {
+                            const under = document.elementsFromPoint(e.clientX, e.clientY).find((n) => n !== e.currentTarget && (n as HTMLElement).closest?.("[data-cell]"));
+                            (under as HTMLElement | undefined)?.closest<HTMLElement>("[data-cell]")?.click();
+                          }}>
                           {barLabel(l.trip, spanDays)}
                         </div>
                       );
@@ -2272,13 +2291,16 @@ export default function VehiclePlanning() {
                   <div className="space-y-2.5">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Set a status</div>
                     <div className="flex flex-wrap gap-1.5">
-                      {MANUAL_STATUSES.map((s) => (
+                      {[...MANUAL_STATUSES, OTHER_STATUS].map((s) => (
                         <button key={s} type="button" onClick={() => setStPick(s)}
                           className={`rounded-full px-3 py-1 text-xs font-medium ${stPick === s ? "bg-[#001d6e] text-white" : "border border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}>
                           {s}
                         </button>
                       ))}
                     </div>
+                    {stPick === OTHER_STATUS && (
+                      <Input value={stOther} onChange={(e) => setStOther(e.target.value)} maxLength={40} placeholder="Type the status (for example: Tyre change)" className="h-8 text-xs" autoFocus />
+                    )}
                     <div className="flex flex-wrap items-end gap-3">
                       <div className="space-y-1">
                         <label className="text-xs font-semibold text-gray-700">Days <span className="text-red-500">*</span></label>
@@ -2307,8 +2329,8 @@ export default function VehiclePlanning() {
                   )}
                   <Button variant="outline" disabled={statusMutation.isPending} onClick={() => setStatusTarget(null)}>{canWrite ? "Cancel" : "Close"}</Button>
                   {canWrite && (
-                    <Button disabled={!stPick || !(Math.floor(Number(stDays)) >= 1) || statusMutation.isPending}
-                      onClick={() => askConfirm({ title: `Set the status of ${sv.vehicleNumber}?`, message: `"${stPick}" for ${Math.floor(Number(stDays))} day${Math.floor(Number(stDays)) === 1 ? "" : "s"} from today. The vehicle is not available until then.`, confirmLabel: "Yes, save the status", run: () => statusMutation.mutate({ vehicleId: sv.id, status: stPick, days: Math.floor(Number(stDays)), comment: stComment }) })}>
+                    <Button disabled={!stPick || (stPick === OTHER_STATUS && stOther.trim().length < 3) || !(Math.floor(Number(stDays)) >= 1) || statusMutation.isPending}
+                      onClick={() => askConfirm({ title: `Set the status of ${sv.vehicleNumber}?`, message: `"${stPick === OTHER_STATUS ? stOther.trim() : stPick}" for ${Math.floor(Number(stDays))} day${Math.floor(Number(stDays)) === 1 ? "" : "s"} from today. The vehicle is not available until then.`, confirmLabel: "Yes, save the status", run: () => statusMutation.mutate({ vehicleId: sv.id, status: stPick === OTHER_STATUS ? stOther.trim() : stPick, days: Math.floor(Number(stDays)), comment: stComment }) })}>
                       {statusMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save status"}
                     </Button>
                   )}

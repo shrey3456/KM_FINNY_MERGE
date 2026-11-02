@@ -298,7 +298,7 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd
   useEffect(() => { if (ask) { setChip(""); setText(""); } }, [ask?.orders.join(","), ask?.newEnd]);
   const detail = text.trim();
   // A reason is a quick choice, or just typed: either one is enough (Other needs the text).
-  const reason = chip === "Other" ? detail : chip ? (detail ? `${chip} - ${detail}` : chip) : detail;
+  const reason = chip === "Other" ? detail : chip;
   const valid = reason.length >= 3;
 
   return (
@@ -326,7 +326,7 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd
               </div>
             </div>
           )}
-          <label className="block text-xs font-semibold text-gray-700">Reason <span className="text-red-500">*</span> <span className="font-normal text-gray-500">(pick one, or type it below)</span></label>
+          <label className="block text-xs font-semibold text-gray-700">Reason <span className="text-red-500">*</span> <span className="font-normal text-gray-500">(pick one; choose Other to type it)</span></label>
           <div className="flex flex-wrap gap-1.5">
             {REASONS.map((r) => (
               <button key={r} type="button" onClick={() => setChip(r)}
@@ -335,12 +335,14 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd
               </button>
             ))}
           </div>
-          <div className="space-y-1">
-            <label className="text-xs font-semibold text-gray-700">{chip === "" || chip === "Other" ? "Reason in your own words" : "More detail (optional)"}</label>
-            <Input value={text} onChange={(e) => setText(e.target.value)} maxLength={200} placeholder="For example: the truck waited 2 days at the party's godown" className="h-9" />
-          </div>
+          {chip === "Other" && (
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-gray-700">Type the reason</label>
+              <Input value={text} onChange={(e) => setText(e.target.value)} maxLength={200} placeholder="For example: the truck waited 2 days at the party's godown" className="h-9" autoFocus />
+            </div>
+          )}
         </div>
-        {!valid && !pending && <p className="text-[11px] text-gray-500">Pick a reason or type one to save the extension.</p>}
+        {!valid && !pending && <p className="text-[11px] text-gray-500">Pick a reason (or choose Other and type it) to save the extension.</p>}
         <DialogFooter className="gap-2 sm:gap-2">
           <Button variant="outline" disabled={pending} onClick={onCancel}>Cancel</Button>
           <Button disabled={!valid || pending} onClick={() => onConfirm(reason)}>

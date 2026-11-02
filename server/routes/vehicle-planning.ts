@@ -620,7 +620,8 @@ router.post('/vehicle-planning/status', requirePageWrite('vehicle-planning'), as
       if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'delete', entityType: 'vehicle_status', entityId: String(vehicleId), details: `Status of ${vehicle.vehicleNumber ?? vehicleId} cleared by ${userName ?? userCode}`, userCode, userName });
       return res.json({ cleared: true });
     }
-    if (!VEHICLE_STATUSES.includes(status)) return res.status(400).json({ message: 'Unknown status' });
+    // The listed statuses, or one typed in with "Other" (3 to 40 characters).
+    if (!VEHICLE_STATUSES.includes(status) && (status.length < 3 || status.length > 40)) return res.status(400).json({ message: 'Type a status of 3 to 40 characters.' });
     // Every status needs its days (or the date the vehicle is available again, which the page turns into days): 1 to 365.
     const days = Math.floor(Number(req.body?.days));
     if (!(days >= 1)) return res.status(400).json({ message: 'Enter the number of days (or pick the date it is available again).' });
