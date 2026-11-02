@@ -95,11 +95,11 @@ export default function DriverMaster() {
     : null;
 
   return (
-    <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
+    <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-6">
       <PageHeader
         icon={UserRound}
         title="Driver Master"
-        description="Every driver from Notion, kept here so a driver can be assigned (Vehicle Planning, Vehicle Master) without reading Notion each time. Press Sync from Notion to refresh the list."
+        description="All Notion drivers, used for driver assignment. Press Sync from Notion to refresh."
         actions={(
           <>
             <span className="text-xs text-gray-500">{lastSynced ? `Last synced: ${lastSynced}` : "Never synced"}</span>
@@ -123,7 +123,7 @@ export default function DriverMaster() {
         {companies.map(([name, n]) => (
           <button key={name} type="button" onClick={() => setCompany(company === name ? "" : name)}
             className={`rounded-full border px-3 py-1 text-xs font-medium ${company === name ? "border-[#001d6e] bg-[#001d6e] text-white" : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"}`}>
-            {name} ({n})
+            {name === "—" ? "No company" : name} ({n})
           </button>
         ))}
       </div>
@@ -148,7 +148,7 @@ export default function DriverMaster() {
         enableColumnResizing
         showMobileSwipeHint
         isStickyHeader
-        maxHeight="calc(100vh - 300px)"
+        maxHeight="max(320px, calc(100vh - 410px))"
         headerClassName={TABLE_HEADER_CLASS}
       />
     </div>

@@ -173,6 +173,16 @@ function memberEnd(t: Trip, m: TripMember): string {
   return m.plannedLastDay < t.lastBusyDay ? m.plannedLastDay : t.lastBusyDay;
 }
 
+// Every order the vehicle is out on today (a shared load or two slips on one vehicle shows all of them); with none today, the latest order as before.
+function ordersToday(v: VehicleRow, todayIso: string): string[] {
+  const out: string[] = [];
+  for (const tr of v.trips ?? []) {
+    if (tr.state === "cancelled") continue;
+    for (const m of tr.members) if (m.startDay <= todayIso && memberEnd(tr, m) >= todayIso && !out.includes(m.orderNumber)) out.push(m.orderNumber);
+  }
+  return out.length > 0 ? out : v.currentOrder ? [v.currentOrder.orderNumber] : [];
+}
+
 function dotClass(state: TripState, conflict: boolean): string {
   if (conflict) return "bg-red-500";
   switch (state) {
@@ -751,7 +761,7 @@ export default function VehiclePlanning() {
   const vehicles = allVehicles
     .filter((v) => {
       const matchesSearch = !searchLower
-        || [v.vehicleNumber, v.driver, v.currentOrder?.orderNumber].some((f) => (f ?? "").toLowerCase().includes(searchLower));
+        || [v.vehicleNumber, v.driver, v.currentOrder?.orderNumber, ...ordersToday(v, isoOf(new Date()))].some((f) => (f ?? "").toLowerCase().includes(searchLower));
       if (!matchesSearch) return false;
       if (conditionList.length > 0 && !matchAllConditions(v, conditionList, filterableColumns)) return false;
       if (tripFilter === "awaiting" && v.vehicleState !== "awaiting") return false;
@@ -813,7 +823,10 @@ export default function VehiclePlanning() {
       if (last >= 0 && first < windowDays) labels.push({ trip: tr, startIdx: Math.max(0, first), endIdx: Math.min(windowDays - 1, last) });
       if (extTo >= extFrom && extTo >= 0 && extFrom < windowDays) extLabels.push({ trip: tr, startIdx: Math.max(0, extFrom), endIdx: Math.min(windowDays - 1, extTo), reason: tr.expectedEndReason ?? null });
     }
-    return { byIdx, labels, extLabels };
+    // Trips that share a day with another slip: each of their dots carries its own party name beside it (no name above), so two slips on one vehicle never overlap.
+    const multi = new Set<Trip>();
+    for (const cell of byIdx) if (cell.length > 1) for (const c of cell) multi.add(c.trip);
+    return { byIdx, labels, extLabels, multi };
   }
 
   // The trips an extension to `newEnd` would run into (they start before the longer trip is back).
@@ -1351,14 +1364,14 @@ export default function VehiclePlanning() {
                     {col && (
                       <ColumnHeaderFilterButton column={col} condition={columnConditions[col.id]} onChange={(cond) => setColumnCondition(col.id, cond)} onRemove={() => clearColumnCondition(col.id)} />
                     )}
-                    {adjustMode && <span onPointerDown={(e) => startResize(e, c.key)} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none bg-white/30 hover:bg-white/70" title="Drag to resize this column" />}
+                    <span onPointerDown={(e) => startResize(e, c.key)} className={`absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-white/70 ${adjustMode ? "bg-white/30" : "bg-transparent"}`} title="Drag to resize this column" />
                   </div>
                 );
               })}
               {canWrite && (
                 <div style={{ width: widthOf("actions") }} className="relative shrink-0 overflow-hidden border-r border-white/10 px-2 py-2.5 text-[10px] font-semibold uppercase tracking-wide">
                   Actions
-                  {adjustMode && <span onPointerDown={(e) => startResize(e, "actions")} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none bg-white/30 hover:bg-white/70" title="Drag to resize this column" />}
+                  <span onPointerDown={(e) => startResize(e, "actions")} className={`absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-white/70 ${adjustMode ? "bg-white/30" : "bg-transparent"}`} title="Drag to resize this column" />
                 </div>
               )}
               </div>
@@ -1379,7 +1392,7 @@ export default function VehiclePlanning() {
 
             {/* Vehicle rows */}
             {vehicles.map((v, rowIdx) => {
-              const { byIdx, labels, extLabels } = dotsFor(v);
+              const { byIdx, labels, extLabels, multi } = dotsFor(v);
               // Two (or more) orders on one day are stacked up and down: the row grows with the tallest stack and the Assign / Extend buttons sit below it.
               const maxStack = Math.max(1, ...byIdx.map((c) => c.length));
               const btnTop = Math.max(38, 22 + maxStack * 14 + (maxStack - 1) * 3 + 4);
@@ -1390,11 +1403,11 @@ export default function VehiclePlanning() {
               const stripe = rowIdx % 2 === 1;
               return (
                 <div key={v.id} className={`flex border-b border-gray-100 last:border-0 ${stripe ? "bg-slate-50/70" : "bg-white"}`}>
-                  <div className={`sticky left-0 z-10 flex shrink-0 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${stripe ? "bg-slate-50" : "bg-white"}`}>
+                  <div className={`sticky left-0 z-20 flex shrink-0 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${stripe ? "bg-slate-50" : "bg-white"}`}>
                   {([
                     { key: "vehicleNumber", value: v.vehicleNumber, bold: true },
                     { key: "rtoNumber", value: v.rtoNumber, bold: false },
-                    { key: "orderNumber", value: v.currentOrder ? `#${v.currentOrder.orderNumber}` : null, bold: false },
+                    { key: "orderNumber", value: (() => { const o = ordersToday(v, todayIso); return o.length > 0 ? o.map((n) => `#${n}`).join("\n") : null; })(), bold: false },
                     {
                       key: "state",
                       // Current order's plant + Plant Master's state for it (e.g. "Valsad, GJ")
@@ -1411,9 +1424,9 @@ export default function VehiclePlanning() {
                     <div
                       key={c.key}
                       style={{ width: widthOf(c.key) }}
-                      className={`shrink-0 cursor-pointer border-r border-gray-100 px-2 py-2.5 text-[11px] hover:bg-[#001d6e]/5 ${c.key === "driver" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1" : ""}`}
+                      className={`shrink-0 border-r border-gray-100 px-2 py-2.5 text-[11px] ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
                       title={c.key === "orderNumber" ? "Click for this vehicle's order history" : (c.value ?? undefined)}
-                      onClick={() => setHistoryTarget(v)}
+                      onClick={c.key === "orderNumber" ? () => setHistoryTarget(v) : undefined}
                     >
                       {c.key === "orderNumber" && v.currentOrder?.vehicleMismatch && (
                         <button
@@ -1427,8 +1440,8 @@ export default function VehiclePlanning() {
                       )}
                       {/* Driver names run longer than this column is wide — wraps onto 2 lines
                           instead of cutting off with an ellipsis like every other column here. */}
-                      <span className={c.key === "driver" ? "line-clamp-2 break-words leading-tight" : "truncate"}>{c.value ?? "—"}</span>
-                      {c.key === "vehicleNumber" && v.volume != null && <span className="block text-[9px] font-normal leading-none text-gray-400" title="Vehicle volume">Vol {v.volume}</span>}
+                      <span className={c.key === "driver" ? "line-clamp-2 break-words leading-tight" : c.key === "orderNumber" ? "" : "truncate"}>{c.value ?? "—"}</span>
+                      {c.key === "vehicleNumber" && v.volume != null && <span className="mt-0.5 block text-[11px] font-medium leading-none text-gray-500" title="Vehicle volume">Vol {v.volume}</span>}
                     </div>
                   ))}
                   <div style={{ width: widthOf("status") }} className="shrink-0 cursor-pointer border-r border-gray-100 px-1.5 py-2 hover:bg-[#001d6e]/5" title={st.title} onClick={() => openStatus(v)}>
@@ -1483,8 +1496,8 @@ export default function VehiclePlanning() {
                               <div className="absolute inset-x-0 top-[22px] flex flex-col items-center justify-center gap-[3px]">
                                 {cellDots.map((dd, k) => {
                                   const dotKey = `${dd.member.orderNumber}-${k}`;
-                                  // A shared load: each slip's party is written next to its own dot (on the day that slip starts).
-                                  const showName = dd.trip.members.length > 1 && !narrowDays && (dd.member.startDay === dayIso || (i === 0 && dd.member.startDay < dayIso));
+                                  // Slips on the same days (a shared load, or two slips on one vehicle): each slip's party is written next to its own dot (on the day that slip starts).
+                                  const showName = multi.has(dd.trip) && !narrowDays && (dd.member.startDay === dayIso || (i === 0 && dd.member.startDay < dayIso));
                                   const dot = (
                                     <button
                                     key={dotKey}
@@ -1519,7 +1532,7 @@ export default function VehiclePlanning() {
                     {/* The party name of each trip, written once above its first dot (as wide as the room up to the next trip). */}
                     {labels.map((l, li) => {
                       const nextStart = labels[li + 1]?.startIdx ?? windowDays;
-                      if (l.trip.members.length > 1 && !narrowDays) return null;   // a shared load: each party is written beside its own dot
+                      if (multi.has(l.trip) && !narrowDays) return null;   // slips sharing a day: each party is written beside its own dot
                       const ext = extLabels.find((x) => x.trip === l.trip);
                       if (ext && ext.startIdx <= l.startIdx) return null;   // every visible day is an extended one: the extension label is written there
                       const spanDays = Math.max(1, Math.min(l.endIdx, nextStart - 1, ext ? ext.startIdx - 1 : windowDays) - l.startIdx + 1);
