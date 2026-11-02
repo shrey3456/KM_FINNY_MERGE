@@ -291,15 +291,18 @@ function DayFilterButton({ filter, onChange, title }: { filter: DayFilter | unde
   );
 }
 
-// Every order the vehicle is out on today (a shared load or two slips on one vehicle shows all of them); with none today, the latest order as before.
-function ordersToday(v: VehicleRow, todayIso: string): string[] {
-  const out: string[] = [];
+// Every slip the vehicle is out on today (a shared load or two slips on one vehicle shows all of them), each with its own trip days; with none today, the latest order as before.
+function slipsToday(v: VehicleRow, todayIso: string): { orderNumber: string; tripDays: number | null }[] {
+  const out: { orderNumber: string; tripDays: number | null }[] = [];
   for (const tr of v.trips ?? []) {
     if (tr.state === "cancelled") continue;
-    for (const m of tr.members) if (m.startDay <= todayIso && memberEnd(tr, m) >= todayIso && !out.includes(m.orderNumber)) out.push(m.orderNumber);
+    for (const m of tr.members) if (m.startDay <= todayIso && memberEnd(tr, m) >= todayIso && !out.some((x) => x.orderNumber === m.orderNumber)) out.push({ orderNumber: m.orderNumber, tripDays: m.tripDays });
   }
-  return out.length > 0 ? out : v.currentOrder ? [v.currentOrder.orderNumber] : [];
+  if (out.length > 0) return out;
+  const days = v.tripDays != null && v.tripDays !== "" && !Number.isNaN(Number(v.tripDays)) ? Number(v.tripDays) : null;
+  return v.currentOrder ? [{ orderNumber: v.currentOrder.orderNumber, tripDays: days }] : [];
 }
+function ordersToday(v: VehicleRow, todayIso: string): string[] { return slipsToday(v, todayIso).map((x) => x.orderNumber); }
 
 function dotClass(state: TripState, conflict: boolean): string {
   if (conflict) return "bg-red-500";
@@ -1621,13 +1624,13 @@ export default function VehiclePlanning() {
                       bold: false,
                     },
                     { key: "driver", value: v.driver, bold: false },
-                    { key: "tripDays", value: v.tripDays, bold: false },
+                    { key: "tripDays", value: (() => { const sl = slipsToday(v, todayIso); return sl.length > 0 && sl.some((x) => x.tripDays != null) ? sl.map((x) => (x.tripDays != null ? String(x.tripDays) : "—")).join("\n") : v.tripDays; })(), bold: false },
                   ] as const).map((c) => (
                     <div
                       key={c.key}
                       style={{ width: widthOf(c.key) }}
-                      className={`shrink-0 border-r border-gray-100 px-2 py-2.5 text-[11px] ${c.key === "vehicleNumber" && selCell?.vehicleId === v.id ? "shadow-[inset_4px_0_0_0_#f59e0b]" : ""} ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
-                      title={c.key === "orderNumber" ? "Click for this vehicle's order history" : (c.value ?? undefined)}
+                      className={`shrink-0 border-r border-gray-100 px-2 py-2.5 text-[11px] ${c.key === "vehicleNumber" && selCell?.vehicleId === v.id ? "shadow-[inset_4px_0_0_0_#f59e0b]" : ""} ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" || c.key === "tripDays" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" || c.key === "tripDays" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
+                      title={c.key === "orderNumber" ? "Click for this vehicle's order history" : c.key === "tripDays" ? (slipsToday(v, todayIso).filter((x) => x.tripDays != null).map((x) => `#${x.orderNumber}: ${x.tripDays} day${x.tripDays === 1 ? "" : "s"}`).join("\n") || undefined) : (c.value ?? undefined)}
                       onClick={c.key === "orderNumber" ? () => setHistoryTarget(v) : undefined}
                     >
                       {c.key === "orderNumber" && v.currentOrder?.vehicleMismatch && (
@@ -1642,7 +1645,7 @@ export default function VehiclePlanning() {
                       )}
                       {/* Driver names run longer than this column is wide — wraps onto 2 lines
                           instead of cutting off with an ellipsis like every other column here. */}
-                      <span className={c.key === "driver" ? "line-clamp-2 break-words leading-tight" : c.key === "orderNumber" ? "" : "truncate"}>{c.value ?? "—"}</span>
+                      <span className={c.key === "driver" ? "line-clamp-2 break-words leading-tight" : c.key === "orderNumber" || c.key === "tripDays" ? "" : "truncate"}>{c.value ?? "—"}</span>
                       {c.key === "vehicleNumber" && v.volume != null && <span className="mt-0.5 block text-[11px] font-medium leading-none text-gray-500" title="Vehicle volume">Vol {v.volume}</span>}
                     </div>
                   ))}
