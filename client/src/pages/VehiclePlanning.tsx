@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  ChevronsRight, ChevronUp, DatabaseZap, History, Loader2, MessageSquare, RefreshCw, RotateCcw, Search, SlidersHorizontal, Truck, Undo2, X,
+  ChevronsRight, ChevronUp, DatabaseZap, Filter as FilterIcon, History, Loader2, MessageSquare, RefreshCw, RotateCcw, Search, SlidersHorizontal, Truck, Undo2, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -130,7 +130,6 @@ const HEADER_FILTER_IDS: Record<string, string> = {
 const ROW_MIN_HEIGHT = 64;   // label line, the dots, then the Assign / Extend buttons
 // px per day for the three column sizes. The board scrolls sideways when the days do not fit, so a wider column never squeezes the labels.
 const DAY_COL_MIN = 40, DAY_COL_MAX = 180, DAY_COL_DEFAULT = 90;
-const ACTION_COL_WIDTH = 92; // the Free / Arrived buttons at the end of the pinned label columns
 // Mouse-wheel / arrow-key nudge amount — fixed, no user-facing control for it. The full-window
 // and single-day buttons stay as a discoverable fallback for anyone who'd rather click than
 // scroll/use the keyboard.
@@ -171,6 +170,125 @@ const isoDayDiff = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:
 function memberEnd(t: Trip, m: TripMember): string {
   if (m.plannedLastDay === t.plannedLastDay) return t.lastBusyDay;
   return m.plannedLastDay < t.lastBusyDay ? m.plannedLastDay : t.lastBusyDay;
+}
+
+// The filter on each day heading: everything a vehicle can be on that one day. Every field that is set must hold (they are combined with AND).
+type DayFilter = {
+  occupancy?: "busy" | "free"; party?: string; order?: string; states?: TripState[];
+  conflict?: boolean; extended?: boolean; note?: boolean; blocked?: boolean; multi?: boolean;
+};
+const DAY_STATE_LABEL: Record<string, string> = { planned: "Planned", on_trip: "On the trip", awaiting: "Overdue", arrived: "Arrived", closed: "Closed" };
+function dayFilterActive(f: DayFilter | undefined): boolean {
+  return !!f && (!!f.occupancy || !!f.party?.trim() || !!f.order?.trim() || !!f.states?.length || !!f.conflict || !!f.extended || !!f.note || !!f.blocked || !!f.multi);
+}
+function describeDayFilter(f: DayFilter): string {
+  const parts: string[] = [];
+  if (f.occupancy) parts.push(f.occupancy === "busy" ? "Busy" : "Free");
+  if (f.party?.trim()) parts.push(`Party "${f.party.trim()}"`);
+  if (f.order?.trim()) parts.push(`Order "${f.order.trim()}"`);
+  if (f.states?.length) parts.push(f.states.map((x) => DAY_STATE_LABEL[x] ?? x).join(" / "));
+  if (f.conflict) parts.push("Conflict");
+  if (f.extended) parts.push("Extended");
+  if (f.note) parts.push("Has a note");
+  if (f.blocked) parts.push("Blocked");
+  if (f.multi) parts.push("2+ slips");
+  return parts.join(" · ");
+}
+// What the vehicle is on one day: busy (an order covers it), the parties / orders / trip states there, a conflict, an extended day, a note, blocked by a status, shared slips.
+function matchesDayFilter(v: VehicleRow, dayIso: string, f: DayFilter): boolean {
+  const conflictSet = new Set((v.conflicts ?? []).map((c) => c.orderNumber));
+  let slips = 0, conflict = false, extended = false;
+  const parties: string[] = [], orders: string[] = [], states = new Set<string>();
+  for (const tr of v.trips ?? []) {
+    if (tr.state === "cancelled") continue;
+    for (const m of tr.members) {
+      if (!(m.startDay <= dayIso && dayIso <= memberEnd(tr, m))) continue;
+      slips++; parties.push((m.partyName ?? "").toLowerCase()); orders.push(m.orderNumber.toLowerCase()); states.add(tr.state);
+      if (conflictSet.has(tr.orderNumber)) conflict = true;
+      if (m.plannedLastDay === tr.plannedLastDay && tr.expectedEnd && tr.expectedEnd > tr.plannedLastDay && dayIso > tr.plannedLastDay && dayIso <= (tr.lastBusyDay < tr.expectedEnd ? tr.lastBusyDay : tr.expectedEnd)) extended = true;
+    }
+  }
+  const ms = v.manualStatus;
+  const blocked = !!ms?.blocks && !!ms.endDay && ms.startDay <= dayIso && dayIso <= ms.endDay;
+  if (f.occupancy === "busy" && slips === 0) return false;
+  if (f.occupancy === "free" && (slips > 0 || blocked)) return false;
+  const party = f.party?.trim().toLowerCase();
+  if (party && !parties.some((x) => x.includes(party))) return false;
+  const order = f.order?.trim().toLowerCase();
+  if (order && !orders.some((x) => x.includes(order))) return false;
+  if (f.states?.length && !f.states.some((x) => states.has(x))) return false;
+  if (f.conflict && !conflict) return false;
+  if (f.extended && !extended) return false;
+  if (f.note && !(v.dayNotes ?? []).some((n) => n.day === dayIso)) return false;
+  if (f.blocked && !blocked) return false;
+  if (f.multi && slips < 2) return false;
+  return true;
+}
+
+// The funnel on a day heading: opens a small box with every filter for that day.
+function DayFilterButton({ filter, onChange, title }: { filter: DayFilter | undefined; onChange: (f: DayFilter) => void; title: string }) {
+  const f = filter ?? {};
+  const active = dayFilterActive(f);
+  const set = (patch: Partial<DayFilter>) => onChange({ ...f, ...patch });
+  const check = (key: "conflict" | "extended" | "note" | "blocked" | "multi", label: string) => (
+    <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-700">
+      <Checkbox checked={!!f[key]} onCheckedChange={(c) => set({ [key]: c === true ? true : undefined } as Partial<DayFilter>)} /> {label}
+    </label>
+  );
+  const chip = (on: boolean, label: string, click: () => void) => (
+    <button key={label} type="button" onClick={click} className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${on ? "border-[#001d6e] bg-[#001d6e] text-white" : "border-gray-300 bg-white text-gray-600 hover:bg-gray-50"}`}>{label}</button>
+  );
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" onClick={(e) => e.stopPropagation()} title={active ? `Filter on: ${describeDayFilter(f)}` : `Filter the vehicles for ${title}`}
+          className={`absolute bottom-1 right-1 z-10 rounded p-0.5 ${active ? "bg-amber-400 text-[#001d6e]" : "text-white/60 hover:bg-white/15 hover:text-white"}`}>
+          <FilterIcon className="h-3 w-3" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-72 space-y-3 p-3 text-gray-800" onClick={(e) => e.stopPropagation()}>
+        <div className="text-sm font-semibold text-[#001d6e]">Filter · {title}</div>
+        <div>
+          <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">Vehicle on this day</div>
+          <div className="flex gap-1.5">
+            {chip(!f.occupancy, "Any", () => set({ occupancy: undefined }))}
+            {chip(f.occupancy === "busy", "Busy", () => set({ occupancy: "busy" }))}
+            {chip(f.occupancy === "free", "Free", () => set({ occupancy: "free" }))}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">Party</div>
+            <Input className="h-8 text-xs" placeholder="Party name" value={f.party ?? ""} onChange={(e) => set({ party: e.target.value || undefined })} />
+          </div>
+          <div>
+            <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">Order no.</div>
+            <Input className="h-8 text-xs" placeholder="Order number" value={f.order ?? ""} onChange={(e) => set({ order: e.target.value || undefined })} />
+          </div>
+        </div>
+        <div>
+          <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">Trip state</div>
+          <div className="flex flex-wrap gap-1.5">
+            {(["planned", "on_trip", "awaiting", "arrived", "closed"] as TripState[]).map((x) => chip(!!f.states?.includes(x), DAY_STATE_LABEL[x], () => {
+              const cur = f.states ?? [];
+              const next = cur.includes(x) ? cur.filter((y) => y !== x) : [...cur, x];
+              set({ states: next.length ? next : undefined });
+            }))}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-x-2 gap-y-1.5">
+          {check("conflict", "Conflict (red dot)")}
+          {check("extended", "Extended day")}
+          {check("note", "Has a note")}
+          {check("blocked", "Blocked (status)")}
+          {check("multi", "Two or more slips")}
+        </div>
+        <div className="flex justify-end">
+          <Button type="button" size="sm" variant="outline" className="h-7 px-3 text-xs" disabled={!active} onClick={() => onChange({})}>Clear this day</Button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 // Every order the vehicle is out on today (a shared load or two slips on one vehicle shows all of them); with none today, the latest order as before.
@@ -215,7 +333,7 @@ function computeStatus(v: VehicleRow, todayIso: string): { label: string; tone: 
     return { label: "Overdue", tone: "bg-amber-100 text-amber-800", daysText: `${n} d late`, title: `${n} day${n === 1 ? "" : "s"} past its last day with no arrival recorded - the vehicle is available`, note: `${n} day${n === 1 ? "" : "s"} past its last day, no arrival recorded - available` };
   }
   if (trips.some((x) => x.arrivedOn === todayIso)) return { label: "Free now", tone: "bg-emerald-600 text-white", daysText: "", title: "Arrived today - available now", note: "Arrived today - available now" };
-  if (trips.some((x) => !x.arrivedOn && x.startDay < x.lastBusyDay && x.lastBusyDay === todayIso)) return { label: "Available", tone: "border border-emerald-400 bg-white text-emerald-700", daysText: "", title: "Today is the last day of the trip - the vehicle is available", note: "Last day of the trip - available" };
+  if (trips.some((x) => !x.arrivedOn && x.startDay < x.lastBusyDay && x.lastBusyDay === todayIso)) return { label: "Ends today", tone: "border border-emerald-400 bg-white text-emerald-700", daysText: "", title: "Today is the last day of the trip - the vehicle is available", note: "Last day of the trip - available" };
   if (trips.some((x) => x.startDay > todayIso)) return { label: "Planned", tone: "bg-blue-100 text-blue-800", daysText: "", title: "Free now; an order is planned", note: "Free now; an order is planned" };
   return { label: "Free", tone: "bg-emerald-50 text-emerald-700", daysText: "", title: "Free - available now", note: "Available now" };
 }
@@ -305,6 +423,9 @@ export default function VehiclePlanning() {
   const [columnConditions, setColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("vehiclePlanning:columnFilters", {});
   const setColumnCondition = (columnId: string, condition: FilterCondition) => setColumnConditions((prev) => ({ ...prev, [columnId]: condition }));
   const clearColumnCondition = (columnId: string) => setColumnConditions((prev) => { const next = { ...prev }; delete next[columnId]; return next; });
+  // The filter on each day heading, kept per date (so it stays on that date when the dates are slid).
+  const [dayFilters, setDayFilters] = usePersistentFilter<Record<string, DayFilter>>("vehiclePlanning:dayFilters", {});
+  const setDayFilter = (iso: string, f: DayFilter) => setDayFilters((prev) => { const next = { ...prev }; if (dayFilterActive(f)) next[iso] = f; else delete next[iso]; return next; });
   // Sort — click Vehicle or Order No. to toggle; switching to a column that wasn't already
   // sorted always starts ascending (never inherits whatever direction the other column was on),
   // clicking the same column again flips asc<->desc. null = whatever order the server returned.
@@ -325,8 +446,8 @@ export default function VehiclePlanning() {
   // Column widths: hidden by default. The "Columns" button shows a drag handle on every heading (and one on the days); "Done" hides them again. Kept in this browser.
   const [colWidths, setColWidths] = useLocalPref<Record<string, number>>("vehiclePlanning:colWidths", {});
   const [adjustMode, setAdjustMode] = useState(false);
-  const widthOf = (key: string): number => colWidths[key] ?? (key === "actions" ? ACTION_COL_WIDTH : LABEL_COLS.find((c) => c.key === key)?.width ?? 90);
-  const labelTotal = LABEL_COLS.reduce((sum, c) => sum + widthOf(c.key), 0) + (canWrite ? widthOf("actions") : 0);
+  const widthOf = (key: string): number => colWidths[key] ?? LABEL_COLS.find((c) => c.key === key)?.width ?? 90;
+  const labelTotal = LABEL_COLS.reduce((sum, c) => sum + widthOf(c.key), 0);
   const narrowDays = dayColW < 64; // too narrow for the full weekday and "29 Oct"
   // A day note being written / read: which vehicle and day, and the text in the box.
   const [noteTarget, setNoteTarget] = useState<{ vehicle: VehicleRow; day: string } | null>(null);
@@ -352,6 +473,11 @@ export default function VehiclePlanning() {
   const ganttActiveRef = useRef(false);
   ganttActiveRef.current = ganttActive;
   const ganttRef = useRef<HTMLDivElement>(null);
+  // The selected day cell (a vehicle's box on one day): click one, then move with the arrow keys. Enter opens its note, Esc clears it.
+  const [selCell, setSelCell] = useState<{ vehicleId: number; dayIso: string } | null>(null);
+  // One "are you sure?" box for every action of this page that changes something (Mark available, Assign, Add to trip, Move, Driver, Status, Delete note, Undo ...).
+  const [confirmAsk, setConfirmAsk] = useState<{ title: string; message: ReactNode; confirmLabel: string; danger?: boolean; run: () => void } | null>(null);
+  const askConfirm = (a: { title: string; message: ReactNode; confirmLabel: string; danger?: boolean; run: () => void }) => setConfirmAsk(a);
   // Trackpad / magic-mouse two-finger sideways swipe slides the calendar directly — no click or
   // focus needed, since a sideways gesture can't be mistaken for scrolling the page. Deltas are
   // accumulated and converted at one day per WHEEL_PX_PER_DAY of finger travel, so a slow drag
@@ -488,10 +614,10 @@ export default function VehiclePlanning() {
     },
     onSuccess: (data: any, body) => {
       const veh = allVehicles.find((x) => x.id === body.vehicleId);
-      if (body.undo) toast({ title: "Arrival removed", description: `Order #${body.orderNumber}` });
+      if (body.undo) toast({ title: "Mark removed", description: `Order #${body.orderNumber}` });
       else toast({
-        title: "Arrived - free now", description: `${veh?.vehicleNumber ?? "Vehicle"} · order #${body.orderNumber}`,
-        action: <ToastAction altText="Undo the arrival" onClick={() => arrivalMutation.mutate({ vehicleId: body.vehicleId, orderNumber: body.orderNumber, undo: true })}>Undo</ToastAction>,
+        title: "Marked available - free now", description: `${veh?.vehicleNumber ?? "Vehicle"} · order #${body.orderNumber}`,
+        action: <ToastAction altText="Undo marking it available" onClick={() => arrivalMutation.mutate({ vehicleId: body.vehicleId, orderNumber: body.orderNumber, undo: true })}>Undo</ToastAction>,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
       // Back earlier than planned: say when it is free and how many orders are waiting for a vehicle.
@@ -754,6 +880,7 @@ export default function VehiclePlanning() {
     ];
   }, [allVehicles]);
   const conditionList = Object.values(columnConditions).filter((c) => !isConditionEmpty(c));
+  const dayFilterList = Object.entries(dayFilters).filter(([, f]) => dayFilterActive(f)).sort((a, b) => a[0].localeCompare(b[0]));
 
   // Hidden by default (no sync history yet for this vehicle) unless the toggle is on or the
   // vehicle itself matches an active search — so a search can still surface one on demand.
@@ -764,9 +891,11 @@ export default function VehiclePlanning() {
         || [v.vehicleNumber, v.driver, v.currentOrder?.orderNumber, ...ordersToday(v, isoOf(new Date()))].some((f) => (f ?? "").toLowerCase().includes(searchLower));
       if (!matchesSearch) return false;
       if (conditionList.length > 0 && !matchAllConditions(v, conditionList, filterableColumns)) return false;
+      if (dayFilterList.some(([iso, f]) => !matchesDayFilter(v, iso, f))) return false;
       if (tripFilter === "awaiting" && v.vehicleState !== "awaiting") return false;
       if (tripFilter === "conflicts" && !(v.conflicts?.length)) return false;
       if (availableOn && !isAvailableOn(v, availableOn)) return false;
+      if (dayFilterList.some(([, f]) => f.occupancy === 'free')) return true;   // Free on a day: every free vehicle, with or without orders
       if (availableOn) return true;   // Available on a day lists EVERY vehicle free that day (with or without orders) - of the selected companies only
       // A vehicle with no orders is free on every day, so when the Available filter is on it is listed even with the switch off.
       if (orderView === "none") return !v.hasHistory;
@@ -783,11 +912,54 @@ export default function VehiclePlanning() {
   const missingCount = allVehicles.filter((v) => v.currentOrder?.notInSystem).length;
   const awaitingCount = allVehicles.filter((v) => v.vehicleState === "awaiting").length;
   const conflictCount = allVehicles.filter((v) => (v.conflicts?.length ?? 0) > 0).length;
-  const today = useMemo(() => startOfDay(new Date()), []);
+  // Today follows the clock (a page left open overnight, or a tab coming back to the front, moves on by itself) so the Assign / Extend buttons always sit on the real today.
+  const [today, setToday] = useState(() => startOfDay(new Date()));
+  useEffect(() => {
+    const tick = () => setToday((prev) => { const now = startOfDay(new Date()); return now.getTime() === prev.getTime() ? prev : now; });
+    const id = window.setInterval(tick, 60000);
+    window.addEventListener("focus", tick); document.addEventListener("visibilitychange", tick);
+    return () => { window.clearInterval(id); window.removeEventListener("focus", tick); document.removeEventListener("visibilitychange", tick); };
+  }, []);
   const days = useMemo(
     () => Array.from({ length: windowDays }, (_, i) => addDays(windowStart, i)),
     [windowStart, windowDays],
   );
+  // Arrow keys on the selected cell: up / down = the vehicle above / below, left / right = the day before / after. Walking off the edge of the shown days slides the dates.
+  function moveSelection(key: string) {
+    if (!selCell) return;
+    setDotCard(null);
+    const vi = vehicles.findIndex((x) => x.id === selCell.vehicleId);
+    if (vi < 0) { setSelCell(null); return; }
+    if (key === "ArrowUp" || key === "ArrowDown" || key === "PageUp" || key === "PageDown") {
+      const jump = key.startsWith("Page") ? 10 : 1;
+      const next = vehicles[Math.max(0, Math.min(vehicles.length - 1, vi + (key === "ArrowUp" || key === "PageUp" ? -jump : jump)))];
+      if (next) setSelCell({ vehicleId: next.id, dayIso: selCell.dayIso });
+      return;
+    }
+    if (key === "Home" || key === "End") { setSelCell({ vehicleId: selCell.vehicleId, dayIso: isoOf(key === "Home" ? days[0] : days[days.length - 1]) }); return; }
+    const step = key === "ArrowLeft" ? -1 : 1;
+    const nextDay = addDays(parse(selCell.dayIso, "yyyy-MM-dd", new Date()), step);
+    const nextIso = format(nextDay, "yyyy-MM-dd");
+    if (!days.some((d) => isoOf(d) === nextIso)) setWindowStart(step < 0 ? startOfDay(nextDay) : startOfDay(addDays(nextDay, -(windowDays - 1))));
+    setSelCell({ vehicleId: selCell.vehicleId, dayIso: nextIso });
+  }
+  function openCellNote(vehicleId: number, dayIso: string) {
+    const v = vehicles.find((x) => x.id === vehicleId);
+    const note = (v?.dayNotes ?? []).find((n) => n.day === dayIso);
+    if (!v || !(canWrite || note)) return;
+    setNoteTarget({ vehicle: v, day: dayIso }); setNoteText(note?.text ?? "");
+  }
+  // Keeps the selected cell in view: the pinned columns on the left and the day header on top hide part of the board, so the scroll is worked out by hand.
+  useEffect(() => {
+    const box = ganttRef.current;
+    if (!selCell || !box) return;
+    const el = box.querySelector(`[data-cell="${selCell.vehicleId}|${selCell.dayIso}"]`) as HTMLElement | null;
+    if (!el) return;
+    const c = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+    const left = c.left + labelTotal, top = c.top + (box.querySelector(".sticky.top-0")?.getBoundingClientRect().height ?? 52);
+    if (r.left < left) box.scrollLeft -= left - r.left; else if (r.right > c.right - 16) box.scrollLeft += r.right - (c.right - 16);
+    if (r.top < top) box.scrollTop -= top - r.top; else if (r.bottom > c.bottom - 16) box.scrollTop += r.bottom - (c.bottom - 16);
+  }, [selCell, days]);
   // Today's own column index, so its highlight can be drawn ON TOP of a busy row's bar too — the
   // background tint below is drawn first and a busy row's bar paints over it, which is why today
   // used to disappear the moment a vehicle had an active trip.
@@ -843,7 +1015,12 @@ export default function VehiclePlanning() {
   }
   // Arrived is only ever TODAY: one click, the vehicle is free now (and can go out again the same day). An Undo message follows.
   function arriveToday(v: VehicleRow, trip: Trip) {
-    arrivalMutation.mutate({ vehicleId: v.id, orderNumber: trip.orderNumber, arrivedOn: isoOf(new Date()), freeSameDay: true });
+    askConfirm({
+      title: `Mark ${v.vehicleNumber} available?`,
+      message: `${v.vehicleNumber} came back today from order #${trip.members.map((m) => m.orderNumber).join(" + #")}. It becomes available now and can take a new order.`,
+      confirmLabel: "Yes, mark available",
+      run: () => arrivalMutation.mutate({ vehicleId: v.id, orderNumber: trip.orderNumber, arrivedOn: isoOf(new Date()), freeSameDay: true }),
+    });
   }
   function openAssign(v: VehicleRow, day?: string) { assignStartRef.current = day ?? null; setAssignTarget(v); }
   // Frees every ticked order of the vehicle (one after the other); a single one keeps the usual message.
@@ -1259,7 +1436,7 @@ export default function VehiclePlanning() {
           <Button size="sm" variant="outline" className="h-8 w-8 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -SCROLL_STEP_DAYS))} aria-label="Back a day" title="Back a day (or scroll/arrow-key over the chart)">
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs" onClick={() => setWindowStart(today)}>
+          <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs" onClick={() => { setWindowStart(startOfDay(new Date())); ganttRef.current?.scrollTo({ left: 0 }); }}>
             Today
           </Button>
           <Button size="sm" variant="outline" className="h-8 w-8 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, SCROLL_STEP_DAYS))} aria-label="Forward a day" title="Forward a day (or scroll/arrow-key over the chart)">
@@ -1272,12 +1449,18 @@ export default function VehiclePlanning() {
         </div>
       </div>
 
-      {conditionList.length > 0 && (
+      {(conditionList.length > 0 || dayFilterList.length > 0) && (
         <div className="mb-2 flex flex-wrap items-center gap-1.5">
           {Object.entries(columnConditions).filter(([, c]) => !isConditionEmpty(c)).map(([id, condition]) => (
             <ColumnFilterChipView key={id} columnId={id} condition={condition} columns={filterableColumns} onEdit={(c) => setColumnCondition(id, c)} onRemove={() => clearColumnCondition(id)} />
           ))}
-          <button type="button" className="text-xs text-gray-500 underline decoration-dotted hover:text-red-600" onClick={() => setColumnConditions({})}>Clear all</button>
+          {dayFilterList.map(([iso, f]) => (
+            <span key={iso} className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs text-amber-900">
+              <span className="font-semibold">{format(parse(iso, "yyyy-MM-dd", new Date()), "d MMM")}:</span> {describeDayFilter(f)}
+              <button type="button" aria-label={`Remove the ${iso} filter`} className="ml-0.5 rounded-full hover:bg-amber-200" onClick={() => setDayFilter(iso, {})}><X className="h-3 w-3" /></button>
+            </span>
+          ))}
+          <button type="button" className="text-xs text-gray-500 underline decoration-dotted hover:text-red-600" onClick={() => { setColumnConditions({}); setDayFilters({}); }}>Clear all</button>
         </div>
       )}
 
@@ -1336,6 +1519,13 @@ export default function VehiclePlanning() {
           onClick={(e) => e.currentTarget.focus()}
           onKeyDown={(e) => {
             if (!ganttActive) return;
+            if (selCell && !noteTarget && e.target === e.currentTarget) {
+              // Like Excel: arrows, Tab / Shift+Tab (right / left), Home / End (first / last day shown), Page Up / Page Down (10 vehicles).
+              if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(e.key)) { e.preventDefault(); moveSelection(e.key); return; }
+              if (e.key === "Tab") { e.preventDefault(); moveSelection(e.shiftKey ? "ArrowLeft" : "ArrowRight"); return; }
+              if (e.key === "Enter") { e.preventDefault(); openCellNote(selCell.vehicleId, selCell.dayIso); return; }
+              if (e.key === "Escape") { setSelCell(null); return; }
+            }
             if (e.key === "ArrowLeft") { e.preventDefault(); setWindowStart((d) => addDays(d, -SCROLL_STEP_DAYS)); }
             else if (e.key === "ArrowRight") { e.preventDefault(); setWindowStart((d) => addDays(d, SCROLL_STEP_DAYS)); }
           }}
@@ -1368,21 +1558,16 @@ export default function VehiclePlanning() {
                   </div>
                 );
               })}
-              {canWrite && (
-                <div style={{ width: widthOf("actions") }} className="relative shrink-0 overflow-hidden border-r border-white/10 px-2 py-2.5 text-[10px] font-semibold uppercase tracking-wide">
-                  Actions
-                  <span onPointerDown={(e) => startResize(e, "actions")} className={`absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-white/70 ${adjustMode ? "bg-white/30" : "bg-transparent"}`} title="Drag to resize this column" />
-                </div>
-              )}
               </div>
               <div className="flex flex-1">
                 {days.map((d, i) => (
                   <div
                     key={i}
                     style={{ width: `${100 / windowDays}%`, minWidth: dayColW }}
-                    className={`relative shrink-0 border-l border-white/10 text-center ${narrowDays ? "py-1.5 text-[11px]" : "py-2 text-xs"} ${isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
+                    className={`relative shrink-0 border-l border-white/10 text-center ${narrowDays ? "py-1.5 text-[11px]" : "py-2 text-xs"} ${selCell?.dayIso === isoOf(d) ? "font-bold shadow-[inset_0_-4px_0_0_#f59e0b]" : isSameDay(d, today) ? "bg-white/15 font-bold" : ""}`}
                   >
                     {adjustMode && <span onPointerDown={(e) => startResize(e, "day")} className="absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none bg-white/25 hover:bg-white/60" title="Drag to change the width of every day" />}
+                    <DayFilterButton filter={dayFilters[isoOf(d)]} onChange={(f) => setDayFilter(isoOf(d), f)} title={format(d, "EEE d MMM")} />
                     <div className="opacity-70">{format(d, narrowDays ? "EEE" : "EEEE")}</div>
                     <div className={narrowDays ? "" : "text-sm font-semibold"}>{format(d, narrowDays ? "d/M" : "d MMM")}</div>
                   </div>
@@ -1395,11 +1580,28 @@ export default function VehiclePlanning() {
               const { byIdx, labels, extLabels, multi } = dotsFor(v);
               // Two (or more) orders on one day are stacked up and down: the row grows with the tallest stack and the Assign / Extend buttons sit below it.
               const maxStack = Math.max(1, ...byIdx.map((c) => c.length));
-              const btnTop = Math.max(38, 22 + maxStack * 14 + (maxStack - 1) * 3 + 4);
+              const btnTop = Math.max(44, 28 + maxStack * 14 + (maxStack - 1) * 3 + 4);
               const rowH = btnTop + 26;
               const todayIso = isoOf(today);
               const av = computeAvailability(v, todayIso);
               const st = computeStatus(v, todayIso);
+              // The past days with no order on them: after the vehicle's first trip, before today, not covered by any trip and not blocked by a status.
+              const idleSpans = (() => {
+                const live = (v.trips ?? []).filter((x) => x.state !== "cancelled");
+                if (live.length === 0) return [] as { startIdx: number; endIdx: number }[];
+                const first = live.reduce((m, x) => (x.startDay < m ? x.startDay : m), live[0].startDay);
+                const ms = v.manualStatus;
+                const spans: { startIdx: number; endIdx: number }[] = [];
+                days.forEach((d, i) => {
+                  const iso = isoOf(d);
+                  if (iso >= todayIso || iso < first) return;
+                  if (live.some((tr) => tr.members.some((m) => m.startDay <= iso && iso <= memberEnd(tr, m)))) return;
+                  if (!!ms?.blocks && !!ms.endDay && ms.startDay <= iso && iso <= ms.endDay) return;
+                  const last = spans[spans.length - 1];
+                  if (last && last.endIdx === i - 1) last.endIdx = i; else spans.push({ startIdx: i, endIdx: i });
+                });
+                return spans;
+              })();
               const stripe = rowIdx % 2 === 1;
               return (
                 <div key={v.id} className={`flex border-b border-gray-100 last:border-0 ${stripe ? "bg-slate-50/70" : "bg-white"}`}>
@@ -1424,7 +1626,7 @@ export default function VehiclePlanning() {
                     <div
                       key={c.key}
                       style={{ width: widthOf(c.key) }}
-                      className={`shrink-0 border-r border-gray-100 px-2 py-2.5 text-[11px] ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
+                      className={`shrink-0 border-r border-gray-100 px-2 py-2.5 text-[11px] ${c.key === "vehicleNumber" && selCell?.vehicleId === v.id ? "shadow-[inset_4px_0_0_0_#f59e0b]" : ""} ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
                       title={c.key === "orderNumber" ? "Click for this vehicle's order history" : (c.value ?? undefined)}
                       onClick={c.key === "orderNumber" ? () => setHistoryTarget(v) : undefined}
                     >
@@ -1444,34 +1646,10 @@ export default function VehiclePlanning() {
                       {c.key === "vehicleNumber" && v.volume != null && <span className="mt-0.5 block text-[11px] font-medium leading-none text-gray-500" title="Vehicle volume">Vol {v.volume}</span>}
                     </div>
                   ))}
-                  <div style={{ width: widthOf("status") }} className="shrink-0 cursor-pointer border-r border-gray-100 px-1.5 py-2 hover:bg-[#001d6e]/5" title={st.title} onClick={() => openStatus(v)}>
+                  <div style={{ width: widthOf("status") }} className="shrink-0 cursor-pointer border-r border-gray-100 px-1.5 py-2 hover:bg-[#001d6e]/5" title={`${st.title} - click for the actions`} onClick={() => openStatus(v)}>
                     <span className={`inline-block max-w-full truncate rounded-full px-2 py-0.5 align-middle text-[10px] font-semibold ${st.tone}`}>{st.label}</span>
                     {st.daysText && <div className={`mt-0.5 truncate text-[10px] ${st.label === "Overdue" ? "font-semibold text-amber-700" : "text-gray-500"}`}>{st.daysText}</div>}
                   </div>
-                  {canWrite && (() => {
-                    const at = actionTrips(v);
-                    const freeable = at.live.filter((x) => !x.lockedReason);
-                    const allLocked = at.live.length > 0 && freeable.length === 0;
-                    const dueNow = at.out?.state === "awaiting";
-                    return (
-                      <div style={{ width: widthOf("actions") }} className="flex shrink-0 flex-col justify-center gap-1 border-r border-gray-100 px-1.5 py-1">
-                        {at.live.length > 0 && (
-                          <button type="button" disabled={allLocked} onClick={() => openFree(v, at.live)}
-                            className="rounded-md border border-red-200 bg-white px-1.5 py-0.5 text-[11px] font-semibold leading-tight text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400 disabled:hover:bg-white"
-                            title={allLocked ? at.live[0].lockedReason ?? undefined : `Free ${v.vehicleNumber} from an order it was assigned to by mistake - the order goes back to "no vehicle"`}>
-                            Free
-                          </button>
-                        )}
-                        {at.live.length > 0 && (
-                          <button type="button" disabled={!at.out} onClick={() => at.out && arriveToday(v, at.out)}
-                            className={`rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-tight disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-white disabled:text-gray-400 ${dueNow ? "border-amber-400 bg-amber-100 text-amber-900 hover:bg-amber-200" : "border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"}`}
-                            title={at.out ? `${v.vehicleNumber} came back today from order #${at.out.members.map((m) => m.orderNumber).join(" + #")} - free now` : at.planned ? `Order #${at.planned.orderNumber} starts on ${dayLabel(at.planned.startDay)}. Nothing is out yet.` : undefined}>
-                            Arrived
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })()}
                   </div>
                   <div data-track className="relative flex-1" style={{ minHeight: Math.max(ROW_MIN_HEIGHT, rowH) }}>
                     {/* One continuous area. A thin, light vertical line at each day (a little firmer at the start of a week, Monday) lines the dots up
@@ -1488,12 +1666,18 @@ export default function VehiclePlanning() {
                           <div
                             key={i}
                             style={{ width: `${100 / windowDays}%`, minWidth: dayColW }}
-                            className={`relative shrink-0 border-l ${d.getDay() === 1 ? "border-gray-300" : "border-gray-200/70"} ${isSameDay(d, today) ? "bg-[#001d6e]/[0.04]" : ""} ${clickable ? "cursor-pointer hover:bg-[#001d6e]/[0.06]" : ""}`}
+                            data-cell={`${v.id}|${dayIso}`}
+                            className={`relative shrink-0 cursor-pointer border-l hover:bg-[#001d6e]/[0.06] ${d.getDay() === 1 ? "border-gray-500" : "border-gray-400/60"} ${isSameDay(d, today) ? "bg-[#001d6e]/[0.04]" : ""} ${selCell?.vehicleId === v.id && selCell.dayIso === dayIso ? "z-[5] shadow-[inset_0_0_0_3px_#001d6e]" : ""}`}
                             title={note ? `${note.text}${note.byName ? `\n— ${note.byName}` : ""}` : canWrite ? `Click to add a note for ${v.vehicleNumber} on ${format(d, "d MMM")}` : undefined}
-                            onClick={clickable ? () => { setNoteTarget({ vehicle: v, day: dayIso }); setNoteText(note?.text ?? ""); } : undefined}
+                            onClick={() => {
+                              // First click selects the cell (then the arrow keys move); a click on the already selected cell, or Enter, opens its note.
+                              const isSel = selCell?.vehicleId === v.id && selCell.dayIso === dayIso;
+                              if (isSel && clickable) { setNoteTarget({ vehicle: v, day: dayIso }); setNoteText(note?.text ?? ""); }
+                              else setSelCell({ vehicleId: v.id, dayIso });
+                            }}
                           >
                             {(cellDots.length > 0 || blockedDay) && (
-                              <div className="absolute inset-x-0 top-[22px] flex flex-col items-center justify-center gap-[3px]">
+                              <div className="absolute inset-x-0 top-[28px] flex flex-col items-center justify-center gap-[3px]">
                                 {cellDots.map((dd, k) => {
                                   const dotKey = `${dd.member.orderNumber}-${k}`;
                                   // Slips on the same days (a shared load, or two slips on one vehicle): each slip's party is written next to its own dot (on the day that slip starts).
@@ -1502,7 +1686,7 @@ export default function VehiclePlanning() {
                                     <button
                                     key={dotKey}
                                     type="button"
-                                    onClick={(e) => { e.stopPropagation(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.member, x: r.left + r.width / 2, y: r.bottom }); }}
+                                    onClick={(e) => { e.stopPropagation(); setSelCell({ vehicleId: v.id, dayIso }); ganttRef.current?.focus(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.member, x: r.left + r.width / 2, y: r.bottom }); }}
                                     className={`${cellDots.length > 2 ? "h-2.5 w-2.5" : "h-3.5 w-3.5"} shrink-0 rounded-full shadow-sm ${dotClass(dd.trip.state, dd.conflict)} ${dd.extended ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
                                     title={`#${dd.member.orderNumber} · ${dd.member.partyName ?? "—"} · ${dayLabel(dd.member.startDay)} to ${dayLabel(memberEnd(dd.trip, dd.member))} · ${dd.conflict ? "Vehicle not back yet" : stateText[dd.trip.state]}${dd.trip.notionNote ? " · Notion not updated" : ""}${dd.extended ? ` · Extended${dd.trip.expectedEndReason ? `: ${dd.trip.expectedEndReason}` : ""}` : ""}`}
                                   />
@@ -1536,14 +1720,24 @@ export default function VehiclePlanning() {
                       const ext = extLabels.find((x) => x.trip === l.trip);
                       if (ext && ext.startIdx <= l.startIdx) return null;   // every visible day is an extended one: the extension label is written there
                       const spanDays = Math.max(1, Math.min(l.endIdx, nextStart - 1, ext ? ext.startIdx - 1 : windowDays) - l.startIdx + 1);
+                      // A trip of only one or two days: the name stays inside its first day column and wraps onto two lines (instead of running across both days and being cut short).
+                      const short = spanDays <= 2;
                       return (
-                        <div key={l.trip.orderNumber} className="pointer-events-none absolute truncate text-[10px] font-medium leading-[1.15] text-black"
-                          style={{ top: 4, left: `calc(${(l.startIdx / windowDays) * 100}% + 3px)`, width: `calc(${(spanDays / windowDays) * 100}% - 6px)` }}
+                        <div key={l.trip.orderNumber} className={`pointer-events-none absolute text-[10px] font-medium text-black ${short ? "line-clamp-2 break-words leading-[1.1]" : "truncate leading-[1.15]"}`}
+                          style={{ top: 4, left: `calc(${(l.startIdx / windowDays) * 100}% + 3px)`, width: `calc(${((short ? 1 : spanDays) / windowDays) * 100}% - 6px)` }}
                           title={l.trip.partyName ?? undefined}>
                           {barLabel(l.trip, spanDays)}
                         </div>
                       );
                     })}
+                    {/* Past days the vehicle sat with no order (after its first trip, before today): one grey line over the stretch. */}
+                    {idleSpans.map((sp) => (
+                      <div key={`idle-${sp.startIdx}`} className="pointer-events-none absolute line-clamp-2 break-words text-[10px] italic leading-[1.1] text-gray-400"
+                        style={{ top: 4, left: `calc(${(sp.startIdx / windowDays) * 100}% + 3px)`, width: `calc(${((sp.endIdx - sp.startIdx + 1) / windowDays) * 100}% - 6px)` }}
+                        title="Not assigned to any order">
+                        Not assigned to any order
+                      </div>
+                    ))}
                     {/* An extended trip: "Extended - reason" written over the days the extension added (their dots have a violet ring). */}
                     {extLabels.map((x) => (
                       <div key={`ext-${x.trip.orderNumber}`} className="pointer-events-none absolute truncate text-[10px] font-semibold leading-[1.15] text-violet-700"
@@ -1678,7 +1872,12 @@ export default function VehiclePlanning() {
                             <div className="truncate text-[11px] text-sky-800">Joins #{o.joinOrder}{o.joinParty ? ` (${o.joinParty})` : ""}</div>
                           </div>
                           <Button size="sm" variant="outline" className="h-7 shrink-0 border-sky-300 px-2.5 text-xs" disabled={assignMutation.isPending}
-                            onClick={() => assignMutation.mutate({ orderNumber: o.orderNumber, sameTripAs: o.joinOrder })}>
+                            onClick={() => askConfirm({
+                              title: `Add #${o.orderNumber} to the trip?`,
+                              message: `Order #${o.orderNumber}${o.partyName ? ` (${o.partyName})` : ""} will share ${assignTarget?.vehicleNumber ?? "the vehicle"} with order #${o.joinOrder}${o.joinParty ? ` (${o.joinParty})` : ""}.`,
+                              confirmLabel: "Yes, add to the trip",
+                              run: () => assignMutation.mutate({ orderNumber: o.orderNumber, sameTripAs: o.joinOrder }),
+                            })}>
                             Add to trip
                           </Button>
                         </div>
@@ -1732,7 +1931,12 @@ export default function VehiclePlanning() {
 
                 <DialogFooter className="gap-2 sm:gap-2">
                   <Button variant="outline" onClick={() => setAssignTarget(null)} disabled={assignMutation.isPending}>Cancel</Button>
-                  <Button disabled={!assignPick || assignMutation.isPending} onClick={() => assignPick && assignMutation.mutate({ orderNumber: assignPick.orderNumber })}>
+                  <Button disabled={!assignPick || assignMutation.isPending} onClick={() => assignPick && askConfirm({
+                    title: `Assign #${assignPick.orderNumber}?`,
+                    message: `Give order #${assignPick.orderNumber}${assignPick.partyName ? ` (${assignPick.partyName})` : ""} to ${assignTarget?.vehicleNumber ?? "this vehicle"}. Notion is updated too.`,
+                    confirmLabel: "Yes, assign",
+                    run: () => assignMutation.mutate({ orderNumber: assignPick.orderNumber }),
+                  })}>
                     {assignMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : assignPick ? `Assign #${assignPick.orderNumber}` : "Assign"}
                   </Button>
                 </DialogFooter>
@@ -1801,14 +2005,17 @@ export default function VehiclePlanning() {
                 <DialogFooter className="flex-wrap gap-2 sm:justify-end sm:gap-2 sm:space-x-0">
                   <Button variant="outline" onClick={() => setTripTarget(null)}>Close</Button>
                   {canWrite && t.arrivedOn && (
-                    <Button variant="outline" disabled={arrivalMutation.isPending} onClick={() => arrivalMutation.mutate({ vehicleId: v.id, orderNumber: t.orderNumber, undo: true })}>
+                    <Button variant="outline" disabled={arrivalMutation.isPending} onClick={() => askConfirm({
+                      title: "Undo the arrival?", message: `Order #${t.orderNumber} goes back to being out on the road for ${v.vehicleNumber}.`, confirmLabel: "Yes, undo",
+                      run: () => arrivalMutation.mutate({ vehicleId: v.id, orderNumber: t.orderNumber, undo: true }),
+                    })}>
                       <Undo2 className="mr-1.5 h-4 w-4" /> Undo arrival
                     </Button>
                   )}
                   {canWrite && inConflict && (() => {
                     const blocker = v.trips?.find((x) => x.orderNumber === inConflict.withOrderNumber);
                     return blocker && !blocker.arrivedOn && (blocker.state === "on_trip" || blocker.state === "awaiting") ? (
-                      <Button variant="outline" onClick={() => arriveToday(v, blocker)}>Mark #{blocker.orderNumber} arrived today</Button>
+                      <Button variant="outline" onClick={() => arriveToday(v, blocker)}>Mark #{blocker.orderNumber} available today</Button>
                     ) : null;
                   })()}
                   {canWrite && !t.arrivedOn && t.state !== "closed" && t.state !== "cancelled" && !t.notInSystem && (
@@ -1816,14 +2023,14 @@ export default function VehiclePlanning() {
                   )}
                   {canWrite && !t.arrivedOn && t.state !== "closed" && t.state !== "cancelled" && (
                     <Button variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={!!t.lockedReason} title={t.lockedReason ?? undefined}
-                      onClick={() => { setTripTarget(null); openFree(v, [t]); }}>Free</Button>
+                      onClick={() => { setTripTarget(null); openFree(v, [t]); }}>Remove</Button>
                   )}
                   {canWrite && !t.arrivedOn && (t.state === "on_trip" || t.state === "awaiting" || t.state === "planned" || (t.state === "closed" && t.assumed && isoDayDiff(t.lastBusyDay, isoOf(new Date())) <= 7)) && (
                     <Button variant="outline" onClick={() => { setTripTarget(null); openExtend(v, t); }}>{t.state === "closed" ? "Extend (still out)" : "Extend"}</Button>
                   )}
                   {canWrite && !t.arrivedOn && t.state !== "planned" && t.state !== "cancelled" && t.state !== "closed" && (
                     <Button disabled={arrivalMutation.isPending} onClick={() => arriveToday(v, t)}>
-                      <CheckCircle2 className="mr-1.5 h-4 w-4" /> Arrived today
+                      <CheckCircle2 className="mr-1.5 h-4 w-4" /> Mark available
                     </Button>
                   )}
                 </DialogFooter>
@@ -1835,7 +2042,7 @@ export default function VehiclePlanning() {
 
       {/* Day note: what happens with this vehicle on this day. Our board only. */}
       <Dialog open={!!noteTarget} onOpenChange={(open) => { if (!open && !noteMutation.isPending) setNoteTarget(null); }}>
-        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
+        <DialogContent onCloseAutoFocus={(e) => { if (selCell) { e.preventDefault(); ganttRef.current?.focus(); } }} className="sm:max-w-md max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
           {noteTarget && (() => {
             const existing = (noteTarget.vehicle.dayNotes ?? []).find((n) => n.day === noteTarget.day);
             return (
@@ -1853,7 +2060,7 @@ export default function VehiclePlanning() {
                 <DialogFooter className="gap-2 sm:gap-2">
                   {canWrite && existing && (
                     <Button variant="outline" className="mr-auto border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={noteMutation.isPending}
-                      onClick={() => noteMutation.mutate({ vehicleId: noteTarget.vehicle.id, day: noteTarget.day, text: "" })}>Delete</Button>
+                      onClick={() => { const nt = noteTarget; askConfirm({ title: "Delete this note?", message: `The note for ${nt.vehicle.vehicleNumber} on ${dayLabel(nt.day)} is removed.`, confirmLabel: "Yes, delete", danger: true, run: () => noteMutation.mutate({ vehicleId: nt.vehicle.id, day: nt.day, text: "" }) }); }}>Delete</Button>
                   )}
                   <Button variant="outline" disabled={noteMutation.isPending} onClick={() => setNoteTarget(null)}>{canWrite ? "Cancel" : "Close"}</Button>
                   {canWrite && (
@@ -1882,7 +2089,7 @@ export default function VehiclePlanning() {
             return (
               <>
                 <DialogHeader>
-                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> {single ? `Free ${freeAsk.vehicle.vehicleNumber}` : "Which order do you want to free?"}</DialogTitle>
+                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> {single ? `Remove ${freeAsk.vehicle.vehicleNumber}` : "Which order do you want to remove it from?"}</DialogTitle>
                   <DialogDescription>
                     {single
                       ? `Take ${freeAsk.vehicle.vehicleNumber} off order #${single.orderNumber}${single.partyName ? ` (${single.partyName})` : ""}? Use this when it was assigned by mistake.`
@@ -1919,13 +2126,13 @@ export default function VehiclePlanning() {
                 )}
                 {single?.locked && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{single.locked}</div>}
                 <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                  Each freed order goes back to "no vehicle" and its driver is cleared too. Notion's vehicle and driver are cleared to match; its status is not changed.
+                  Each order goes back to "no vehicle" and its driver is cleared too. Notion's vehicle and driver are cleared to match; its status is not changed.
                   {chosen.some((o) => o.notInSystem) && " An order that is only in Notion (not in our system) is cleared in Notion as well - otherwise the next Refresh would bring it back."}
                 </div>
                 <DialogFooter className="gap-2 sm:gap-2">
                   <Button variant="outline" disabled={busy} onClick={() => setFreeAsk(null)}>No</Button>
                   <Button className="bg-red-600 hover:bg-red-700" disabled={busy || chosen.length === 0 || chosen.some((o) => !!o.locked)} onClick={() => void freeSelected()}>
-                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : chosen.length > 1 ? `Free selected (${chosen.length})` : "Yes, free the vehicle"}
+                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : chosen.length > 1 ? `Remove selected (${chosen.length})` : "Yes, remove the vehicle"}
                   </Button>
                 </DialogFooter>
               </>
@@ -1989,6 +2196,24 @@ export default function VehiclePlanning() {
         );
       })()}
 
+      {/* The one "are you sure?" box (Mark available, Assign, Add to trip, Move, Driver, Status, Delete note, Undo). Opened last, so it sits on top of the box that asked. */}
+      <Dialog open={!!confirmAsk} onOpenChange={(open) => { if (!open) setConfirmAsk(null); }}>
+        <DialogContent className="sm:max-w-md max-w-[calc(100vw-1rem)]">
+          {confirmAsk && (
+            <>
+              <DialogHeader>
+                <DialogTitle>{confirmAsk.title}</DialogTitle>
+                <DialogDescription>{confirmAsk.message}</DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="flex-wrap gap-2 sm:justify-end sm:gap-2 sm:space-x-0">
+                <Button variant="outline" onClick={() => setConfirmAsk(null)}>No</Button>
+                <Button className={confirmAsk.danger ? "bg-red-600 hover:bg-red-700" : ""} onClick={() => { const run = confirmAsk.run; setConfirmAsk(null); run(); }}>{confirmAsk.confirmLabel}</Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* Vehicle status: what the board says about the vehicle today, one-click Arrived / Extend, and a status set here (parking, maintenance, breakdown). Our system only. */}
       <Dialog open={!!statusTarget} onOpenChange={(open) => { if (!open && !statusMutation.isPending) setStatusTarget(null); }}>
         <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
@@ -2010,16 +2235,36 @@ export default function VehiclePlanning() {
                     <p className="text-xs text-gray-500">{sv.volume != null ? `Volume ${sv.volume}` : ""}{sv.bodyType ? `${sv.volume != null ? " · " : ""}Body type ${sv.bodyType}` : ""}</p>
                   )}
                 </DialogHeader>
-                {canWrite && (at.out || av.extendTrip) && (
-                  <div className="flex flex-wrap gap-2">
-                    {at.out && (
-                      <Button size="sm" disabled={arrivalMutation.isPending} onClick={() => arriveToday(sv, at.out!)}>
-                        <CheckCircle2 className="mr-1.5 h-4 w-4" /> Arrived today
-                      </Button>
-                    )}
-                    {av.extendTrip && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openExtend(sv, av.extendTrip!); }}>Extend</Button>}
-                  </div>
-                )}
+                {canWrite && (() => {
+                  // Every action of the vehicle, by what it is doing: Remove (take it off an order), Mark available (it came back today), Extend (the trip runs longer), Assign (give it an order).
+                  const freeable = at.live.filter((x) => !x.lockedReason);
+                  const allLocked = at.live.length > 0 && freeable.length === 0;
+                  const dueNow = at.out?.state === "awaiting";
+                  const hint = at.out ? `Out on order #${at.out.members.map((m) => m.orderNumber).join(" + #")}` : at.planned ? `Order #${at.planned.orderNumber} starts on ${dayLabel(at.planned.startDay)}. Nothing is out yet.` : "No order on it right now.";
+                  return (
+                    <div className="space-y-2">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Actions</div>
+                      <div className="flex flex-wrap gap-2">
+                        {at.out && (
+                          <Button size="sm" className={dueNow ? "bg-amber-500 text-white hover:bg-amber-600" : ""} disabled={arrivalMutation.isPending} onClick={() => arriveToday(sv, at.out!)}
+                            title={`${sv.vehicleNumber} came back today - it becomes available now`}>
+                            <CheckCircle2 className="mr-1.5 h-4 w-4" /> Mark available
+                          </Button>
+                        )}
+                        {av.extendTrip && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openExtend(sv, av.extendTrip!); }}>Extend</Button>}
+                        {!av.blocked && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openAssign(sv, av.day); }}>Assign an order</Button>}
+                        {at.live.length > 0 && (
+                          <Button size="sm" variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={allLocked}
+                            title={allLocked ? at.live[0].lockedReason ?? undefined : `Remove ${sv.vehicleNumber} from an order it was assigned to by mistake - the order goes back to "no vehicle"`}
+                            onClick={() => { setStatusTarget(null); openFree(sv, at.live); }}>
+                            Remove from an order
+                          </Button>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-gray-500">{hint}{allLocked ? ` ${at.live[0].lockedReason ?? ""}` : ""}</p>
+                    </div>
+                  );
+                })()}
                 {canWrite ? (
                   <div className="space-y-2.5">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Set a status</div>
@@ -2052,7 +2297,7 @@ export default function VehiclePlanning() {
                 <DialogFooter className="flex-wrap gap-2 sm:justify-end sm:gap-2 sm:space-x-0">
                   {canWrite && sv.manualStatus && (
                     <Button variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={statusMutation.isPending}
-                      onClick={() => statusMutation.mutate({ vehicleId: sv.id, status: null, days: 0, comment: "" })}>Clear status</Button>
+                      onClick={() => askConfirm({ title: "Clear the status?", message: `${sv.vehicleNumber} is no longer marked "${sv.manualStatus?.status ?? ""}" and can take orders again.`, confirmLabel: "Yes, clear it", danger: true, run: () => statusMutation.mutate({ vehicleId: sv.id, status: null, days: 0, comment: "" }) })}>Clear status</Button>
                   )}
                   {canWrite && isAdmin && av.blocked && (
                     <Button variant="outline" onClick={() => { setStatusTarget(null); openAssign(sv); }}>Assign anyway</Button>
@@ -2060,7 +2305,7 @@ export default function VehiclePlanning() {
                   <Button variant="outline" disabled={statusMutation.isPending} onClick={() => setStatusTarget(null)}>{canWrite ? "Cancel" : "Close"}</Button>
                   {canWrite && (
                     <Button disabled={!stPick || !(Math.floor(Number(stDays)) >= 1) || statusMutation.isPending}
-                      onClick={() => statusMutation.mutate({ vehicleId: sv.id, status: stPick, days: Math.floor(Number(stDays)), comment: stComment })}>
+                      onClick={() => askConfirm({ title: `Set the status of ${sv.vehicleNumber}?`, message: `"${stPick}" for ${Math.floor(Number(stDays))} day${Math.floor(Number(stDays)) === 1 ? "" : "s"} from today. The vehicle is not available until then.`, confirmLabel: "Yes, save the status", run: () => statusMutation.mutate({ vehicleId: sv.id, status: stPick, days: Math.floor(Number(stDays)), comment: stComment }) })}>
                       {statusMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save status"}
                     </Button>
                   )}
@@ -2187,7 +2432,12 @@ export default function VehiclePlanning() {
                     ))}
                     {candidates.length === 0 && <p className="py-3 text-center text-xs text-gray-400">No vehicles found.</p>}
                   </div>
-                  <Button size="sm" disabled={!moveDest || busy} onClick={() => moveDest && moveMutation.mutate({ destId: moveDest.id })}>
+                  <Button size="sm" disabled={!moveDest || busy} onClick={() => moveDest && askConfirm({
+                    title: "Move to another vehicle?",
+                    message: `${t.members.length > 1 && !changeOrder ? "The whole trip" : `Order #${changeOrder || t.orderNumber}`} moves from ${v.vehicleNumber} to ${moveDest.vehicleNumber}. Notion is updated too.`,
+                    confirmLabel: "Yes, move it",
+                    run: () => moveMutation.mutate({ destId: moveDest.id }),
+                  })}>
                     {moveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : moveDest ? `Move ${t.members.length > 1 && !changeOrder ? "whole trip " : ""}to ${moveDest.vehicleNumber}` : "Pick a vehicle"}
                   </Button>
                 </div>
@@ -2205,7 +2455,12 @@ export default function VehiclePlanning() {
                       Get from Notion
                     </Button>
                     <Button size="sm" className="h-9 shrink-0" disabled={busy || driverNow.trim() === (t.driver ?? "")}
-                      onClick={() => driverMutation.mutate({ vehicleId: v.id, orderNumber: t.orderNumber, driverName: driverNow.trim(), driverPageId: driverId ?? undefined })}>
+                      onClick={() => askConfirm({
+                        title: driverNow.trim() ? "Change the driver?" : "Remove the driver?",
+                        message: driverNow.trim() ? `The driver of order #${t.orderNumber} becomes ${driverNow.trim()}. Notion is updated too.` : `The driver is cleared from order #${t.orderNumber}. Notion is updated too.`,
+                        confirmLabel: driverNow.trim() ? "Yes, change it" : "Yes, remove it",
+                        run: () => driverMutation.mutate({ vehicleId: v.id, orderNumber: t.orderNumber, driverName: driverNow.trim(), driverPageId: driverId ?? undefined }),
+                      })}>
                       {driverMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save"}
                     </Button>
                   </div>
