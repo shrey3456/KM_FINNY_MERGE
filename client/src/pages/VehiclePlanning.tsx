@@ -337,10 +337,10 @@ function computeStatus(v: VehicleRow, todayIso: string): { label: string; tone: 
     const n = Math.max(1, isoDayDiff(late.lastBusyDay, todayIso));
     return { label: "Overdue", tone: "bg-amber-100 text-amber-800", daysText: `${n} d late`, title: `${n} day${n === 1 ? "" : "s"} past its last day with no arrival recorded - the vehicle is available`, note: `${n} day${n === 1 ? "" : "s"} past its last day, no arrival recorded - available` };
   }
-  if (trips.some((x) => x.arrivedOn === todayIso)) return { label: "Free now", tone: "bg-emerald-600 text-white", daysText: "", title: "Arrived today - available now", note: "Arrived today - available now" };
+  if (trips.some((x) => x.arrivedOn === todayIso)) return { label: "Available now", tone: "bg-emerald-600 text-white", daysText: "", title: "Arrived today - available now", note: "Arrived today - available now" };
   if (trips.some((x) => !x.arrivedOn && x.startDay < x.lastBusyDay && x.lastBusyDay === todayIso)) return { label: "Ends today", tone: "border border-emerald-400 bg-white text-emerald-700", daysText: "", title: "Today is the last day of the trip - the vehicle is available", note: "Last day of the trip - available" };
   if (trips.some((x) => x.startDay > todayIso)) return { label: "Planned", tone: "bg-blue-100 text-blue-800", daysText: "", title: "Free now; an order is planned", note: "Free now; an order is planned" };
-  return { label: "Free", tone: "bg-emerald-50 text-emerald-700", daysText: "", title: "Free - available now", note: "Available now" };
+  return { label: "Available", tone: "bg-emerald-50 text-emerald-700", daysText: "", title: "Free - available now", note: "Available now" };
 }
 
 // The day the vehicle can take its next order (its trips' last day, or the day after a maintenance / breakdown), and the trip an Extend would lengthen.
@@ -1599,9 +1599,9 @@ export default function VehiclePlanning() {
               // Two (or more) orders on one day are stacked up and down: the row grows with the tallest stack and the Assign / Extend buttons sit below it.
               const maxStack = Math.max(1, ...byIdx.map((c) => c.length));
               const btnTop = Math.max(44, 28 + maxStack * 14 + (maxStack - 1) * 3 + 4);
-              const rowH = btnTop + 26;
               const todayIso = isoOf(today);
               const av = computeAvailability(v, todayIso);
+              const rowH = btnTop + 26 + (canWrite && av.extendTrip ? 22 : 0);   // Assign and Extend are stacked inside the day cell, so the row is taller when both show
               const st = computeStatus(v, todayIso);
               // The past days with no order on them: after the vehicle's first trip, before today, not covered by any trip and not blocked by a status.
               const idleSpans = (() => {
@@ -1788,15 +1788,15 @@ export default function VehiclePlanning() {
                       const at = Math.max(0, idx);
                       const style = at >= windowDays - 2 ? { right: 4, top: btnTop } : { left: `calc(${(at / windowDays) * 100}% + 4px)`, top: btnTop };
                       return (
-                        <div className="absolute z-10 flex items-center gap-1" style={style}>
+                        <div className="absolute z-10 flex flex-col items-stretch gap-1" style={{ ...style, width: `max(${dayColW - 8}px, calc(${100 / windowDays}% - 8px))` }}>
                           <button type="button" onClick={() => openAssign(v, av.day)}
-                            className="rounded-md border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold leading-tight text-emerald-700 hover:bg-emerald-100"
+                            className="truncate rounded-md border border-emerald-300 bg-emerald-50 px-1 py-0.5 text-[11px] font-semibold leading-tight text-emerald-700 hover:bg-emerald-100"
                             title={av.day === todayIso ? "Available now - assign an order" : `Available from ${dayLabel(av.day)} - assign an order`}>
                             Assign
                           </button>
                           {av.extendTrip && (
                             <button type="button" onClick={() => openExtend(v, av.extendTrip!)}
-                              className="rounded-md border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-semibold leading-tight text-amber-800 hover:bg-amber-50"
+                              className="truncate rounded-md border border-amber-300 bg-white px-1 py-0.5 text-[11px] font-semibold leading-tight text-amber-800 hover:bg-amber-50"
                               title={`Extend order #${av.extendTrip.orderNumber} (a reason is asked)`}>
                               Extend
                             </button>
