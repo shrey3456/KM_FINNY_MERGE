@@ -44,6 +44,8 @@ export type Trip = {
   state: TripState;
   lockedReason?: string | null;  // set by the route: why Free is not allowed (Loading has taken the order over)
   assumed: boolean;            // closed quietly on its planned last day (nobody marked an arrival; see ASSUMED_AFTER_DAYS)
+  conflictAcceptedWith: string | null;   // a person accepted the clash with this earlier order as it is (it is then not reported as a conflict)
+  conflictAcceptedByName: string | null;
 };
 
 export type TripConflict = { orderNumber: string; startDay: string; withOrderNumber: string; withLastBusyDay: string };
@@ -75,7 +77,7 @@ export function parseDmy(raw: string | null | undefined): string | null {
 export function toDmy(day: string): string { const [y, m, d] = day.split('-'); return `${d}/${m}/${y}`; }
 
 type Entry = Pick<VehiclePlanningOrderEntry, 'orderNumber' | 'orderDate' | 'tripDays' | 'tripCompletesOn' | 'status' | 'partyName' | 'plant' | 'driver' | 'proformaSlipId'>
-  & { notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null; freeSameDay?: boolean | null; sameTripAs?: string | null; expectedEndReason?: string | null };
+  & { notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null; freeSameDay?: boolean | null; sameTripAs?: string | null; expectedEndReason?: string | null; conflictAcceptedWith?: string | null; conflictAcceptedByName?: string | null };
 
 export function plannedLastDayOf(e: Pick<Entry, 'orderDate' | 'tripDays' | 'tripCompletesOn'>): { start: string; last: string; days: number } | null {
   const start = String(e.orderDate ?? '').slice(0, 10);
@@ -163,6 +165,7 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
       notionNote: members.find((m) => m.notionNote)?.notionNote ?? null,
       notInSystem: members.every((m) => m.notInSystem),
       tripDays: daysBetween(startDay, plannedLastDay) + 1, startDay, plannedLastDay, expectedEnd, expectedEndReason, arrivedOn, lastBusyDay, state, assumed,
+      conflictAcceptedWith: head.conflictAcceptedWith ?? null, conflictAcceptedByName: head.conflictAcceptedByName ?? null,
     });
   }
   trips.sort((a, b) => a.startDay.localeCompare(b.startDay) || a.orderNumber.localeCompare(b.orderNumber));
@@ -179,14 +182,17 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
     if (t.state === 'arrived' || t.state === 'closed') continue;
     for (let j = i - 1; j >= 0; j--) {
       const prev = live[j];
-      if (t.startDay < prev.freeFromDay) { conflicts.push({ orderNumber: t.orderNumber, startDay: t.startDay, withOrderNumber: prev.orderNumber, withLastBusyDay: prev.lastBusyDay }); break; }
+      if (t.startDay < prev.freeFromDay) {
+        if (t.conflictAcceptedWith === prev.orderNumber) break;   // accepted as it is by a person
+        conflicts.push({ orderNumber: t.orderNumber, startDay: t.startDay, withOrderNumber: prev.orderNumber, withLastBusyDay: prev.lastBusyDay }); break;
+      }
     }
   }
   return { trips, freeFrom, vehicleState, conflicts };
 }
 
 // The fields only a person sets on a trip. A Refresh from Notion rebuilds the trip from Notion's data; these must survive it.
-const LOCAL_TRIP_FIELDS = ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'sameTripAs', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt', 'expectedEndReason'] as const;
+const LOCAL_TRIP_FIELDS = ['arrivedOn', 'arrivedByCode', 'arrivedByName', 'arrivedAt', 'arrivalNote', 'freeSameDay', 'sameTripAs', 'expectedEnd', 'expectedEndByCode', 'expectedEndAt', 'expectedEndReason', 'conflictAcceptedWith', 'conflictAcceptedByName'] as const;
 export function mergeLocalTripFields<T extends Record<string, any>>(previous: Record<string, any> | undefined, next: T): T {
   if (!previous) return next;
   for (const k of LOCAL_TRIP_FIELDS) if (previous[k] != null && next[k] == null) (next as any)[k] = previous[k];

@@ -62,6 +62,7 @@ type Trip = {
   startDay: string; plannedLastDay: string; expectedEnd: string | null; expectedEndReason?: string | null; arrivedOn: string | null;
   lastBusyDay: string; state: TripState; assumed: boolean;
   lockedReason?: string | null;   // why Free is not allowed (Loading has taken the order over)
+  conflictAcceptedWith?: string | null; conflictAcceptedByName?: string | null;   // a person accepted the clash with this earlier order as it is
 };
 // The vehicle's own status on this page (maintenance, breakdown ...): our system only. days >= 1 keeps it out of Available for that many days.
 type ManualStatus = {
@@ -92,13 +93,15 @@ type VehicleRow = {
 type AvailableOrder = {
   orderNumber: string; partyName: string | null; plant: string | null;
   orderDate: string | null; vehicleNumber: string | null; notionStatus: string | null;
-  driverName?: string | null; beforeFree?: boolean;
+  driverName?: string | null; beforeFree?: boolean; tripDaysGuess?: number;
 };
 type Suggestion = AvailableOrder & { tripDaysGuess: number; samePlant: boolean; fits: boolean; runsInto: string | null };
 type AvailableOrdersResponse = {
   orders: AvailableOrder[]; date: string; suggestions: Suggestion[];
   // Free orders dated while this vehicle is busy, each with the trip it would join (a shared load).
   sharable?: (AvailableOrder & { joinOrder: string; joinParty: string | null })[];
+  // Add slip: the trips this vehicle is out on that a slip can join.
+  joinTrips?: { orderNumber: string; partyName: string | null; startDay: string; lastBusyDay: string; freeFromDay: string }[];
   vehicle: { freeFrom: string | null; busyUntil: string | null; busyOrder: string | null; lastDriver: string | null; lastPlant: string | null } | null;
 };
 type NotionDriver = { id: string; name: string };
@@ -387,7 +390,11 @@ export default function VehiclePlanning() {
   const [reviewRun, setReviewRun] = useState<{ total: number; done: number; created: number; failed: { orderNumber: string; message: string }[]; finished: boolean } | null>(null);
   const [historyTarget, setHistoryTarget] = useState<VehicleRow | null>(null);
   // A trip dot that was clicked (its details + Arrived / Undo), and an extension that would run into the next trip.
-  const [tripTarget, setTripTarget] = useState<{ vehicle: VehicleRow; trip: Trip } | null>(null);
+  // The Assign box has two jobs: a NEW trip (Assign) or another slip on the trip that is already out (Add slip, a shared load).
+  const [assignMode, setAssignMode] = useState<"new" | "slip">("new");
+  const [slipTripOrder, setSlipTripOrder] = useState<string | null>(null);   // Add slip: which running trip the slip joins (when there is more than one)
+  // The Resolve conflict box of one vehicle (every way to fix its clashes in one place).
+  const [resolveVehicleId, setResolveVehicleId] = useState<number | null>(null);
   // The Status box of one vehicle (availability actions + a status set here: parking, maintenance, breakdown ...).
   const [statusTarget, setStatusTarget] = useState<VehicleRow | null>(null);
   const [stPick, setStPick] = useState("");
@@ -571,8 +578,8 @@ export default function VehiclePlanning() {
   });
 
   const availableOrdersQuery = useQuery<AvailableOrdersResponse>({
-    queryKey: ["/api/vehicle-planning/available-orders", assignTarget?.id, assignDate, assignSearch],
-    queryFn: async () => (await apiRequest("GET", `/api/vehicle-planning/available-orders?vehicleId=${assignTarget!.id}${assignDate ? `&date=${assignDate}` : ""}&q=${encodeURIComponent(assignSearch)}`)).json(),
+    queryKey: ["/api/vehicle-planning/available-orders", assignTarget?.id, assignDate, assignSearch, assignMode],
+    queryFn: async () => (await apiRequest("GET", `/api/vehicle-planning/available-orders?vehicleId=${assignTarget!.id}${assignDate ? `&date=${assignDate}` : ""}&q=${encodeURIComponent(assignSearch)}${assignMode === "slip" ? "&mode=slip" : ""}`)).json(),
     enabled: !!assignTarget,
   });
 
@@ -609,7 +616,9 @@ export default function VehiclePlanning() {
     onSuccess: (data, { orderNumber }) => {
       const notionBad = data?.notion?.state === "failed" || data?.notion?.state === "retrying";
       toast({
-        ...withNotionNotice({ title: "Vehicle assigned", description: `${assignTarget?.vehicleNumber} → order ${orderNumber}` }, data),
+        ...withNotionNotice(data?.sharedWith
+          ? { title: "Added to the trip", description: `${assignTarget?.vehicleNumber} · order ${orderNumber} joined #${data.sharedWith}'s trip. Vehicle free from ${data.freeFrom ? dayLabel(data.freeFrom) : "—"}${data.stretchedTo ? ` (the trip's end moved to ${dayLabel(data.stretchedTo)})` : ""}.` }
+          : { title: "Vehicle assigned", description: `${assignTarget?.vehicleNumber} → order ${orderNumber}` }, data),
         action: notionBad ? <ToastAction altText="Retry the Notion update" onClick={() => retryNotionMutation.mutate(orderNumber)}>Retry</ToastAction> : undefined,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
@@ -640,8 +649,40 @@ export default function VehiclePlanning() {
       queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
       // Back earlier than planned: say when it is free and how many orders are waiting for a vehicle.
       if (!body.undo && data?.early && data?.waiting > 0 && data?.freeFrom && veh) setEarlyAsk({ vehicle: veh, freeFrom: data.freeFrom, waiting: data.waiting });
-      setTripTarget(null);
+      setDotCard(null);
       setStatusTarget(null);
+    },
+    onError: (err: any) => toast({ title: "Could not save", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
+  // Orders that clash on one vehicle (separate trips on the same days) are made ONE trip - a shared load. Works for orders that exist only in Notion too.
+  const mergeMutation = useMutation({
+    mutationFn: async (body: { vehicleId: number; pairs: { orderNumber: string; withOrderNumber: string }[] }) => {
+      const res = await apiRequest("POST", "/api/vehicle-planning/trips/merge", body);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to make one trip");
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      toast({ title: data?.joined ? "Made one trip" : "Already one trip", description: data?.joined ? "The orders now share the vehicle as one load." : undefined });
+      queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+      setDotCard(null);
+      setStatusTarget(null);
+    },
+    onError: (err: any) => toast({ title: "Could not make one trip", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
+  // Accept a clash as it is (both orders stay; the red flag is hidden), or show it again.
+  const acceptMutation = useMutation({
+    mutationFn: async (body: { vehicleId: number; orderNumber: string; withOrderNumber: string; undo?: boolean }) => {
+      const res = await apiRequest("POST", "/api/vehicle-planning/trips/accept-conflict", body);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to save");
+      return res.json();
+    },
+    onSuccess: (_d, body) => {
+      toast({ title: body.undo ? "Clash shown again" : "Clash accepted as it is", description: body.undo ? undefined : `#${body.orderNumber} and #${body.withOrderNumber} stay on the vehicle.` });
+      queryClient.invalidateQueries({ queryKey: ["/api/vehicle-planning/vehicles"] });
+      setDotCard(null);
+      setResolveVehicleId(null);
     },
     onError: (err: any) => toast({ title: "Could not save", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
@@ -768,7 +809,7 @@ export default function VehiclePlanning() {
   });
 
   useEffect(() => {
-    setAssignDate(assignStartRef.current ?? ""); assignStartRef.current = null; setAssignSearch(""); setAssignPick(null); setDriverText(null); setDriverExtra(null); setAssignAsk(null);
+    setAssignDate(assignStartRef.current ?? ""); assignStartRef.current = null; setAssignSearch(""); setAssignPick(null); setDriverText(null); setDriverExtra(null); setAssignAsk(null); setSlipTripOrder(null);
   }, [assignTarget?.id]);
   useEffect(() => {
     setChangeOrder(""); setMoveSearch(""); setMoveDest(null); setMoveAsk(null); setChangeDriverText(null); setChangeDriverExtra(null); setRemoveSure(false);
@@ -1040,7 +1081,12 @@ export default function VehiclePlanning() {
       run: () => arrivalMutation.mutate({ vehicleId: v.id, orderNumber: trip.orderNumber, arrivedOn: isoOf(new Date()), freeSameDay: true }),
     });
   }
-  function openAssign(v: VehicleRow, day?: string) { assignStartRef.current = day ?? null; setAssignTarget(v); }
+  function openAssign(v: VehicleRow, day?: string) { assignStartRef.current = day ?? null; setAssignMode("new"); setAssignTarget(v); }
+  // Add slip: another order on the trip the vehicle is out on right now (a shared load).
+  function openAddSlip(v: VehicleRow) { assignStartRef.current = null; setAssignMode("slip"); setAssignTarget(v); }
+  // The trips of a vehicle that can still take another slip.
+  const canAddSlip = (v: VehicleRow) => (v.trips ?? []).some((x) => !x.arrivedOn && (x.state === "on_trip" || x.state === "planned" || x.state === "awaiting"));
+  useEffect(() => { if (!assignTarget) setAssignMode("new"); }, [assignTarget]);
   // Frees every ticked order of the vehicle (one after the other); a single one keeps the usual message.
   async function freeSelected() {
     if (!freeAsk || freeAsk.orders.length === 0) return;
@@ -1511,7 +1557,7 @@ export default function VehiclePlanning() {
           {vehicles.flatMap((v) => (v.conflicts ?? []).map((c) => ({ v, c }))).map(({ v, c }) => {
             const trip = v.trips?.find((t) => t.orderNumber === c.orderNumber);
             return (
-              <button key={`${v.id}-${c.orderNumber}`} type="button" className="block w-full text-left hover:underline" onClick={() => trip && setTripTarget({ vehicle: v, trip })}>
+              <button key={`${v.id}-${c.orderNumber}`} type="button" className="block w-full text-left hover:underline" onClick={() => trip && setDotCard({ vehicle: v, trip, member: trip.members[0], x: Math.round(window.innerWidth / 2), y: 120 })}>
                 <strong>{v.vehicleNumber}</strong>: order #{c.orderNumber} starts {dayLabel(c.startDay)}, but #{c.withOrderNumber} keeps the vehicle until {dayLabel(c.withLastBusyDay)}.
               </button>
             );
@@ -1858,9 +1904,9 @@ export default function VehiclePlanning() {
             return (
               <>
                 <DialogHeader>
-                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> Assign {assignTarget?.vehicleNumber}</DialogTitle>
+                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> {assignMode === "slip" ? `Add a slip to ${assignTarget?.vehicleNumber}'s trip` : `Assign ${assignTarget?.vehicleNumber}`}</DialogTitle>
                   <DialogDescription>
-                    {!data ? "Loading…" : info?.busyUntil
+                    {!data ? "Loading…" : assignMode === "slip" ? <>Pick the slip's date and the slip. It rides the trip as a shared load: its own trip days count, and the trip stretches to cover them.</> : info?.busyUntil
                       ? <>Busy until {dayLabel(info.busyUntil)}{info.busyOrder ? ` (order #${info.busyOrder})` : ""}. Free from {dayLabel(info.freeFrom!)}.</>
                       : "This vehicle is free."}
                   </DialogDescription>
@@ -1869,7 +1915,7 @@ export default function VehiclePlanning() {
                   )}
                 </DialogHeader>
 
-                {(data?.suggestions?.length ?? 0) > 0 && (
+                {assignMode === "new" && (data?.suggestions?.length ?? 0) > 0 && (
                   <div className="space-y-1.5">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Suggested - not assigned yet, within 7 days of the free date</div>
                     <div className="max-h-40 space-y-1.5 overflow-y-auto">
@@ -1882,33 +1928,73 @@ export default function VehiclePlanning() {
                   </div>
                 )}
 
-                {(data?.sharable?.length ?? 0) > 0 && (
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">On the same dates as a trip on this vehicle - add it to that trip (shared load)</div>
-                    <div className="max-h-44 space-y-1.5 overflow-y-auto">
-                      {data!.sharable!.map((o) => (
-                        <div key={o.orderNumber} className="flex items-center justify-between gap-2 rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2">
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold text-[#001d6e]">#{o.orderNumber} <span className="text-xs font-normal text-gray-400">{o.orderDate ? dayLabel(o.orderDate.slice(0, 10)) : ""}</span></div>
-                            <div className="truncate text-xs text-gray-500">{o.partyName ?? "—"} · {o.plant ?? "—"}</div>
-                            <div className="truncate text-[11px] text-sky-800">Joins #{o.joinOrder}{o.joinParty ? ` (${o.joinParty})` : ""}</div>
-                          </div>
-                          <Button size="sm" variant="outline" className="h-7 shrink-0 border-sky-300 px-2.5 text-xs" disabled={assignMutation.isPending}
-                            onClick={() => askConfirm({
-                              title: `Add #${o.orderNumber} to the trip?`,
-                              message: `Order #${o.orderNumber}${o.partyName ? ` (${o.partyName})` : ""} will share ${assignTarget?.vehicleNumber ?? "the vehicle"} with order #${o.joinOrder}${o.joinParty ? ` (${o.joinParty})` : ""}.`,
-                              confirmLabel: "Yes, add to the trip",
-                              run: () => assignMutation.mutate({ orderNumber: o.orderNumber, sameTripAs: o.joinOrder }),
-                            })}>
-                            Add to trip
-                          </Button>
+                {assignMode === "slip" && (() => {
+                  const trips = data?.joinTrips ?? [];
+                  const trip = trips.find((x) => x.orderNumber === slipTripOrder) ?? trips[0];
+                  const addIso = (iso: string, n: number) => format(addDays(parse(iso, "yyyy-MM-dd", new Date()), n), "yyyy-MM-dd");
+                  if (availableOrdersQuery.isLoading && !data) return <SectionSkeleton lines={3} />;
+                  if (!trip) return <p className="rounded-lg border border-dashed border-gray-200 py-5 text-center text-sm text-gray-500">This vehicle is not out on a trip, so there is nothing to add a slip to. Use Assign.</p>;
+                  const orders = data?.orders ?? [];
+                  return (
+                    <div className="space-y-2">
+                      {trips.length > 1 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {trips.map((x) => (
+                            <button key={x.orderNumber} type="button" onClick={() => setSlipTripOrder(x.orderNumber)}
+                              className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${x.orderNumber === trip.orderNumber ? "border-[#001d6e] bg-[#001d6e] text-white" : "border-gray-300 bg-white text-gray-600 hover:bg-gray-50"}`}>
+                              #{x.orderNumber}{x.partyName ? ` · ${x.partyName}` : ""} ({dayLabel(x.startDay)} – {dayLabel(x.lastBusyDay)})
+                            </button>
+                          ))}
                         </div>
-                      ))}
+                      )}
+                      <div className="rounded-lg bg-sky-50 px-3 py-2 text-xs text-sky-900">
+                        Trip #{trip.orderNumber}{trip.partyName ? ` (${trip.partyName})` : ""}: {dayLabel(trip.startDay)} – {dayLabel(trip.lastBusyDay)}. A slip joins it when it starts between those days; its own trip days then count, and the trip stretches to cover them.
+                      </div>
+                      <div className="flex gap-2">
+                        <Input type="date" value={shownDate} onChange={(e) => setAssignDate(e.target.value)} className="h-9 w-40" />
+                        <Input value={assignSearch} onChange={(e) => setAssignSearch(e.target.value)} placeholder="Order no. or party" className="h-9 flex-1" />
+                      </div>
+                      <div className="max-h-64 space-y-1.5 overflow-y-auto">
+                        {availableOrdersQuery.isLoading ? <SectionSkeleton lines={3} /> : orders.length === 0 ? (
+                          <p className="py-4 text-center text-sm text-gray-400">No free orders for this date (an order already on a vehicle is not listed).</p>
+                        ) : orders.map((o) => {
+                          const start = o.orderDate ? o.orderDate.slice(0, 10) : "";
+                          const days = o.tripDaysGuess ?? 1;
+                          const end = start ? addIso(start, days - 1) : "";
+                          const inside = !!start && start >= trip.startDay && start <= trip.lastBusyDay;
+                          const stretches = !!end && end > trip.lastBusyDay;
+                          const newFree = stretches ? end : trip.freeFromDay;
+                          const effect = stretches ? `The trip's end moves from ${dayLabel(trip.lastBusyDay)} to ${dayLabel(end)}.` : `The trip still ends ${dayLabel(trip.lastBusyDay)}.`;
+                          const preview = `Runs ${dayLabel(start)} → ${dayLabel(end)} (${days} day${days === 1 ? "" : "s"}, estimated). ${effect} Vehicle free from ${dayLabel(newFree)}.`;
+                          return (
+                            <div key={o.orderNumber} className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-2 ${inside ? "border-sky-200 bg-sky-50/60" : "border-gray-200 bg-gray-50 opacity-70"}`}>
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-[#001d6e]">#{o.orderNumber} <span className="text-xs font-normal text-gray-400">{start ? dayLabel(start) : ""}</span></div>
+                                <div className="truncate text-xs text-gray-500">{o.partyName ?? "—"} · {o.plant ?? "—"}</div>
+                                {inside ? (
+                                  <div className="text-[11px] text-sky-800">{preview}</div>
+                                ) : (
+                                  <div className="text-[11px] text-red-600">{start > trip.lastBusyDay ? `Starts after this trip ends (${dayLabel(trip.lastBusyDay)}) - use Assign for a new trip.` : `Starts before this trip starts (${dayLabel(trip.startDay)}).`}</div>
+                                )}
+                              </div>
+                              <Button size="sm" variant="outline" className="h-7 shrink-0 border-sky-300 px-2.5 text-xs" disabled={!inside || assignMutation.isPending}
+                                onClick={() => askConfirm({
+                                  title: `Add #${o.orderNumber} to the trip?`,
+                                  message: `Order #${o.orderNumber}${o.partyName ? ` (${o.partyName})` : ""} joins #${trip.orderNumber}${trip.partyName ? ` (${trip.partyName})` : ""} on ${assignTarget?.vehicleNumber ?? "the vehicle"}. ${preview} Notion's trip days are used if it has them.`,
+                                  confirmLabel: "Yes, add to the trip",
+                                  run: () => assignMutation.mutate({ orderNumber: o.orderNumber, sameTripAs: trip.orderNumber }),
+                                })}>
+                                Add to trip
+                              </Button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
-                <div className="space-y-1.5">
+                {assignMode === "new" && <div className="space-y-1.5">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Or pick another free order</div>
                   <div className="flex gap-2">
                     <Input type="date" value={shownDate} onChange={(e) => setAssignDate(e.target.value)} className="h-9 w-40" />
@@ -1923,10 +2009,10 @@ export default function VehiclePlanning() {
                       data!.orders.map((o) => rowButton(o, o.beforeFree ? <span className="shrink-0 text-[10px] text-gray-500">before free date</span> : undefined))
                     )}
                   </div>
-                </div>
+                </div>}
 
                 {/* Driver: the vehicle's last driver unless changed. Written to our slip and to Notion's "Driver :". */}
-                <div className="space-y-1">
+                {assignMode === "new" && <div className="space-y-1">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Driver</div>
                   <div className="flex gap-2">
                     <Input
@@ -1949,18 +2035,18 @@ export default function VehiclePlanning() {
                   <p className="text-[11px] text-gray-400">
                     {effectiveDriver.trim() === "" ? "No driver will be set." : matchedDriverId ? "Will also be set on the Notion order." : driversQuery.data?.message ?? "Not in the Notion driver list - saved here only."}
                   </p>
-                </div>
+                </div>}
 
                 <DialogFooter className="gap-2 sm:gap-2">
-                  <Button variant="outline" onClick={() => setAssignTarget(null)} disabled={assignMutation.isPending}>Cancel</Button>
-                  <Button disabled={!assignPick || assignMutation.isPending} onClick={() => assignPick && askConfirm({
+                  <Button variant="outline" onClick={() => setAssignTarget(null)} disabled={assignMutation.isPending}>{assignMode === "slip" ? "Close" : "Cancel"}</Button>
+                  {assignMode === "new" && <Button disabled={!assignPick || assignMutation.isPending} onClick={() => assignPick && askConfirm({
                     title: `Assign #${assignPick.orderNumber}?`,
                     message: `Give order #${assignPick.orderNumber}${assignPick.partyName ? ` (${assignPick.partyName})` : ""} to ${assignTarget?.vehicleNumber ?? "this vehicle"}. Notion is updated too.`,
                     confirmLabel: "Yes, assign",
                     run: () => assignMutation.mutate({ orderNumber: assignPick.orderNumber }),
                   })}>
                     {assignMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : assignPick ? `Assign #${assignPick.orderNumber}` : "Assign"}
-                  </Button>
+                  </Button>}
                 </DialogFooter>
               </>
             );
@@ -1970,97 +2056,6 @@ export default function VehiclePlanning() {
 
       {/* The order starts before the vehicle is back: join a running trip (shared load), mark the older trip arrived, or (an admin) go ahead anyway. */}
       {renderNotFree(assignAsk, setAssignAsk, assignMutation.isPending, (o) => assignAsk && assignMutation.mutate({ orderNumber: assignAsk.orderNumber, ...o }), "Assign anyway")}
-
-      {/* A trip bar was clicked: its details, and Arrived / Undo arrival. */}
-      <Dialog open={!!tripTarget} onOpenChange={(open) => { if (!open) setTripTarget(null); }}>
-        <DialogContent className="sm:max-w-lg max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
-          {tripTarget && (() => {
-            const { vehicle: v, trip: t } = tripTarget;
-            const inConflict = (v.conflicts ?? []).find((c) => c.orderNumber === t.orderNumber);
-            return (
-              <>
-                <DialogHeader>
-                  <DialogTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4" /> {v.vehicleNumber} · order #{t.orderNumber}</DialogTitle>
-                  <DialogDescription>{t.partyName ?? "—"}{t.plant ? ` · ${t.plant}` : ""}</DialogDescription>
-                </DialogHeader>
-                <div className="space-y-1.5 text-sm">
-                  {inConflict && (
-                    <div className="flex items-start gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      <span>Vehicle not back yet: order #{inConflict.withOrderNumber} keeps it until {dayLabel(inConflict.withLastBusyDay)}, but this order starts {dayLabel(inConflict.startDay)}.</span>
-                    </div>
-                  )}
-                  {t.members.length > 1 && (
-                    <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
-                      <div className="mb-1 font-semibold">Shared load - {t.members.length} orders on one trip</div>
-                      {t.members.map((m) => (
-                        <div key={m.orderNumber} className="flex flex-wrap justify-between gap-x-3">
-                          <span>#{m.orderNumber} · {m.partyName ?? "—"}{m.plant ? ` · ${m.plant}` : ""}</span>
-                          <span className="whitespace-nowrap text-sky-800">{m.tripDays} day{m.tripDays === 1 ? "" : "s"} · ends {dayLabel(m.plannedLastDay)}</span>
-                        </div>
-                      ))}
-                      <div className="mt-1 border-t border-sky-200 pt-1 font-medium">Vehicle free from {dayLabel(t.freeFromDay)} (when the last party is done)</div>
-                    </div>
-                  )}
-                  {t.notionNote && (
-                    <div className="flex items-start justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      <span>Notion not updated. {t.notionNote}</span>
-                      {canWrite && (
-                        <Button size="sm" variant="outline" className="h-7 shrink-0 px-2 text-xs" disabled={retryNotionMutation.isPending} onClick={() => retryNotionMutation.mutate(t.orderNumber)}>
-                          {retryNotionMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Retry"}
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-700">
-                    <span className="text-gray-500">State</span><span>{stateText[t.state]}</span>
-                    <span className="text-gray-500">Order date</span><span>{dayLabel(t.startDay)}</span>
-                    <span className="text-gray-500">Trip days</span><span>{t.tripDays}</span>
-                    <span className="text-gray-500">Planned last day</span><span>{dayLabel(t.plannedLastDay)}</span>
-                    {t.members.length <= 1 && <><span className="text-gray-500">Vehicle free from</span><span>{dayLabel(t.freeFromDay)}</span></>}
-                    {t.expectedEnd && <><span className="text-gray-500">Expected last day</span><span>{dayLabel(t.expectedEnd)}</span></>}
-                    {t.expectedEnd && t.expectedEndReason && <><span className="text-gray-500">Extended because</span><span>{t.expectedEndReason}</span></>}
-                    {t.arrivedOn && <><span className="text-gray-500">Arrived on</span><span>{dayLabel(t.arrivedOn)}{t.freeSameDay ? " (free the same day)" : ""}</span></>}
-                    <span className="text-gray-500">Driver</span><span>{t.driver ?? "—"}</span>
-                  </div>
-                </div>
-                <DialogFooter className="flex-wrap gap-2 sm:justify-end sm:gap-2 sm:space-x-0">
-                  <Button variant="outline" onClick={() => setTripTarget(null)}>Close</Button>
-                  {canWrite && t.arrivedOn && (
-                    <Button variant="outline" disabled={arrivalMutation.isPending} onClick={() => askConfirm({
-                      title: "Undo the arrival?", message: `Order #${t.orderNumber} goes back to being out on the road for ${v.vehicleNumber}.`, confirmLabel: "Yes, undo",
-                      run: () => arrivalMutation.mutate({ vehicleId: v.id, orderNumber: t.orderNumber, undo: true }),
-                    })}>
-                      <Undo2 className="mr-1.5 h-4 w-4" /> Undo arrival
-                    </Button>
-                  )}
-                  {canWrite && inConflict && (() => {
-                    const blocker = v.trips?.find((x) => x.orderNumber === inConflict.withOrderNumber);
-                    return blocker && !blocker.arrivedOn && (blocker.state === "on_trip" || blocker.state === "awaiting") ? (
-                      <Button variant="outline" onClick={() => arriveToday(v, blocker)}>Mark #{blocker.orderNumber} available today</Button>
-                    ) : null;
-                  })()}
-                  {canWrite && !t.arrivedOn && t.state !== "closed" && t.state !== "cancelled" && !t.notInSystem && (
-                    <Button variant="outline" onClick={() => { setTripTarget(null); setChangeTarget({ vehicle: v, trip: t }); }}>Change</Button>
-                  )}
-                  {canWrite && !t.arrivedOn && t.state !== "closed" && t.state !== "cancelled" && (
-                    <Button variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={!!t.lockedReason} title={t.lockedReason ?? undefined}
-                      onClick={() => { setTripTarget(null); openFree(v, [t]); }}>Remove</Button>
-                  )}
-                  {canWrite && !t.arrivedOn && (t.state === "on_trip" || t.state === "awaiting" || t.state === "planned" || (t.state === "closed" && t.assumed && isoDayDiff(t.lastBusyDay, isoOf(new Date())) <= 7)) && (
-                    <Button variant="outline" onClick={() => { setTripTarget(null); openExtend(v, t); }}>{t.state === "closed" ? "Extend (still out)" : "Extend"}</Button>
-                  )}
-                  {canWrite && !t.arrivedOn && t.state !== "planned" && t.state !== "cancelled" && t.state !== "closed" && (
-                    <Button disabled={arrivalMutation.isPending} onClick={() => arriveToday(v, t)}>
-                      <CheckCircle2 className="mr-1.5 h-4 w-4" /> Mark available
-                    </Button>
-                  )}
-                </DialogFooter>
-              </>
-            );
-          })()}
-        </DialogContent>
-      </Dialog>
 
       {/* Day note: what happens with this vehicle on this day. Our board only. */}
       <Dialog open={!!noteTarget} onOpenChange={(open) => { if (!open && !noteMutation.isPending) setNoteTarget(null); }}>
@@ -2163,7 +2158,7 @@ export default function VehiclePlanning() {
         </DialogContent>
       </Dialog>
 
-      {/* A dot was clicked: the full details of that assignment (the whole party name, dates, days, status, driver ...), then Details for the actions. */}
+      {/* A dot was clicked: the full details of that assignment (the whole party name, dates, days, status, driver ...), then every action of the trip. */}
       {dotCard && (() => {
         const { vehicle, trip, member } = dotCard;
         const row = (label: string, value: ReactNode, tone = "text-gray-700") => (
@@ -2174,8 +2169,8 @@ export default function VehiclePlanning() {
           <>
             <div className="fixed inset-0 z-40" onClick={() => setDotCard(null)} />
             <div
-              className="fixed z-50 max-h-[80vh] w-80 overflow-y-auto rounded-lg border border-gray-200 bg-white p-3 text-xs shadow-xl"
-              style={{ left: Math.max(8, Math.min(dotCard.x - 160, window.innerWidth - 328)), top: Math.max(8, Math.min(dotCard.y + 8, window.innerHeight - 420)) }}
+              className="fixed z-50 max-h-[calc(100vh-16px)] w-[22rem] max-w-[calc(100vw-16px)] overflow-y-auto rounded-lg border border-gray-200 bg-white p-3 text-xs shadow-xl"
+              style={{ left: Math.max(8, Math.min(dotCard.x - 176, window.innerWidth - 368)), top: Math.max(8, Math.min(dotCard.y + 8, window.innerHeight - 560)) }}
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -2210,13 +2205,162 @@ export default function VehiclePlanning() {
               )}
               {trip.lockedReason && <div className="mt-2 rounded bg-gray-50 px-2 py-1.5 text-[11px] text-gray-600">{trip.lockedReason}</div>}
               {trip.notionNote && <div className="mt-2 rounded bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">Notion not updated. {trip.notionNote}</div>}
-              <div className="mt-3 flex justify-end">
-                <Button size="sm" variant="outline" className="h-7 px-3 text-xs" onClick={() => { setDotCard(null); setTripTarget({ vehicle, trip }); }}>Details and actions</Button>
-              </div>
+              {canWrite && (() => {
+                // Every action of this trip, right here (no second popup). A button first closes the card, then runs (asking "are you sure?" where it changes something).
+                const v = vehicle, tr = trip;
+                const inConflict = (v.conflicts ?? []).find((c) => c.orderNumber === tr.orderNumber);
+                const blocker = inConflict ? v.trips?.find((x) => x.orderNumber === inConflict.withOrderNumber) : undefined;
+                const live = !tr.arrivedOn && tr.state !== "closed" && tr.state !== "cancelled";
+                const go = (fn: () => void) => () => { setDotCard(null); fn(); };
+                const btn = "h-7 px-2.5 text-xs";
+                return (
+                  <div className="mt-3 space-y-2 border-t border-gray-200 pt-2.5">
+                    {inConflict && (
+                      <div className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-[11px] text-red-700">
+                        <div className="flex items-start gap-1.5">
+                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          <span>Vehicle not back yet: order #{inConflict.withOrderNumber} keeps it until {dayLabel(inConflict.withLastBusyDay)}, but this order starts {dayLabel(inConflict.startDay)}.</span>
+                        </div>
+                        <Button size="sm" className="mt-1.5 h-7 bg-red-600 px-2.5 text-xs hover:bg-red-700" onClick={go(() => setResolveVehicleId(v.id))}>Resolve conflict</Button>
+                      </div>
+                    )}
+                    {!inConflict && tr.conflictAcceptedWith && (
+                      <div className="flex items-center justify-between gap-2 rounded-md border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-[11px] text-gray-600">
+                        <span>Clash with #{tr.conflictAcceptedWith} accepted as it is{tr.conflictAcceptedByName ? ` by ${tr.conflictAcceptedByName}` : ""}.</span>
+                        <Button size="sm" variant="outline" className="h-6 shrink-0 px-2 text-[11px]" disabled={acceptMutation.isPending}
+                          onClick={() => acceptMutation.mutate({ vehicleId: v.id, orderNumber: tr.orderNumber, withOrderNumber: tr.conflictAcceptedWith!, undo: true })}>Show it again</Button>
+                      </div>
+                    )}
+                    {tr.notionNote && (
+                      <Button size="sm" variant="outline" className={btn} disabled={retryNotionMutation.isPending} onClick={() => retryNotionMutation.mutate(tr.orderNumber)}>
+                        {retryNotionMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Retry the Notion update"}
+                      </Button>
+                    )}
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Actions</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {live && tr.state !== "planned" && (
+                        <Button size="sm" className={btn} disabled={arrivalMutation.isPending} onClick={go(() => arriveToday(v, tr))}>
+                          <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Mark available
+                        </Button>
+                      )}
+                      {!tr.arrivedOn && (tr.state === "on_trip" || tr.state === "planned" || tr.state === "awaiting") && (
+                        <Button size="sm" variant="outline" className={btn} onClick={go(() => openAddSlip(v))}>Add slip</Button>
+                      )}
+                      {!tr.arrivedOn && (tr.state === "on_trip" || tr.state === "awaiting" || tr.state === "planned" || (tr.state === "closed" && tr.assumed && isoDayDiff(tr.lastBusyDay, isoOf(new Date())) <= 7)) && (
+                        <Button size="sm" variant="outline" className={btn} onClick={go(() => openExtend(v, tr))}>{tr.state === "closed" ? "Extend (still out)" : "Extend"}</Button>
+                      )}
+                      {live && !tr.notInSystem && (
+                        <Button size="sm" variant="outline" className={btn} onClick={go(() => setChangeTarget({ vehicle: v, trip: tr }))}>Change</Button>
+                      )}
+                      {live && (
+                        <Button size="sm" variant="outline" className={`${btn} border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700`} disabled={!!tr.lockedReason} title={tr.lockedReason ?? undefined}
+                          onClick={go(() => openFree(v, [tr]))}>Remove</Button>
+                      )}
+                      {tr.arrivedOn && (
+                        <Button size="sm" variant="outline" className={btn} disabled={arrivalMutation.isPending} onClick={go(() => askConfirm({
+                          title: "Undo the arrival?", message: `Order #${tr.orderNumber} goes back to being out on the road for ${v.vehicleNumber}.`, confirmLabel: "Yes, undo",
+                          run: () => arrivalMutation.mutate({ vehicleId: v.id, orderNumber: tr.orderNumber, undo: true }),
+                        }))}>
+                          <Undo2 className="mr-1 h-3.5 w-3.5" /> Undo arrival
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </>
         );
       })()}
+
+      {/* Resolve conflict: every way to fix the clashes of one vehicle, in one place. Each button closes this box and then asks "are you sure?". */}
+      <Dialog open={resolveVehicleId != null} onOpenChange={(open) => { if (!open) setResolveVehicleId(null); }}>
+        <DialogContent className="sm:max-w-xl max-w-[calc(100vw-1rem)] overflow-x-hidden [&>*]:min-w-0">
+          {resolveVehicleId != null && (() => {
+            const v = allVehicles.find((x) => x.id === resolveVehicleId);
+            if (!v) return null;
+            const list = v.conflicts ?? [];
+            const closeThen = (fn: () => void) => () => { setResolveVehicleId(null); fn(); };
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-1.5"><AlertTriangle className="h-4 w-4 text-red-600" /> Resolve conflict · {v.vehicleNumber}</DialogTitle>
+                  <DialogDescription>Orders that start while the vehicle is still out on an earlier one. Choose how each one is fixed.</DialogDescription>
+                </DialogHeader>
+                {list.length === 0 ? (
+                  <p className="rounded-lg border border-dashed border-gray-200 py-5 text-center text-sm text-gray-500">No conflicts on this vehicle.</p>
+                ) : (
+                  <div className="max-h-[55vh] space-y-3 overflow-y-auto">
+                    {list.length > 1 && canWrite && (
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+                        <span>Is it one truck carrying all of them?</span>
+                        <Button size="sm" variant="outline" className="h-7 shrink-0 border-sky-300 bg-white px-2.5 text-xs" disabled={mergeMutation.isPending}
+                          onClick={closeThen(() => {
+                            const nos = Array.from(new Set(list.flatMap((c) => [c.withOrderNumber, c.orderNumber])));
+                            askConfirm({
+                              title: "Make the clashing orders one trip?",
+                              message: `Orders ${nos.map((n) => `#${n}`).join(", ")} on ${v.vehicleNumber} become one shared load (one truck, several parties). Do this only if they really ride the same truck.`,
+                              confirmLabel: "Yes, make one trip",
+                              run: () => mergeMutation.mutate({ vehicleId: v.id, pairs: list.map((c) => ({ orderNumber: c.orderNumber, withOrderNumber: c.withOrderNumber })) }),
+                            });
+                          })}>Make all {new Set(list.flatMap((c) => [c.withOrderNumber, c.orderNumber])).size} one trip</Button>
+                      </div>
+                    )}
+                    {list.map((c) => {
+                      const later = v.trips?.find((x) => x.orderNumber === c.orderNumber);
+                      const earlier = v.trips?.find((x) => x.orderNumber === c.withOrderNumber);
+                      const canMarkEarlier = !!earlier && !earlier.arrivedOn && (earlier.state === "on_trip" || earlier.state === "awaiting");
+                      const btn = "h-7 px-2.5 text-xs";
+                      return (
+                        <div key={`${c.orderNumber}-${c.withOrderNumber}`} className="space-y-2 rounded-lg border border-red-200 bg-red-50/50 px-3 py-2.5">
+                          <div className="text-xs text-gray-800">
+                            <span className="font-semibold">#{c.orderNumber}</span>{later?.partyName ? ` (${later.partyName})` : ""} starts {dayLabel(c.startDay)},
+                            but <span className="font-semibold">#{c.withOrderNumber}</span>{earlier?.partyName ? ` (${earlier.partyName})` : ""} keeps the vehicle until {dayLabel(c.withLastBusyDay)}.
+                          </div>
+                          {canWrite ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              <Button size="sm" className={`${btn} bg-sky-700 hover:bg-sky-800`} disabled={mergeMutation.isPending} title="They ride one truck: make them one shared load"
+                                onClick={closeThen(() => askConfirm({
+                                  title: "Make them one trip?",
+                                  message: `Order #${c.orderNumber} and order #${c.withOrderNumber} become one shared load on ${v.vehicleNumber}. The vehicle is free when the last of them is done.`,
+                                  confirmLabel: "Yes, make one trip",
+                                  run: () => mergeMutation.mutate({ vehicleId: v.id, pairs: [{ orderNumber: c.orderNumber, withOrderNumber: c.withOrderNumber }] }),
+                                }))}>Make one trip</Button>
+                              {canMarkEarlier && (
+                                <Button size="sm" variant="outline" className={btn} title="The earlier order came back: free the vehicle now" onClick={closeThen(() => arriveToday(v, earlier!))}>Mark #{c.withOrderNumber} available</Button>
+                              )}
+                              {later && (
+                                <Button size="sm" variant="outline" className={`${btn} border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700`} disabled={!!later.lockedReason} title={later.lockedReason ?? `Take ${v.vehicleNumber} off order #${c.orderNumber}`}
+                                  onClick={closeThen(() => openFree(v, [later]))}>Remove #{c.orderNumber}</Button>
+                              )}
+                              <Button size="sm" variant="outline" className={btn} disabled={acceptMutation.isPending} title="Keep both as they are and hide the red flag"
+                                onClick={closeThen(() => askConfirm({
+                                  title: "Accept the conflict as it is?",
+                                  message: `Both #${c.orderNumber} and #${c.withOrderNumber} stay on ${v.vehicleNumber}. The red flag is hidden for this clash; you can show it again from the order's card.`,
+                                  confirmLabel: "Yes, accept it",
+                                  run: () => acceptMutation.mutate({ vehicleId: v.id, orderNumber: c.orderNumber, withOrderNumber: c.withOrderNumber }),
+                                }))}>Accept as it is</Button>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                    <ul className="space-y-0.5 px-1 text-[11px] text-gray-500">
+                      <li><strong>Make one trip</strong> - one truck, several parties (a shared load).</li>
+                      <li><strong>Mark available</strong> - the earlier order is already back, so the vehicle is free.</li>
+                      <li><strong>Remove</strong> - the order was put on this vehicle by mistake.</li>
+                      <li><strong>Accept as it is</strong> - you know about it; keep both and hide the red flag.</li>
+                    </ul>
+                  </div>
+                )}
+                <DialogFooter className="gap-2 sm:gap-2">
+                  <Button variant="outline" onClick={() => setResolveVehicleId(null)}>Close</Button>
+                </DialogFooter>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
 
       {/* The one "are you sure?" box (Mark available, Assign, Add to trip, Move, Driver, Status, Delete note, Undo). Opened last, so it sits on top of the box that asked. */}
       <Dialog open={!!confirmAsk} onOpenChange={(open) => { if (!open) setConfirmAsk(null); }}>
@@ -2275,6 +2419,12 @@ export default function VehiclePlanning() {
                         )}
                         {av.extendTrip && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openExtend(sv, av.extendTrip!); }}>Extend</Button>}
                         {!av.blocked && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openAssign(sv, av.day); }}>Assign an order</Button>}
+                        {canAddSlip(sv) && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openAddSlip(sv); }}>Add slip</Button>}
+                        {(sv.conflicts?.length ?? 0) > 0 && (
+                          <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={() => { setStatusTarget(null); setResolveVehicleId(sv.id); }}>
+                            Resolve conflict{(sv.conflicts?.length ?? 0) > 1 ? `s (${sv.conflicts!.length})` : ""}
+                          </Button>
+                        )}
                         {at.live.length > 0 && (
                           <Button size="sm" variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700" disabled={allLocked}
                             title={allLocked ? at.live[0].lockedReason ?? undefined : `Remove ${sv.vehicleNumber} from an order it was assigned to by mistake - the order goes back to "no vehicle"`}

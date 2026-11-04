@@ -952,7 +952,7 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
     let lastPlant: string | null = null;
     let upcoming: { orderNumber: string; startDay: string }[] = [];
     // The trips this vehicle is busy with (not arrived): a free order dated inside one of them can ride along as a shared load.
-    let busyTrips: { orderNumber: string; partyName: string | null; startDay: string; freeFromDay: string }[] = [];
+    let busyTrips: { orderNumber: string; partyName: string | null; startDay: string; lastBusyDay: string; freeFromDay: string }[] = [];
     if (vehicleId) {
       const vt = computeVehicleTrips(await loadHistory(vehicleId));
       freeFrom = vt.freeFrom;
@@ -963,10 +963,12 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
       lastPlant = latest?.plant ?? null;
       upcoming = live.filter((t) => t.state === 'planned' || t.state === 'on_trip').map((t) => ({ orderNumber: t.orderNumber, startDay: t.startDay }));
       busyTrips = live.filter((t) => !t.arrivedOn && (t.state === 'planned' || t.state === 'on_trip' || t.state === 'awaiting'))
-        .map((t) => ({ orderNumber: t.orderNumber, partyName: t.members.map((m) => m.partyName).filter(Boolean).join(' + ') || null, startDay: t.startDay, freeFromDay: t.freeFromDay }));
+        .map((t) => ({ orderNumber: t.orderNumber, partyName: t.members.map((m) => m.partyName).filter(Boolean).join(' + ') || null, startDay: t.startDay, lastBusyDay: t.lastBusyDay, freeFromDay: t.freeFromDay }));
       if (!lastDriver) lastDriver = (await storage.getVehicleInfo(vehicleId))?.driver ?? null;
     }
-    const defaultDate = freeFrom && freeFrom > today ? freeFrom : today;
+    // Add slip (mode=slip): any day can be looked at, so the date opens on today; the orders also carry an estimate of their trip days.
+    const slipMode = req.query.mode === 'slip';
+    const defaultDate = !slipMode && freeFrom && freeFrom > today ? freeFrom : today;
     const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : defaultDate;
     const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
     const params: any[] = [date];
@@ -984,10 +986,18 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
        LIMIT 200`,
       params,
     );
-    const orders = rows.map((o: any) => ({ ...o, beforeFree: !!freeFrom && dayOf(o.orderDate) < freeFrom }));
+    const orders: any[] = rows.map((o: any) => ({ ...o, beforeFree: !!freeFrom && dayOf(o.orderDate) < freeFrom }));
+    if (slipMode) {
+      const guess = new Map<string, number>();
+      for (const o of orders) {
+        const key = String(o.partyName ?? '').toLowerCase();
+        if (!guess.has(key)) guess.set(key, (await partyEarlierTripDays(o.partyName)) ?? 1);
+        o.tripDaysGuess = guess.get(key);
+      }
+    }
 
     let suggestions: any[] = [];
-    if (vehicleId) {
+    if (vehicleId && !slipMode) {
       const from = defaultDate;
       const to = addDays(from, 7);
       const { rows: cand } = await pool.query(
@@ -1036,7 +1046,7 @@ router.get('/vehicle-planning/available-orders', requirePageAccess('vehicle-plan
       }
     }
     res.json({
-      orders, date, sharable,
+      orders, date, sharable, joinTrips: busyTrips,
       vehicle: vehicleId ? { freeFrom, busyUntil: freeFrom ? addDays(freeFrom, -1) : null, busyOrder, lastDriver, lastPlant } : null,
       suggestions,
     });
@@ -1149,6 +1159,12 @@ async function performAssign(inp: AssignInput, actor: AssignActor): Promise<{ st
     const target = computeVehicleTrips(others).trips.find((t) => t.orderNumber === joinPrimary);
     const alreadyMember = history.find((e) => e.orderNumber === orderNumber)?.sameTripAs === joinPrimary;
     if (!alreadyMember && target && (target.state === 'arrived' || target.state === 'closed')) return fail(409, { message: `That trip has already arrived, so another order cannot join it.` });
+    // A slip joins a trip when it starts between the trip's first and last day (its own trip days then count, and the trip stretches to cover them). A slip that
+    // starts after the trip is a NEW trip: Assign. (Moving a whole shared trip to another vehicle is exempt.)
+    if (!alreadyMember && target && orderDay && !inp.move) {
+      if (orderDay < target.startDay) return fail(409, { message: `Order #${orderNumber} starts ${toDmy(orderDay)}, before this trip starts (${toDmy(target.startDay)}). Use Assign for a new trip.` });
+      if (orderDay > target.lastBusyDay) return fail(409, { code: 'AFTER_TRIP', message: `Order #${orderNumber} starts ${toDmy(orderDay)}, after this trip ends (${toDmy(target.lastBusyDay)}). Use Assign for a new trip.` });
+    }
   }
 
   // 1. The date rule: an order cannot start before the vehicle is back. An admin may still do it, after confirming.
@@ -1221,6 +1237,18 @@ async function performAssign(inp: AssignInput, actor: AssignActor): Promise<{ st
     actualCompletedAt: existing?.actualCompletedAt ?? null,
     ...(joinPrimary ? { sameTripAs: joinPrimary } : {}),
   });
+  // A trip whose end was set by hand (Extend) and is shorter than this slip's own last day moves out to the slip's end, or the slip would be cut short.
+  let stretchedTo: string | null = null;
+  if (joinPrimary && start) {
+    const slipEnd = addDays(start, tripDays - 1);
+    const h2 = await loadHistory(vehicle.id);
+    const group = groupEntries(h2, joinPrimary);
+    if (group.some((g) => g.expectedEnd && g.expectedEnd < slipEnd)) {
+      for (const g of group) if (g.expectedEnd) { g.expectedEnd = slipEnd; g.expectedEndReason = `Order #${orderNumber} was added to the trip`; }
+      await saveHistory(vehicle.id, h2);
+      stretchedTo = slipEnd;
+    }
+  }
 
   // 4. Notion - "Vehi  No. :" and "Driver :" are RELATIONS (to the vehicle's / driver's own Notion page). Compare, write, read back, retry every 2 minutes
   // up to 5 tries (see notionOrderStatusSync.ts). The slip above already holds the assignment, so a Notion hiccup is reported, not thrown.
@@ -1244,7 +1272,7 @@ async function performAssign(inp: AssignInput, actor: AssignActor): Promise<{ st
   }
 
   const after = tripsView(await loadHistory(vehicle.id));
-  return { status: 200, body: { slip: updated, notion: notionOutcome, tripDays, tripDaysSource, early, sharedWith: joinPrimary, ...after } };
+  return { status: 200, body: { slip: updated, notion: notionOutcome, tripDays, tripDaysSource, early, sharedWith: joinPrimary, stretchedTo, ...after } };
 }
 
 // POST /api/vehicle-planning/assign - body { orderNumber, vehicleId, driverName?, driverPageId?, force?, sameTripAs? }
@@ -1357,6 +1385,75 @@ router.post('/vehicle-planning/trips/driver', requirePageWrite('vehicle-planning
 
 // POST /api/vehicle-planning/trips/remove-vehicle - body { vehicleId, orderNumber }: this ONE order goes back to "no vehicle" (the other orders of a shared trip stay).
 // The vehicle AND the driver are cleared on our slip and in Notion, and the order leaves the vehicle's history.
+// POST /api/vehicle-planning/trips/merge - body { vehicleId, pairs: [{ orderNumber, withOrderNumber }] }: orders that sit on one vehicle as separate trips (so they clash)
+// are made ONE trip, a shared load. Only the order history of this vehicle changes ("same trip as"); the slips and Notion are not touched, so it also works for orders
+// that exist only in Notion. A Refresh from Notion keeps the grouping.
+router.post('/vehicle-planning/trips/merge', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const vehicleId = Number(req.body?.vehicleId);
+    const pairs: { orderNumber: string; withOrderNumber: string }[] = (Array.isArray(req.body?.pairs) ? req.body.pairs : [])
+      .map((p: any) => ({ orderNumber: String(p?.orderNumber ?? '').trim(), withOrderNumber: String(p?.withOrderNumber ?? '').trim() }))
+      .filter((p: any) => p.orderNumber && p.withOrderNumber && p.orderNumber !== p.withOrderNumber);
+    if (!vehicleId || pairs.length === 0 || pairs.length > 20) return res.status(400).json({ message: 'vehicleId and the orders to join are required' });
+    const { history } = await loadTrip(vehicleId, '');
+    const joined: string[] = [];
+    for (const p of pairs) {
+      const a = history.find((e) => e.orderNumber === p.orderNumber);
+      const b = history.find((e) => e.orderNumber === p.withOrderNumber);
+      if (!a || !b) return res.status(404).json({ message: `Order #${!a ? p.orderNumber : p.withOrderNumber} is not on this vehicle.` });
+      const primary = groupPrimaryOf(history, p.withOrderNumber);
+      const own = groupPrimaryOf(history, p.orderNumber);
+      if (own === primary) continue;   // already one trip
+      // The order must stand alone or be the head of its own trip (then that whole trip joins); one that rides another trip is taken out of it first.
+      if (a.sameTripAs && history.some((x) => x.orderNumber === a.sameTripAs)) return res.status(409).json({ message: `Order #${p.orderNumber} already shares a trip with #${a.sameTripAs}. Take it out of that trip first.` });
+      const trips = computeVehicleTrips(history).trips;
+      for (const key of [own, primary]) {
+        const tr = trips.find((x) => x.orderNumber === key);
+        if (tr && (tr.state === 'arrived' || tr.state === 'closed' || tr.state === 'cancelled')) return res.status(409).json({ message: `The trip of order #${key} is already over, so it cannot be joined.` });
+      }
+      a.sameTripAs = primary;
+      joined.push(`#${p.orderNumber} -> #${primary}`);
+    }
+    if (joined.length === 0) return res.json({ ...tripsView(history), joined: 0 });
+    await saveHistory(vehicleId, history);
+    const { userCode, userName } = who(req);
+    const vehicle = await storage.getVehicleInfo(vehicleId);
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: pairs[0].orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId}: orders made one trip (shared load) by ${userName ?? userCode}: ${joined.join(', ')}`, userCode, userName });
+    res.json({ ...tripsView(history), joined: joined.length });
+  } catch (error) {
+    console.error('Error making the orders one trip:', error);
+    res.status(500).json({ message: 'Failed to make the orders one trip' });
+  }
+});
+
+// POST /api/vehicle-planning/trips/accept-conflict - body { vehicleId, orderNumber, withOrderNumber, undo? }: a person looked at the clash of `orderNumber` with the earlier
+// order `withOrderNumber` and accepts it as it is. Both orders stay on the vehicle; the red flag (and the Conflicts count) is hidden for that pair. { undo: true } shows it again.
+router.post('/vehicle-planning/trips/accept-conflict', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
+  try {
+    const vehicleId = Number(req.body?.vehicleId);
+    const orderNumber = String(req.body?.orderNumber ?? '').trim();
+    const withOrderNumber = String(req.body?.withOrderNumber ?? '').trim();
+    if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
+    const { history, entry } = await loadTrip(vehicleId, orderNumber);
+    if (!entry) return res.status(404).json({ message: 'That order is not on this vehicle.' });
+    const { userCode, userName } = who(req);
+    const vehicle = await storage.getVehicleInfo(vehicleId);
+    if (req.body?.undo === true) {
+      entry.conflictAcceptedWith = null; entry.conflictAcceptedByName = null;
+    } else {
+      const clash = computeVehicleTrips(history).conflicts.find((c) => c.orderNumber === orderNumber && c.withOrderNumber === withOrderNumber);
+      if (!clash) return res.status(409).json({ message: `Order #${orderNumber} does not clash with #${withOrderNumber} (any more).` });
+      entry.conflictAcceptedWith = withOrderNumber; entry.conflictAcceptedByName = userName ?? userCode ?? null;
+    }
+    await saveHistory(vehicleId, history);
+    if (userCode) await storage.logActivity({ pageName: 'Vehicle Planning', action: 'update', entityType: 'vehicle_trip', entityId: orderNumber, details: `${vehicle?.vehicleNumber ?? vehicleId}: the clash of order #${orderNumber} with #${withOrderNumber} ${req.body?.undo === true ? 'is shown again' : 'was accepted as it is'} by ${userName ?? userCode}`, userCode, userName });
+    res.json(tripsView(history));
+  } catch (error) {
+    console.error('Error accepting the conflict:', error);
+    res.status(500).json({ message: 'Failed to save' });
+  }
+});
+
 router.post('/vehicle-planning/trips/remove-vehicle', requirePageWrite('vehicle-planning'), async (req: Request, res: Response) => {
   try {
     const vehicleId = Number(req.body?.vehicleId);

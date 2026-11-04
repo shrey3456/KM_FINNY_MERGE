@@ -1104,6 +1104,9 @@ export type VehiclePlanningOrderEntry = {
   expectedEndAt?: string | null;
   // Why the planner stretched the trip (required when the end moves later); cleared when the end goes back to the plan.
   expectedEndReason?: string | null;
+  // A person looked at a clash with an earlier order on this vehicle and accepted it as it is: the earlier order's number. The red flag stays hidden for that pair.
+  conflictAcceptedWith?: string | null;
+  conflictAcceptedByName?: string | null;
   // The driver's Notion page (the "Driver :" relation), set when the planner picks a driver on Assign / Change.
   driverNotionId?: string | null;
   // Set when the last push to Notion did not go through (the page shows "Notion not updated" and a Retry button); cleared when it does.
