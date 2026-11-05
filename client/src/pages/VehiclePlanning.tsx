@@ -164,6 +164,12 @@ function isAvailableOn(v: VehicleRow, day: string): boolean {
 }
 
 const OTHER_STATUS = "Other";
+// A party name is written "Party - Location": the cell shows the location (the text after the last dash); a name without a dash is shown whole.
+const placeOf = (name: string | null | undefined) => {
+  const n = (name ?? "").trim();
+  const i = n.search(/\s[-–—]\s[^-–—]*$/);
+  return i >= 0 ? n.slice(i).replace(/^\s[-–—]\s/, "").trim() || n : n || "—";
+};
 const MANUAL_STATUSES = ["Gone for passing", "Parking maintenance", "Road maintenance", "Showroom maintenance", "Breakdown"] as const;
 const STATUS_TONES: Record<string, string> = {
   "Gone for passing": "bg-indigo-100 text-indigo-800", "Parcing": "bg-indigo-100 text-indigo-800", "Parking": "bg-slate-100 text-slate-700", "Parking maintenance": "bg-orange-100 text-orange-800", "Road maintenance": "bg-orange-100 text-orange-800",
@@ -398,6 +404,7 @@ export default function VehiclePlanning() {
   // The Status box of one vehicle (availability actions + a status set here: parking, maintenance, breakdown ...).
   const [statusTarget, setStatusTarget] = useState<VehicleRow | null>(null);
   const [stPick, setStPick] = useState("");
+  const [statusTab, setStatusTab] = useState<"actions" | "set">("actions");   // the tab of the status box
   const [stOther, setStOther] = useState("");   // the typed status when "Other" is picked
   const [stDays, setStDays] = useState("");
   const [stFrom, setStFrom] = useState("");   // the day the vehicle is available again (today + days)
@@ -1141,7 +1148,7 @@ export default function VehiclePlanning() {
   }
   function openStatus(v: VehicleRow) {
     const n = v.manualStatus?.blocks ? Math.max(1, v.manualStatus.daysLeft ?? 1) : 0;
-    setStatusTarget(v); { const cur = v.manualStatus?.status ?? ""; const custom = !!cur && !(MANUAL_STATUSES as readonly string[]).includes(cur); setStPick(custom ? OTHER_STATUS : cur); setStOther(custom ? cur : ""); } setStComment(v.manualStatus?.comment ?? "");
+    setStatusTarget(v); setStatusTab("actions"); { const cur = v.manualStatus?.status ?? ""; const custom = !!cur && !(MANUAL_STATUSES as readonly string[]).includes(cur); setStPick(custom ? OTHER_STATUS : cur); setStOther(custom ? cur : ""); } setStComment(v.manualStatus?.comment ?? "");
     setStDays(n ? String(n) : ""); setStFrom(n ? format(addDays(new Date(), n), "yyyy-MM-dd") : "");
   }
   // Days and the "available again" date are one setting: changing either updates the other (days counted from today).
@@ -1758,7 +1765,7 @@ export default function VehiclePlanning() {
                                   return showName ? (
                                     <div key={dotKey} className="flex w-full min-w-0 items-center gap-1 px-1">
                                       {dot}
-                                      <span className="min-w-0 truncate text-[9px] font-medium leading-none text-gray-800" title={dd.member.partyName ?? undefined}>{dd.member.partyName ?? "—"}</span>
+                                      <span className="min-w-0 truncate text-[9px] font-medium leading-none text-gray-800" title={dd.member.partyName ?? undefined}>{placeOf(dd.member.partyName)}</span>
                                     </div>
                                   ) : dot;
                                 })}
@@ -1794,7 +1801,7 @@ export default function VehiclePlanning() {
                             const under = document.elementsFromPoint(e.clientX, e.clientY).find((n) => n !== e.currentTarget && (n as HTMLElement).closest?.("[data-cell]"));
                             (under as HTMLElement | undefined)?.closest<HTMLElement>("[data-cell]")?.click();
                           }}>
-                          {barLabel(l.trip, spanDays)}
+                          {l.trip.members.length <= 1 ? placeOf(l.trip.partyName) : l.trip.members.map((m) => placeOf(m.partyName)).join(" + ")}
                         </div>
                       );
                     })}
@@ -2401,7 +2408,17 @@ export default function VehiclePlanning() {
                     <p className="text-xs text-gray-500">{sv.volume != null ? `Volume ${sv.volume}` : ""}{sv.bodyType ? `${sv.volume != null ? " · " : ""}Body type ${sv.bodyType}` : ""}</p>
                   )}
                 </DialogHeader>
-                {canWrite && (() => {
+                {canWrite && (
+                  <div className="flex gap-1 border-b border-gray-200" role="tablist">
+                    {([["actions", "Status"], ["set", "Set status"]] as const).map(([k, label]) => (
+                      <button key={k} type="button" role="tab" aria-selected={statusTab === k} onClick={() => setStatusTab(k)}
+                        className={`-mb-px border-b-2 px-3 py-1.5 text-xs font-semibold ${statusTab === k ? "border-[#001d6e] text-[#001d6e]" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {canWrite && statusTab === "actions" && (() => {
                   // Every action of the vehicle, by what it is doing: Remove (take it off an order), Mark available (it came back today), Extend (the trip runs longer), Assign (give it an order).
                   const freeable = at.live.filter((x) => !x.lockedReason);
                   const allLocked = at.live.length > 0 && freeable.length === 0;
@@ -2437,7 +2454,8 @@ export default function VehiclePlanning() {
                     </div>
                   );
                 })()}
-                {canWrite ? (
+                {canWrite ? (<>
+                {statusTab === "set" && (
                   <div className="space-y-2.5">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Set a status</div>
                     <div className="flex flex-wrap gap-1.5">
@@ -2451,6 +2469,12 @@ export default function VehiclePlanning() {
                     {stPick === OTHER_STATUS && (
                       <Input value={stOther} onChange={(e) => setStOther(e.target.value)} maxLength={40} placeholder="Type the status (for example: Tyre change)" className="h-8 text-xs" autoFocus />
                     )}
+                  </div>
+                )}
+                {statusTab === "actions" && (
+                  <div className="space-y-2.5">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Status duration</div>
+                    {stPick && <div className="text-xs text-gray-600">Status to set: <span className="font-semibold text-[#001d6e]">{stPick === OTHER_STATUS ? (stOther.trim() || "Other (type it in the Set status tab)") : stPick}</span></div>}
                     <div className="flex flex-wrap items-end gap-3">
                       <div className="space-y-1">
                         <label className="text-xs font-semibold text-gray-700">Days <span className="text-red-500">*</span></label>
@@ -2466,6 +2490,8 @@ export default function VehiclePlanning() {
                     <Textarea value={stComment} onChange={(e) => setStComment(e.target.value)} maxLength={300} rows={2} placeholder="Comment (for example: gearbox repair at the showroom)" />
                     <p className="text-[11px] text-gray-400">Only on this page. Notion is not changed.</p>
                   </div>
+                )}
+                </>
                 ) : sv.manualStatus?.comment ? (
                   <div className="whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm">{sv.manualStatus.comment}</div>
                 ) : null}
