@@ -8,6 +8,7 @@ import { applyVehiclePageFromNotionWebhook } from '../services/notionVehicleSync
 import { applyProductPageFromNotionWebhook } from '../services/notionInventorySync';
 import { isNotionStatusGuarded, isLaterStageStatus } from '../services/notionOrderStatusSync';
 import { dispatchUnlockPatch } from '../services/autoDispatch';
+import { syncVehicleVolumeForDispatchedOrder } from '../services/notionVehicleVolumeSync';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Notion webhook — Notion calls this the moment a page changes, so the app follows Notion directly
@@ -91,6 +92,9 @@ async function applyOrderStatus(page: any): Promise<string> {
      WHERE order_number = $2 AND notion_status IS DISTINCT FROM $1`,
     [status, orderNumber],
   );
+  if (String(status ?? '').trim().toUpperCase() === 'DISPATCHED') {
+    void syncVehicleVolumeForDispatchedOrder(orderNumber);
+  }
   // A change the app itself pushed to Notion comes back here as an event too — it already matches,
   // so it's simply "unchanged", which also means the two never loop.
   return rowCount ? `updated (#${orderNumber} → ${status ?? 'empty'})` : `unchanged (#${orderNumber})`;

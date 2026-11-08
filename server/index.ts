@@ -211,6 +211,23 @@ app.use((req, res, next) => {
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_volume_sync_state (
+        vehicle_id INTEGER PRIMARY KEY,
+        volume_date DATE NOT NULL,
+        volume NUMERIC NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS vehicle_volume_sync_events (
+        order_number TEXT PRIMARY KEY,
+        vehicle_id INTEGER NOT NULL,
+        volume_date DATE NOT NULL,
+        volume NUMERIC NOT NULL,
+        applied_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
     // Per-scan audit trail for Loading's item-loading step — see loadingScanEvents' comment in
     // shared/schema.ts. Each confirmed row here is what actually takes boxes off Stock Overview.
     await pool.query(`

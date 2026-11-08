@@ -8,7 +8,7 @@ import { fetchProformaOrdersFromNotion, writeOrderToDb } from '../services/profo
 import { syncOrderToNotion, settleNotionSync, watchStatusAfterVehicleChange, type NotionSyncOutcome } from '../services/notionOrderStatusSync';
 import type { VehiclePlanningOrderEntry } from '@shared/schema';
 import { refreshVehicleSpecsFromNotion } from '../services/notionVehicleSync';
-import { computeVehicleTrips, groupEntries, groupPrimaryOf, mergeLocalTripFields, checkArrival, checkExpectedEnd, toDmy, addDays, todayIst } from '../lib/vehicleTrips';
+import { computeVehicleTrips, groupEntries, groupPrimaryOf, mergeLocalTripFields, checkArrival, checkExpectedEnd, plannedLastDayOf, toDmy, addDays, todayIst } from '../lib/vehicleTrips';
 
 // Vehicle Planning — a Gantt-style "when is each vehicle free" view over a configurable slice of
 // the fleet, so a planner can see which vehicle to assign a pending order to.
@@ -293,6 +293,7 @@ async function buildHistoryEntry(
 
   return {
     orderNumber: currentOrder.orderNumber,
+    source: 'notion',
     proformaSlipId: slip?.id ?? null,
     orderDate: currentOrder.orderDate,
     status: currentOrder.status,
@@ -321,6 +322,8 @@ async function upsertHistoryEntry(vehicleId: number, entry: VehiclePlanningOrder
   );
   const existingHistory: VehiclePlanningOrderEntry[] = rows[0]?.orderHistory ?? [];
   const previousEntry = existingHistory.find((e) => e.orderNumber === entry.orderNumber);
+  // A system assignment remains system-owned even when the next Notion refresh sees the same order.
+  if (previousEntry?.source === 'system') entry.source = 'system';
   // Once set, this never moves — it's "the sync that first saw this go terminal", not "the most
   // recent sync where it happened to still be terminal". A status that was already terminal last
   // time keeps its original observed date; one that's terminal for the first time right now gets
@@ -330,6 +333,7 @@ async function upsertHistoryEntry(vehicleId: number, entry: VehiclePlanningOrder
   } else if (TERMINAL_STATUSES.has(String(entry.status ?? '').toUpperCase())) {
     entry.actualCompletedAt = new Date().toISOString().slice(0, 10);
   }
+
   // A Refresh rebuilds the trip from Notion's data; the arrival and the stretched end a person recorded must survive it.
   mergeLocalTripFields(previousEntry, entry);
   const nextHistory = existingHistory.filter((e) => e.orderNumber !== entry.orderNumber);
@@ -346,6 +350,41 @@ async function upsertHistoryEntry(vehicleId: number, entry: VehiclePlanningOrder
       [vehicleId, JSON.stringify(nextHistory)],
     );
   }
+}
+
+// Notion can report several overlapping orders on one vehicle even when they are one shared load.
+// Only entries explicitly introduced by Notion are eligible; system assignments remain independent
+// unless the user uses the existing "Add slip" action.
+function autoGroupNotionEntries(history: VehiclePlanningOrderEntry[], syncedOrderNumbers: Set<string>): boolean {
+  const eligible = history
+    .filter((e) => e.source === 'notion' && syncedOrderNumbers.has(e.orderNumber) && String(e.status ?? '').trim().toUpperCase() !== 'CANCELLED')
+    .map((entry) => ({ entry, planned: plannedLastDayOf(entry) }))
+    .filter((x): x is { entry: VehiclePlanningOrderEntry; planned: NonNullable<ReturnType<typeof plannedLastDayOf>> } => !!x.planned)
+    .sort((a, b) => a.planned.start.localeCompare(b.planned.start) || a.entry.orderNumber.localeCompare(b.entry.orderNumber));
+  if (eligible.length < 2) return false;
+  const primary = eligible[0].entry.orderNumber;
+  let changed = false;
+  for (const item of eligible.slice(1)) {
+    if (item.entry.sameTripAs !== primary) {
+      item.entry.sameTripAs = primary;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+async function autoGroupNotionHistory(vehicleId: number, syncedOrderNumbers: Set<string>): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT order_history AS "orderHistory" FROM vehicle_planning_state WHERE vehicle_id = $1`,
+    [vehicleId],
+  );
+  const history: VehiclePlanningOrderEntry[] = rows[0]?.orderHistory ?? [];
+  if (!autoGroupNotionEntries(history, syncedOrderNumbers)) return false;
+  await pool.query(
+    `UPDATE vehicle_planning_state SET order_history = $1 WHERE vehicle_id = $2`,
+    [JSON.stringify(history), vehicleId],
+  );
+  return true;
 }
 
 // Runs `task` over `items` with at most `limit` in flight at once — plain Promise.all with no cap
@@ -371,10 +410,10 @@ let isVehiclePlanningSyncing = false;
 // matching the saved company filter, finds its current order, links it to a proforma slip that is ALREADY in our system
 // (it never creates one), and upserts the result into vehicle_planning_state. Called by the manual "Sync from Notion" button
 // and by the 24h automatic timer in server/index.ts — never by the page-load GET.
-export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number; fetchedOrders: number; specsUpdated?: number }> {
+export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number; mismatches: number; notInSystem: number; fetchedOrders: number; autoGrouped: number; specsUpdated?: number }> {
   if (isVehiclePlanningSyncing) {
     console.log('[Vehicle Planning] Sync already in progress, skipping this run');
-    return { syncedVehicles: 0, mismatches: 0, notInSystem: 0, fetchedOrders: 0 };
+    return { syncedVehicles: 0, mismatches: 0, notInSystem: 0, fetchedOrders: 0, autoGrouped: 0 };
   }
   isVehiclePlanningSyncing = true;
   console.log('[Vehicle Planning] Sync started');
@@ -408,6 +447,7 @@ export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number
     let mismatches = 0;
     let notInSystem = 0;
     let fetchedOrders = 0;
+    let autoGrouped = 0;
     for (const v of fleet) {
       const latest = !ordersSinceByVehicle && v.notionPageId ? currentOrderByVehicle?.get(v.notionPageId) ?? null : null;
       const orders: LiveOrder[] = ordersSinceByVehicle
@@ -425,6 +465,7 @@ export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number
         await upsertHistoryEntry(v.id, entry);
         fetchedOrders++;
       }
+      if (usable.length > 1 && await autoGroupNotionHistory(v.id, new Set(usable.map((o) => o.orderNumber)))) autoGrouped++;
     }
     // Every vehicle has now had its first pass.
     await pool.query(`UPDATE vehicle_planning_state SET setup_done = true WHERE vehicle_id = ANY($1::int[]) AND setup_done = false`, [fleet.map((v) => v.id)]);
@@ -433,8 +474,8 @@ export async function runVehiclePlanningSync(): Promise<{ syncedVehicles: number
     let specsUpdated = 0;
     try { const s = await refreshVehicleSpecsFromNotion(); specsUpdated = s.bodyTypeChanged + s.volumeFilled; } catch (err) { console.error('[Vehicle Planning] Could not read body type / volume from Notion:', err instanceof Error ? err.message : err); }
 
-    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${fetchedOrders} order(s) read${planningStart ? ` from ${planningStart}` : ' (latest per vehicle)'}, ${mismatches} mismatch(es), ${notInSystem} order(s) not in our system`);
-    return { syncedVehicles: fleet.length, mismatches, notInSystem, fetchedOrders, specsUpdated };
+    console.log(`[Vehicle Planning] Sync finished — ${fleet.length} vehicle(s) checked, ${fetchedOrders} order(s) read${planningStart ? ` from ${planningStart}` : ' (latest per vehicle)'}, ${autoGrouped} vehicle(s) auto-grouped, ${mismatches} mismatch(es), ${notInSystem} order(s) not in our system`);
+    return { syncedVehicles: fleet.length, mismatches, notInSystem, fetchedOrders, autoGrouped, specsUpdated };
   } finally {
     isVehiclePlanningSyncing = false;
   }
@@ -1221,6 +1262,7 @@ async function performAssign(inp: AssignInput, actor: AssignActor): Promise<{ st
   const start = dayOf(updated.orderDate);
   await upsertHistoryEntry(vehicle.id, {
     orderNumber,
+    source: 'system',
     proformaSlipId: updated.id,
     orderDate: start || null,
     status: updated.notionStatus ?? null,

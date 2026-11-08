@@ -1,6 +1,7 @@
 import { pool } from '../db';
 import { storage } from '../storage';
 import { NOTION_LOADING_COMPLETE_STATUS, syncOrderToNotion } from './notionOrderStatusSync';
+import { syncVehicleVolumeForDispatchedOrder } from './notionVehicleVolumeSync';
 
 // Auto Dispatch — a load created after this went live becomes DISPATCHED by itself once it has been Ready for Dispatch for
 // AUTO_DISPATCH_AFTER_MINUTES (default 60), counted from the moment it was marked complete. The slip is updated first (so the
@@ -88,6 +89,7 @@ export async function runAutoDispatch(): Promise<{ dispatched: number }> {
       // Best effort and retried inside syncOrderToNotion; the app already shows Dispatched whatever Notion says.
       void syncOrderToNotion(row.orderNumber, { status: NOTION_DISPATCHED_STATUS }, { userCode: null, userName: 'System' })
         .catch((err) => console.error('[Auto Dispatch] Notion update failed for', row.orderNumber, err instanceof Error ? err.message : err));
+      void syncVehicleVolumeForDispatchedOrder(row.orderNumber);
     }
     if (rows.length > 0) console.log(`[Auto Dispatch] Dispatched ${rows.length} load(s) (completed more than ${minutes} minute(s) ago)`);
     return { dispatched: rows.length };

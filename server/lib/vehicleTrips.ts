@@ -77,7 +77,7 @@ export function parseDmy(raw: string | null | undefined): string | null {
 export function toDmy(day: string): string { const [y, m, d] = day.split('-'); return `${d}/${m}/${y}`; }
 
 type Entry = Pick<VehiclePlanningOrderEntry, 'orderNumber' | 'orderDate' | 'tripDays' | 'tripCompletesOn' | 'status' | 'partyName' | 'plant' | 'driver' | 'proformaSlipId'>
-  & { notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null; freeSameDay?: boolean | null; sameTripAs?: string | null; expectedEndReason?: string | null; conflictAcceptedWith?: string | null; conflictAcceptedByName?: string | null };
+  & { source?: 'notion' | 'system'; notInSystem?: boolean; arrivedOn?: string | null; expectedEnd?: string | null; driverNotionId?: string | null; notionNote?: string | null; freeSameDay?: boolean | null; sameTripAs?: string | null; expectedEndReason?: string | null; conflictAcceptedWith?: string | null; conflictAcceptedByName?: string | null };
 
 export function plannedLastDayOf(e: Pick<Entry, 'orderDate' | 'tripDays' | 'tripCompletesOn'>): { start: string; last: string; days: number } | null {
   const start = String(e.orderDate ?? '').slice(0, 10);

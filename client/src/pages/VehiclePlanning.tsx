@@ -288,10 +288,7 @@ function DayFilterButton({ filter, onChange, title }: { filter: DayFilter | unde
           </div>
         </div>
         <div className="grid grid-cols-2 gap-x-2 gap-y-1.5">
-          {check("conflict", "Conflict (red dot)")}
           {check("extended", "Extended day")}
-          {check("note", "Has a note")}
-          {check("blocked", "Blocked (status)")}
           {check("multi", "Two or more slips")}
         </div>
         <div className="flex justify-end">
@@ -1719,7 +1716,7 @@ export default function VehiclePlanning() {
                       {/* Driver names run longer than this column is wide — wraps onto 2 lines
                           instead of cutting off with an ellipsis like every other column here. */}
                       <span className={c.key === "driver" ? "line-clamp-2 break-words leading-tight" : c.key === "orderNumber" || c.key === "tripDays" ? "" : "truncate"}>{c.value ?? "—"}</span>
-                      {c.key === "vehicleNumber" && v.volume != null && <span className="mt-0.5 block text-[11px] font-medium leading-none text-gray-500" title="Vehicle volume">Vol {v.volume}</span>}
+                      {c.key === "vehicleNumber" && v.volume != null && <span className="mt-1 block text-sm font-semibold leading-none text-gray-600" title="Vehicle volume">Vol {v.volume}</span>}
                     </div>
                   ))}
                   <div style={{ width: widthOf("status") }} className="shrink-0 cursor-pointer border-r border-gray-100 px-1.5 py-2 hover:bg-[#001d6e]/5" title={`${st.title} - click for the actions`} onClick={() => openStatus(v)}>
@@ -1764,14 +1761,14 @@ export default function VehiclePlanning() {
                                     key={dotKey}
                                     type="button"
                                     onClick={(e) => { e.stopPropagation(); setSelCell({ vehicleId: v.id, dayIso }); ganttRef.current?.focus(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.trip.members.find((m) => m.startDay <= dayIso && memberEnd(dd.trip, m) >= dayIso) ?? dd.member, dayIso, x: r.left + r.width / 2, y: r.bottom }); }}
-                                    className={`${groupedDots.length > 2 ? "h-2 w-2" : "h-3 w-3"} shrink-0 rounded-full shadow-sm ${dotClass(dd.trip.state, cellDots.some((x) => x.conflict))} ${cellDots.some((x) => x.extended) ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
+                                    className={`${groupedDots.length > 2 ? "h-3 w-3" : "h-4 w-4"} relative z-20 shrink-0 cursor-pointer rounded-full shadow-sm transition-transform hover:scale-125 ${dotClass(dd.trip.state, cellDots.some((x) => x.conflict))} ${cellDots.some((x) => x.extended) ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
                                     title={`${dd.trip.members.length} order${dd.trip.members.length === 1 ? "" : "s"} · ${dayLabel(dayIso)} · ${stateText[dd.trip.state]}`}
                                   />
                                   );
                                   return dot;
                                 })}
                                 {blockedDay && groupedDots.length === 0 && (
-                                  <span className="h-3 w-3 shrink-0 rounded-full border-2 border-red-400 bg-white" title={`${ms!.status}${ms!.comment ? ` - ${ms!.comment}` : ""}`} />
+                                  <span className="h-4 w-4 shrink-0 rounded-full border-2 border-red-400 bg-white" title={`${ms!.status}${ms!.comment ? ` - ${ms!.comment}` : ""}`} />
                                 )}
                               </div>
                               );

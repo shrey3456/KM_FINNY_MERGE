@@ -1077,6 +1077,9 @@ export type InsertVehicleInfo = z.infer<typeof insertVehicleInfoSchema>;
 
 export type VehiclePlanningOrderEntry = {
   orderNumber: string;
+  // Where this history entry was last introduced: Notion sync entries may be auto-grouped;
+  // system assignments must remain separate unless a user explicitly joins them.
+  source?: "notion" | "system";
   proformaSlipId: number | null;
   orderDate: string | null;
   status: string | null;
