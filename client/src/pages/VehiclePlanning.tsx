@@ -4,7 +4,7 @@ import Lenis from "lenis";
 import { addDays, differenceInCalendarDays, format, isSameDay, parse, startOfDay } from "date-fns";
 import {
   AlertTriangle, CalendarClock, CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft,
-  ChevronsRight, ChevronUp, DatabaseZap, Filter as FilterIcon, History, Loader2, MessageSquare, RefreshCw, RotateCcw, Search, SlidersHorizontal, Truck, Undo2, X,
+  ChevronsRight, ChevronUp, DatabaseZap, Filter as FilterIcon, History, Loader2, MessageSquare, Plus, RefreshCw, RotateCcw, Search, SlidersHorizontal, Truck, Undo2, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -131,7 +131,7 @@ const LABEL_COLS: { key: string; label: string; width: number }[] = [
 const HEADER_FILTER_IDS: Record<string, string> = {
   vehicleNumber: "vehicleNumber", rtoNumber: "rto", orderNumber: "order", state: "plantState", driver: "driver", tripDays: "tripDays", status: "status",
 };
-const ROW_MIN_HEIGHT = 64;   // label line, the dots, then the Assign / Extend buttons
+const ROW_MIN_HEIGHT = 56;   // compact label, dot, and action layout
 // px per day for the three column sizes. The board scrolls sideways when the days do not fit, so a wider column never squeezes the labels.
 const DAY_COL_MIN = 40, DAY_COL_MAX = 180, DAY_COL_DEFAULT = 90;
 // Mouse-wheel / arrow-key nudge amount — fixed, no user-facing control for it. The full-window
@@ -314,6 +314,11 @@ function slipsToday(v: VehicleRow, todayIso: string): { orderNumber: string; tri
   return v.currentOrder ? [{ orderNumber: v.currentOrder.orderNumber, tripDays: days }] : [];
 }
 function ordersToday(v: VehicleRow, todayIso: string): string[] { return slipsToday(v, todayIso).map((x) => x.orderNumber); }
+function maxTripDaysToday(v: VehicleRow, todayIso: string): number | string | null {
+  const slips = slipsToday(v, todayIso);
+  const days = slips.map((x) => x.tripDays).filter((x): x is number => x != null);
+  return days.length > 0 ? Math.max(...days) : v.tripDays;
+}
 
 function dotClass(state: TripState, conflict: boolean): string {
   if (conflict) return "bg-red-500";
@@ -340,7 +345,7 @@ function computeStatus(v: VehicleRow, todayIso: string): { label: string; tone: 
   }
   const trips = (v.trips ?? []).filter((x) => x.state !== "cancelled");
   const covering = trips.find((x) => x.startDay <= todayIso && todayIso < x.freeFromDay);
-  if (covering) return { label: "On trip", tone: "bg-emerald-100 text-emerald-800", daysText: "", title: `Free from ${fmtShort(covering.freeFromDay)}`, note: `Free from ${fmtShort(covering.freeFromDay)}` };
+  if (covering) return { label: "On trip", tone: "bg-purple-100 text-purple-600", daysText: "", title: `Free from ${fmtShort(covering.freeFromDay)}`, note: `Free from ${fmtShort(covering.freeFromDay)}` };
   const late = trips.find((x) => x.state === "awaiting");
   if (late) {
     const n = Math.max(1, isoDayDiff(late.lastBusyDay, todayIso));
@@ -410,7 +415,7 @@ export default function VehiclePlanning() {
   const [stFrom, setStFrom] = useState("");   // the day the vehicle is available again (today + days)
   const [stComment, setStComment] = useState("");
   // The card that opens when a dot is clicked: the order and party of that assignment (and a Details button for the full box).
-  const [dotCard, setDotCard] = useState<{ vehicle: VehicleRow; trip: Trip; member: TripMember; x: number; y: number } | null>(null);
+  const [dotCard, setDotCard] = useState<{ vehicle: VehicleRow; trip: Trip; member: TripMember; dayIso: string; x: number; y: number } | null>(null);
   const assignStartRef = useRef<string | null>(null);   // the day the Assign box should open on (the day the vehicle is available)
   const [stretchAsk, setStretchAsk] = useState<{ vehicle: VehicleRow; trip: Trip; newEnd: string; clashes: Trip[]; reason?: string } | null>(null);
   // Moving a trip's last day LATER first asks why (ExtendReasonDialog); the clash question, when there is one, follows. And the admin's Reset planning dialog.
@@ -1564,7 +1569,7 @@ export default function VehiclePlanning() {
           {vehicles.flatMap((v) => (v.conflicts ?? []).map((c) => ({ v, c }))).map(({ v, c }) => {
             const trip = v.trips?.find((t) => t.orderNumber === c.orderNumber);
             return (
-              <button key={`${v.id}-${c.orderNumber}`} type="button" className="block w-full text-left hover:underline" onClick={() => trip && setDotCard({ vehicle: v, trip, member: trip.members[0], x: Math.round(window.innerWidth / 2), y: 120 })}>
+              <button key={`${v.id}-${c.orderNumber}`} type="button" className="block w-full text-left hover:underline" onClick={() => trip && setDotCard({ vehicle: v, trip, member: trip.members[0], dayIso: trip.members[0].startDay, x: Math.round(window.innerWidth / 2), y: 120 })}>
                 <strong>{v.vehicleNumber}</strong>: order #{c.orderNumber} starts {dayLabel(c.startDay)}, but #{c.withOrderNumber} keeps the vehicle until {dayLabel(c.withLastBusyDay)}.
               </button>
             );
@@ -1650,11 +1655,11 @@ export default function VehiclePlanning() {
             {vehicles.map((v, rowIdx) => {
               const { byIdx, labels, extLabels, multi } = dotsFor(v);
               // Two (or more) orders on one day are stacked up and down: the row grows with the tallest stack and the Assign / Extend buttons sit below it.
-              const maxStack = Math.max(1, ...byIdx.map((c) => c.length));
-              const btnTop = Math.max(44, 28 + maxStack * 14 + (maxStack - 1) * 3 + 4);
+              const maxStack = Math.max(1, ...byIdx.map((c) => new Set(c.map((x) => x.trip.orderNumber)).size));
+              const btnTop = Math.max(36, 24 + maxStack * 12 + (maxStack - 1) * 2 + 4);
               const todayIso = isoOf(today);
               const av = computeAvailability(v, todayIso);
-              const rowH = btnTop + 26 + (canWrite && av.extendTrip ? 22 : 0);   // Assign and Extend are stacked inside the day cell, so the row is taller when both show
+              const rowH = 24 + maxStack * 12 + (maxStack - 1) * 2 + 4;
               const st = computeStatus(v, todayIso);
               // The past days with no order on them: after the vehicle's first trip, before today, not covered by any trip and not blocked by a status.
               const idleSpans = (() => {
@@ -1675,7 +1680,7 @@ export default function VehiclePlanning() {
               })();
               const stripe = rowIdx % 2 === 1;
               return (
-                <div key={v.id} className={`flex border-b border-gray-100 last:border-0 ${stripe ? "bg-slate-50/70" : "bg-white"}`}>
+                <div key={v.id} className={`flex border-b border-gray-300 last:border-0 ${stripe ? "bg-slate-50/70" : "bg-white"}`}>
                   <div className={`sticky left-0 z-20 flex shrink-0 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${stripe ? "bg-slate-50" : "bg-white"}`}>
                   {([
                     { key: "vehicleNumber", value: v.vehicleNumber, bold: true },
@@ -1692,12 +1697,12 @@ export default function VehiclePlanning() {
                       bold: false,
                     },
                     { key: "driver", value: v.driver, bold: false },
-                    { key: "tripDays", value: (() => { const sl = slipsToday(v, todayIso); return sl.length > 0 && sl.some((x) => x.tripDays != null) ? sl.map((x) => (x.tripDays != null ? String(x.tripDays) : "—")).join("\n") : v.tripDays; })(), bold: false },
+                    { key: "tripDays", value: maxTripDaysToday(v, todayIso), bold: false },
                   ] as const).map((c) => (
                     <div
                       key={c.key}
                       style={{ width: widthOf(c.key) }}
-                      className={`shrink-0 border-r border-gray-100 px-2 py-2.5 text-[11px] ${c.key === "vehicleNumber" && selCell?.vehicleId === v.id ? "shadow-[inset_4px_0_0_0_#f59e0b]" : ""} ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" || c.key === "tripDays" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" || c.key === "tripDays" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
+                      className={`shrink-0 border-r border-gray-100 px-2 ${c.key === "orderNumber" ? "py-1.5" : "py-2.5"} text-[11px] ${c.key === "vehicleNumber" && selCell?.vehicleId === v.id ? "shadow-[inset_4px_0_0_0_#f59e0b]" : ""} ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" || c.key === "tripDays" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-start gap-1 whitespace-pre-line leading-tight" : c.key === "tripDays" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
                       title={c.key === "orderNumber" ? "Click for this vehicle's order history" : c.key === "tripDays" ? (slipsToday(v, todayIso).filter((x) => x.tripDays != null).map((x) => `#${x.orderNumber}: ${x.tripDays} day${x.tripDays === 1 ? "" : "s"}`).join("\n") || undefined) : (c.value ?? undefined)}
                       onClick={c.key === "orderNumber" ? () => setHistoryTarget(v) : undefined}
                     >
@@ -1747,33 +1752,30 @@ export default function VehiclePlanning() {
                               else setSelCell({ vehicleId: v.id, dayIso });
                             }}
                           >
-                            {(cellDots.length > 0 || blockedDay) && (
-                              <div className="absolute inset-x-0 top-[28px] flex flex-col items-center justify-center gap-[3px]">
-                                {cellDots.map((dd, k) => {
-                                  const dotKey = `${dd.member.orderNumber}-${k}`;
+                            {(() => {
+                              const groupedDots = Array.from(new Map(cellDots.map((dd) => [dd.trip.orderNumber, dd])).values());
+                              return (groupedDots.length > 0 || blockedDay) && (
+                              <div className="absolute inset-x-0 top-6 flex flex-col items-start justify-center gap-0.5 px-1">
+                                {groupedDots.map((dd) => {
+                                  const dotKey = dd.trip.orderNumber;
                                   // Slips on the same days (a shared load, or two slips on one vehicle): each slip's party is written next to its own dot (on the day that slip starts).
-                                  const showName = multi.has(dd.trip) && !narrowDays && (dd.member.startDay === dayIso || (i === 0 && dd.member.startDay < dayIso));
                                   const dot = (
                                     <button
                                     key={dotKey}
                                     type="button"
-                                    onClick={(e) => { e.stopPropagation(); setSelCell({ vehicleId: v.id, dayIso }); ganttRef.current?.focus(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.member, x: r.left + r.width / 2, y: r.bottom }); }}
-                                    className={`${cellDots.length > 2 ? "h-2.5 w-2.5" : "h-3.5 w-3.5"} shrink-0 rounded-full shadow-sm ${dotClass(dd.trip.state, dd.conflict)} ${dd.extended ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
-                                    title={`#${dd.member.orderNumber} · ${dd.member.partyName ?? "—"} · ${dayLabel(dd.member.startDay)} to ${dayLabel(memberEnd(dd.trip, dd.member))} · ${dd.conflict ? "Vehicle not back yet" : stateText[dd.trip.state]}${dd.trip.notionNote ? " · Notion not updated" : ""}${dd.extended ? ` · Extended${dd.trip.expectedEndReason ? `: ${dd.trip.expectedEndReason}` : ""}` : ""}`}
+                                    onClick={(e) => { e.stopPropagation(); setSelCell({ vehicleId: v.id, dayIso }); ganttRef.current?.focus(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.trip.members.find((m) => m.startDay <= dayIso && memberEnd(dd.trip, m) >= dayIso) ?? dd.member, dayIso, x: r.left + r.width / 2, y: r.bottom }); }}
+                                    className={`${groupedDots.length > 2 ? "h-2 w-2" : "h-3 w-3"} shrink-0 rounded-full shadow-sm ${dotClass(dd.trip.state, cellDots.some((x) => x.conflict))} ${cellDots.some((x) => x.extended) ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
+                                    title={`${dd.trip.members.length} order${dd.trip.members.length === 1 ? "" : "s"} · ${dayLabel(dayIso)} · ${stateText[dd.trip.state]}`}
                                   />
                                   );
-                                  return showName ? (
-                                    <div key={dotKey} className="flex w-full min-w-0 items-center gap-1 px-1">
-                                      {dot}
-                                      <span className="min-w-0 truncate text-[9px] font-medium leading-none text-gray-800" title={dd.member.partyName ?? undefined}>{placeOf(dd.member.partyName)}</span>
-                                    </div>
-                                  ) : dot;
+                                  return dot;
                                 })}
-                                {blockedDay && cellDots.length === 0 && (
-                                  <span className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-red-400 bg-white" title={`${ms!.status}${ms!.comment ? ` - ${ms!.comment}` : ""}`} />
+                                {blockedDay && groupedDots.length === 0 && (
+                                  <span className="h-3 w-3 shrink-0 rounded-full border-2 border-red-400 bg-white" title={`${ms!.status}${ms!.comment ? ` - ${ms!.comment}` : ""}`} />
                                 )}
                               </div>
-                            )}
+                              );
+                            })()}
                             {note && (
                               <span className="pointer-events-none absolute inset-x-0.5 bottom-0.5 flex items-center gap-0.5 truncate rounded bg-amber-100 px-1 text-[9px] leading-4 text-amber-900">
                                 <MessageSquare className="h-2.5 w-2.5 shrink-0" />
@@ -1839,19 +1841,21 @@ export default function VehiclePlanning() {
                         return <span className="pointer-events-none absolute right-1 rounded bg-white/80 px-1 text-[10px] text-gray-500" style={{ top: btnTop + 2 }}>Free from {dayLabel(av.day)} →</span>;
                       }
                       const at = Math.max(0, idx);
-                      const style = at >= windowDays - 2 ? { right: 4, top: btnTop } : { left: `calc(${(at / windowDays) * 100}% + 4px)`, top: btnTop };
+                      const style = at >= windowDays - 2 ? { right: 4, top: 4 } : { left: `calc(${(at / windowDays) * 100}% + 4px)`, top: 4 };
                       return (
-                        <div className="absolute z-10 flex flex-col items-stretch gap-1" style={{ ...style, width: `max(${dayColW - 8}px, calc(${100 / windowDays}% - 8px))` }}>
+                        <div className="absolute z-10 flex flex-col items-end gap-0.5" style={{ ...style, width: `max(${dayColW - 8}px, calc(${100 / windowDays}% - 8px))` }}>
                           <button type="button" onClick={() => openAssign(v, av.day)}
-                            className="truncate rounded-md border border-emerald-300 bg-emerald-50 px-1 py-0.5 text-[11px] font-semibold leading-tight text-emerald-700 hover:bg-emerald-100"
+                            className="flex h-6 w-6 items-center justify-center rounded-md border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                            aria-label={av.day === todayIso ? "Available now - assign an order" : `Available from ${dayLabel(av.day)} - assign an order`}
                             title={av.day === todayIso ? "Available now - assign an order" : `Available from ${dayLabel(av.day)} - assign an order`}>
-                            Assign
+                            <Truck className="h-3.5 w-3.5" />
                           </button>
                           {av.extendTrip && (
                             <button type="button" onClick={() => openExtend(v, av.extendTrip!)}
-                              className="truncate rounded-md border border-amber-300 bg-white px-1 py-0.5 text-[11px] font-semibold leading-tight text-amber-800 hover:bg-amber-50"
+                              className="flex h-6 w-6 items-center justify-center rounded-md border border-amber-300 bg-white text-amber-800 hover:bg-amber-50"
+                              aria-label={`Extend order #${av.extendTrip.orderNumber}`}
                               title={`Extend order #${av.extendTrip.orderNumber} (a reason is asked)`}>
-                              Extend
+                              <Plus className="h-3.5 w-3.5" />
                             </button>
                           )}
                         </div>
@@ -2168,6 +2172,8 @@ export default function VehiclePlanning() {
       {/* A dot was clicked: the full details of that assignment (the whole party name, dates, days, status, driver ...), then every action of the trip. */}
       {dotCard && (() => {
         const { vehicle, trip, member } = dotCard;
+        const activeMembers = trip.members.filter((m) => m.startDay <= dotCard.dayIso && memberEnd(trip, m) >= dotCard.dayIso);
+        const selectedMember = activeMembers.find((m) => m.orderNumber === member.orderNumber) ?? activeMembers[0] ?? member;
         const row = (label: string, value: ReactNode, tone = "text-gray-700") => (
           <><span className="text-gray-400">{label}</span><span className={`min-w-0 break-words ${tone}`}>{value}</span></>
         );
@@ -2182,25 +2188,41 @@ export default function VehiclePlanning() {
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-sm font-semibold text-[#001d6e]">#{member.orderNumber}</span>
+                    <span className="text-sm font-semibold text-[#001d6e]">#{selectedMember.orderNumber}</span>
                     <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-700">{stateText[trip.state]}</span>
                   </div>
-                  <div className="mt-1 break-words text-sm font-semibold leading-snug text-gray-900">{member.partyName ?? "—"}</div>
+                  <div className="mt-1 break-words text-sm font-semibold leading-snug text-gray-900">{selectedMember.partyName ?? "—"}</div>
                 </div>
                 <button type="button" className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700" aria-label="Close" onClick={() => setDotCard(null)}><X className="h-4 w-4" /></button>
               </div>
+              {activeMembers.length > 1 && (
+                <div className="mt-2 flex gap-1 overflow-x-auto border-b border-gray-200 pb-1" role="tablist" aria-label="Active parties">
+                  {activeMembers.map((m) => (
+                    <button
+                      key={m.orderNumber}
+                      type="button"
+                      role="tab"
+                      aria-selected={m.orderNumber === selectedMember.orderNumber}
+                      className={`shrink-0 rounded px-2 py-1 text-[10px] font-semibold ${m.orderNumber === selectedMember.orderNumber ? "bg-[#001d6e] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+                      onClick={() => setDotCard((current) => current ? { ...current, member: m } : current)}
+                    >
+                      #{m.orderNumber}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="mt-2.5 grid grid-cols-[6.5rem,1fr] gap-x-3 gap-y-1">
                 {row("Vehicle", vehicle.vehicleNumber ?? "—")}
-                {row("Plant", `${member.plant ?? "—"}${vehicle.state ? `, ${vehicle.state}` : ""}`)}
-                {row("Order date", member.startDay ? dayLabel(member.startDay) : "—")}
-                {row("Trip days", `${member.tripDays} day${member.tripDays === 1 ? "" : "s"}`)}
-                {row("Planned last day", dayLabel(member.plannedLastDay))}
+                {row("Plant", `${selectedMember.plant ?? "—"}${vehicle.state ? `, ${vehicle.state}` : ""}`)}
+                {row("Order date", selectedMember.startDay ? dayLabel(selectedMember.startDay) : "—")}
+                {row("Trip days", `${selectedMember.tripDays} day${selectedMember.tripDays === 1 ? "" : "s"}`)}
+                {row("Planned last day", dayLabel(selectedMember.plannedLastDay))}
                 {extended && row("Extended to", `${dayLabel(trip.expectedEnd!)}${trip.expectedEndReason ? ` · ${trip.expectedEndReason}` : ""}`, "font-medium text-violet-700")}
                 {trip.arrivedOn && row("Arrived on", `${dayLabel(trip.arrivedOn)}${trip.freeSameDay ? " (can go out the same day)" : ""}`, "text-emerald-700")}
                 {row("Vehicle free from", dayLabel(trip.freeFromDay))}
-                {row("Notion status", member.status ?? "—")}
-                {row("Driver", member.driver ?? trip.driver ?? "—")}
-                {row("In our system", member.notInSystem ? "No - only in Notion (no slip here)" : "Yes", member.notInSystem ? "text-amber-700" : "text-gray-700")}
+                {row("Notion status", selectedMember.status ?? "—")}
+                {row("Driver", selectedMember.driver ?? trip.driver ?? "—")}
+                {row("In our system", selectedMember.notInSystem ? "No - only in Notion (no slip here)" : "Yes", selectedMember.notInSystem ? "text-amber-700" : "text-gray-700")}
               </div>
               {trip.members.length > 1 && (
                 <div className="mt-2 rounded bg-sky-50 px-2 py-1.5 text-[11px] text-sky-900">
