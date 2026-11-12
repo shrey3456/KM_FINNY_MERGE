@@ -194,7 +194,7 @@ function dayFilterActive(f: DayFilter | undefined): boolean {
 }
 function describeDayFilter(f: DayFilter): string {
   const parts: string[] = [];
-  if (f.occupancy) parts.push(f.occupancy === "busy" ? "Busy" : "Free");
+  if (f.occupancy) parts.push(f.occupancy === "busy" ? "Busy" : "Available");
   if (f.party?.trim()) parts.push(`Party "${f.party.trim()}"`);
   if (f.order?.trim()) parts.push(`Order "${f.order.trim()}"`);
   if (f.states?.length) parts.push(f.states.map((x) => DAY_STATE_LABEL[x] ?? x).join(" / "));
@@ -264,7 +264,7 @@ function DayFilterButton({ filter, onChange, title }: { filter: DayFilter | unde
           <div className="flex gap-1.5">
             {chip(!f.occupancy, "Any", () => set({ occupancy: undefined }))}
             {chip(f.occupancy === "busy", "Busy", () => set({ occupancy: "busy" }))}
-            {chip(f.occupancy === "free", "Free", () => set({ occupancy: "free" }))}
+            {chip(f.occupancy === "free", "Available", () => set({ occupancy: "free" }))}
           </div>
         </div>
         <div className="grid grid-cols-2 gap-2">
@@ -1606,7 +1606,7 @@ export default function VehiclePlanning() {
           <div style={{ minWidth: labelTotal + windowDays * dayColW }}>
             {/* Day header — one continuous bar with date ticks, not a row of separately
                 bordered boxes (that read as "many small columns" rather than one timeline). */}
-            <div className="sticky top-0 z-30 flex border-b border-gray-200 bg-[#001d6e] text-white">
+            <div className="sticky top-0 z-40 flex border-b border-gray-200 bg-[#001d6e] text-white">
               {/* Vehicle … Trip Days stay pinned to the left while the calendar scrolls under them. */}
               <div className="sticky left-0 z-20 flex shrink-0 bg-[#001d6e] shadow-[2px_0_4px_-1px_rgba(0,0,0,0.25)]">
               {LABEL_COLS.map((c) => {
@@ -1678,7 +1678,8 @@ export default function VehiclePlanning() {
               const stripe = rowIdx % 2 === 1;
               return (
                 <div key={v.id} className={`flex border-b border-gray-300 last:border-0 ${stripe ? "bg-slate-50/70" : "bg-white"}`}>
-                  <div className={`sticky left-0 z-20 flex shrink-0 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${stripe ? "bg-slate-50" : "bg-white"}`}>
+                  {/* The pinned columns sit above the scrolling timeline (z-30 against the track's z-0), so a day scrolled underneath them can never show through. */}
+                  <div className={`sticky left-0 z-30 flex shrink-0 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.08)] ${stripe ? "bg-slate-50" : "bg-white"}`}>
                   {([
                     { key: "vehicleNumber", value: v.vehicleNumber, bold: true },
                     { key: "rtoNumber", value: v.rtoNumber, bold: false },
@@ -1724,7 +1725,8 @@ export default function VehiclePlanning() {
                     {st.daysText && <div className={`mt-0.5 truncate text-[10px] ${st.label === "Overdue" ? "font-semibold text-amber-700" : "text-gray-500"}`}>{st.daysText}</div>}
                   </div>
                   </div>
-                  <div data-track className="relative flex-1" style={{ minHeight: Math.max(ROW_MIN_HEIGHT, rowH) }}>
+                  {/* isolate: everything inside (dots, party labels, buttons) gets its own stacking context, so it stays below the pinned columns. */}
+                  <div data-track className="relative isolate z-0 flex-1" style={{ minHeight: Math.max(ROW_MIN_HEIGHT, rowH) }}>
                     {/* One continuous area. A thin, light vertical line at each day (a little firmer at the start of a week, Monday) lines the dots up
                         with the dates in the header; today keeps its faint tint. Each day a vehicle is out has one dot per order (a shared load: two). */}
                     <div className="absolute inset-0 flex">
@@ -1761,7 +1763,7 @@ export default function VehiclePlanning() {
                                     key={dotKey}
                                     type="button"
                                     onClick={(e) => { e.stopPropagation(); setSelCell({ vehicleId: v.id, dayIso }); ganttRef.current?.focus(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.trip.members.find((m) => m.startDay <= dayIso && memberEnd(dd.trip, m) >= dayIso) ?? dd.member, dayIso, x: r.left + r.width / 2, y: r.bottom }); }}
-                                    className={`${groupedDots.length > 2 ? "h-3 w-3" : "h-4 w-4"} relative z-20 shrink-0 cursor-pointer rounded-full shadow-sm transition-transform hover:scale-125 ${dotClass(dd.trip.state, cellDots.some((x) => x.conflict))} ${cellDots.some((x) => x.extended) ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
+                                    className={`${groupedDots.length > 2 ? "h-3 w-3" : "h-4 w-4"} relative z-10 shrink-0 cursor-pointer rounded-full shadow-sm transition-transform hover:scale-125 ${dotClass(dd.trip.state, cellDots.some((x) => x.conflict))} ${cellDots.some((x) => x.extended) ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
                                     title={`${dd.trip.members.length} order${dd.trip.members.length === 1 ? "" : "s"} · ${dayLabel(dayIso)} · ${stateText[dd.trip.state]}`}
                                   />
                                   );
