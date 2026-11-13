@@ -446,7 +446,9 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
     }
     if (typeof req.query.plant === 'string' && req.query.plant.trim()) {
       params.push(req.query.plant.trim());
-      conditions.push(`LOWER(s.plant) = LOWER($${params.length})`);
+      // plantBy=purchase (Overall Scan Ops): a batch belongs to its PURCHASE plant (the stock plant when it has none), so it is listed under that plant only.
+      const plantExpr = req.query.plantBy === 'purchase' ? `COALESCE(NULLIF(s.purchase_plant, ''), s.plant)` : `s.plant`;
+      conditions.push(`LOWER(${plantExpr}) = LOWER($${params.length})`);
     }
     if (typeof req.query.vehicleNumber === 'string' && req.query.vehicleNumber.trim()) {
       params.push(`%${req.query.vehicleNumber.trim()}%`);
