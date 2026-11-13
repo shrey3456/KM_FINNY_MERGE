@@ -54,25 +54,18 @@ export let sessionMiddleware: ReturnType<typeof session> | null = null;
 
 export function setupAuth(app: Express) {
   // Detect deployment environment more reliably
-  const isProduction = process.env.NODE_ENV === 'production' || 
-                      process.env.REPL_DEPLOYMENT === '1' ||
-                      process.env.REPL_SLUG !== undefined || // Replit deployment indicator
-                      process.env.REPLIT_DB_URL !== undefined; // Another deployment indicator
-  
-  // Check if we're behind a proxy that handles HTTPS (like Replit's infrastructure)
-  const isBehindHttpsProxy = process.env.REPL_SLUG !== undefined || 
-                            process.env.REPLIT_DEPLOYMENT === '1' ||
-                            process.env.HTTP_HOST?.includes('replit.') ||
-                            process.env.HTTP_HOST?.includes('repl.co');
+  const isProduction = process.env.NODE_ENV === 'production';
   
   // Use secure cookies only in true HTTPS environments
   // For development and local testing, disable secure cookies to allow HTTP
-  const useSecureCookies = isProduction && 
-                           (process.env.HTTPS === 'true' || 
-                            (isBehindHttpsProxy && process.env.NODE_ENV === 'production'));
+  const useSecureCookies = isProduction && process.env.HTTPS === 'true';
   
+  if (!process.env.SESSION_SECRET) {
+    throw new Error("SESSION_SECRET must be set in .env");
+  }
+
   const sessionSettings: session.SessionOptions = {
-    secret: process.env.SESSION_SECRET || 'tribe-secret-key',
+    secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     store: storage.sessionStore,
@@ -85,7 +78,7 @@ export function setupAuth(app: Express) {
       // Don't set domain - let it default to the current domain
     },
     // Add better error handling
-    name: 'km-tribe-session',
+    name: 'team-finny-session',
     // Rolling sessions to keep users logged in
     rolling: false, // Don't reset maxAge on every response - adjust as needed
   };
@@ -111,13 +104,12 @@ export function setupAuth(app: Express) {
         
         // Handle PIN-only authentication for our app
         if ((!username || username === "pin-login" || username.trim() === '') && password.length === 4) {
-          console.log(`PIN-only authentication attempt with PIN: ${password}`);
           
           // Security check: Prevent generic PINs that could match multiple users
           if (password === "0000" || password === "1111" || password === "1234" || password === "9999") {
             // For these generic PINs, we need exact username match, not just PIN
             if (!username || username === "pin-login") {
-              console.log(`Authentication failed: Generic PIN ${password} requires explicit username`);
+              console.log(`Authentication failed: generic PIN requires explicit username`);
               return done(null, false, { message: "Generic PIN requires username" });
             }
           }
@@ -154,17 +146,17 @@ export function setupAuth(app: Express) {
           
           // If multiple users have the same PIN, reject the login
           if (matchingUsers.length > 1) {
-            console.error(`Authentication failed: Multiple users (${matchingUsers.length}) found with PIN ${password}`);
+            console.error(`Authentication failed:  users share the entered PIN`);
             console.error(`Users with this PIN: ${matchingUsers.map(u => u.username).join(', ')}`);
             return done(null, false, { message: "Ambiguous PIN - please use username" });
           } else if (matchingUsers.length === 1) {
             // Exactly one user found with this PIN - this is what we want
             pinUser = matchingUsers[0];
-            console.log(`Found exactly one user ${pinUser.username} (ID: ${pinUser.id}) with matching PIN`);
+            console.log(`Found exactly one user ${pinUser.username} (code: ${pinUser.userCode}) with matching PIN`);
             user = pinUser;
           } else {
             // No matching user found
-            console.log(`Authentication failed: No user found with PIN ${password}`);
+            console.log(`Authentication failed: no user found with that PIN`);
             return done(null, false, { message: "Invalid PIN" });
           }
         } else {
@@ -172,17 +164,17 @@ export function setupAuth(app: Express) {
           user = await storage.getUserByUsername(username);
           console.log(`Lookup by exact username '${username}': ${user ? 'found' : 'not found'}`);
           
-          // If not found, try with the @km-tribe suffix
+          // If not found, try with the @team-finny suffix
           if (!user && !username.includes('@')) {
-            const emailUsername = `${username}@km-tribe`;
+            const emailUsername = `${username}@team-finny`;
             console.log(`Trying alternative username format: ${emailUsername}`);
             user = await storage.getUserByUsername(emailUsername);
             console.log(`Lookup by email username '${emailUsername}': ${user ? 'found' : 'not found'}`);
           }
           
-          // If still not found and username has @km-tribe, try without it
-          if (!user && username.includes('@km-tribe')) {
-            const simpleUsername = username.replace('@km-tribe', '');
+          // If still not found and username has @team-finny, try without it
+          if (!user && username.includes('@team-finny')) {
+            const simpleUsername = username.replace('@team-finny', '');
             console.log(`Trying simple username format: ${simpleUsername}`);
             user = await storage.getUserByUsername(simpleUsername);
             console.log(`Lookup by simple username '${simpleUsername}': ${user ? 'found' : 'not found'}`);
@@ -201,7 +193,7 @@ export function setupAuth(app: Express) {
         }
         
         // Verify PIN for the found user
-        console.log(`Verifying PIN for user: ${user.username} (ID: ${user.id})`);
+        console.log(`Verifying PIN for user: ${user.username} (code: ${user.userCode})`);
         
         let isValidPin = false;
         
@@ -219,19 +211,10 @@ export function setupAuth(app: Express) {
         if (!isValidPin && user.pin === password) {
           console.log(`Direct PIN comparison result: match`);
           isValidPin = true;
-          
-          // Update the PIN to hashed format for future logins
-          try {
-            const hashedPin = await hashPassword(password);
-            await storage.updateUserPin(user.id, hashedPin);
-            console.log(`Updated PIN from plain text to hashed format for user: ${user.username}`);
-          } catch (updateErr) {
-            console.error(`Failed to update PIN for user: ${user.username}`, updateErr);
-          }
         }
         
         if (isValidPin) {
-          console.log(`Authentication successful for user: ${user.username} (ID: ${user.id})`);
+          console.log(`Authentication successful for user: ${user.username} (code: ${user.userCode})`);
           return done(null, user);
         }
         
@@ -246,8 +229,6 @@ export function setupAuth(app: Express) {
   );
 
   passport.serializeUser((user, done) => {
-    console.log(`[SERIALIZE] Attempting to serialize user: ${user.username} (userCode: ${user.userCode})`);
-    console.log(`[SERIALIZE] User object userCode: ${user.userCode} (type: ${typeof user.userCode})`);
     
     // Ensure we have a valid userCode
     if (!user.userCode) {
@@ -256,29 +237,22 @@ export function setupAuth(app: Express) {
       return;
     }
     
-    console.log(`[SERIALIZE] Serializing user with userCode: ${user.userCode}`);
     done(null, user.userCode);
   });
   
   passport.deserializeUser(async (identifier: string, done) => {
     try {
-      console.log(`[DESERIALIZE] Starting deserialization for userCode: ${identifier} (type: ${typeof identifier})`);
       
       if (!identifier) {
-        console.log(`[DESERIALIZE] No identifier provided - treating as unauthenticated`);
         return done(null, false);
       }
       
       // Direct userCode lookup (no more fallback to numeric IDs)
-      console.log(`[DESERIALIZE] Using userCode lookup for: ${identifier}`);
       const user = await storage.getUserByUserCode(identifier);
-      console.log(`[DESERIALIZE] UserCode lookup result for ${identifier}: ${user ? 'FOUND' : 'NOT FOUND'}`);
       
       if (user) {
-        console.log(`[DESERIALIZE] Successfully deserialized user: ${user.username} (userCode: ${user.userCode})`);
         done(null, user);
       } else {
-        console.log(`[DESERIALIZE] No user found with userCode: ${identifier} - treating as unauthenticated`);
         done(null, false);
       }
     } catch (err) {
@@ -316,7 +290,7 @@ export function setupAuth(app: Express) {
   });
 
   app.post("/api/login", (req, res, next) => {
-    passport.authenticate("local", (err, user, info) => {
+    passport.authenticate("local", (err: any, user: Express.User | false, info: { message?: string } | undefined) => {
       if (err) {
         console.error("Login error:", err);
         return next(err);
@@ -364,16 +338,7 @@ export function setupAuth(app: Express) {
     }
 
     console.log(`User info requested for: ${req.user.username}`);
-    console.log(`Sending user object:`, JSON.stringify(req.user, null, 2));
     res.json(req.user);
   });
-
-  // Add an admin user if it doesn't exist
-  createDefaultAdminUser();
 }
 
-// Skip admin user creation - already exists in database
-async function createDefaultAdminUser() {
-  console.log("Skipping default admin user creation - using existing user accounts");
-  return;
-}

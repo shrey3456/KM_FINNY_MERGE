@@ -10,8 +10,10 @@ import { format } from 'date-fns';
 import { Printer, Search, Truck, User, Receipt, Lock, RefreshCw, CalendarIcon, X } from 'lucide-react';
 import { Progress } from '@/components/ui/progress';
 import { apiRequest } from '@/lib/queryClient';
+import { PlantChoice } from '@/components/PlantBadge';
+import { plantShortCode, useTabSubtitle } from '@/lib/appTabs';
 import { useToast } from '@/hooks/use-toast';
-import logoPath from '@assets/logo_wo_bg_1757152661130.png';
+const logoPath = '/logo_wo_bg_1757152661130.png'; // served from client/public
 import { useSingleDateFilter } from '@/hooks/useSingleDateFilter';
 import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
@@ -47,47 +49,29 @@ interface TollVoucherResponse {
   data: TollVoucherData | null;
 }
 
-// Access control hook
+// Access control hook. Read synchronously on first render (it is only localStorage), so the page
+// never flashes a loading skeleton before drawing — that flash was the glitch when switching here.
 function useAccessControl() {
-  const [hasAccess, setHasAccess] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    const checkAccess = () => {
-      try {
-        const userString = localStorage.getItem('currentUser');
-        if (!userString) {
-          setHasAccess(false);
-          setIsLoading(false);
-          return;
-        }
-
-        const user = JSON.parse(userString);
-        const userRole = user.role?.toLowerCase();
-
-        const allowedRoles = ['admin', 'super-admin', 'superadmin', 'super_admin'];
-        const isAdmin = allowedRoles.includes(userRole);
-
-        // Access is controlled by admin via User Management's Allowed Pages —
-        // route-level access is already enforced by ProtectedRoute before this
-        // component ever renders; this just mirrors that for the page's own state.
-        let allowedPages: string[] = [];
-        try { allowedPages = JSON.parse(user.allowedPages || "[]"); } catch { /* default [] */ }
-        const hasPageGrant = allowedPages.includes("toll-voucher");
-
-        setHasAccess(isAdmin || hasPageGrant);
-        setIsLoading(false);
-      } catch (error) {
-        console.error('Error checking access:', error);
-        setHasAccess(false);
-        setIsLoading(false);
-      }
-    };
-
-    checkAccess();
-  }, []);
-
-  return { hasAccess, isLoading };
+  const [hasAccess] = useState(() => {
+    try {
+      const userString = localStorage.getItem('currentUser');
+      if (!userString) return false;
+      const user = JSON.parse(userString);
+      const userRole = user.role?.toLowerCase();
+      const allowedRoles = ['admin', 'super-admin', 'superadmin', 'super_admin'];
+      const isAdmin = allowedRoles.includes(userRole);
+      // Access is controlled by admin via User Management's Allowed Pages —
+      // route-level access is already enforced by ProtectedRoute before this
+      // component ever renders; this just mirrors that for the page's own state.
+      let allowedPages: string[] = [];
+      try { allowedPages = JSON.parse(user.allowedPages || "[]"); } catch { /* default [] */ }
+      return isAdmin || allowedPages.includes("toll-voucher");
+    } catch (error) {
+      console.error('Error checking access:', error);
+      return false;
+    }
+  });
+  return { hasAccess, isLoading: false };
 }
 
 
@@ -104,6 +88,8 @@ const getFontSize = (text: string) => {
 
 export default function TollVoucher() {
   const [selectedPlant, setSelectedPlant] = usePersistentFilter('tollVoucher:plant', 'valsad');
+  // Show the chosen plant on this page's tab in short form, e.g. "VAL" / "IND" / "LKW".
+  useTabSubtitle(plantShortCode(selectedPlant));
   //const [voucherPrefix, setVoucherPrefix] = useState('KM2526-EV-');
   const [voucherNumber, setVoucherNumber] = useState('');
   const [selectedOrder, setSelectedOrder] = useState('');
@@ -357,14 +343,16 @@ export default function TollVoucher() {
     const partyText = voucher.party || "";
     const length = partyText.length;
     
-    // Pick the largest font whose wrapped lines fit the Order Details box. The print runs in a hidden
-    // iframe (no layout), so the fit is estimated: box ~410pt wide x ~78pt tall, bold caps ~0.64em/char.
-    const partyEntries = partyText.split("\n").filter((l) => l.trim());
-    let partyFontPt = 7;
-    for (let size = 16; size >= 7; size -= 0.5) {
-      const charsPerLine = Math.floor(410 / (size * 0.64));
-      const wrapped = partyEntries.reduce((n, l) => n + Math.max(1, Math.ceil(l.length / charsPerLine)), 0);
-      if (wrapped * size * 1.15 <= 78) { partyFontPt = size; break; }
+    // Entries flow side by side and wrap across the whole Order Details box instead of stacking one per line.
+    // Starting font = the largest whose wrapped text fits (box ~460pt wide x ~78pt tall, bold caps ~0.64em/char);
+    // the script in the print page then refines it against the real layout.
+    const partyEntries = partyText.split("\n").map((l) => l.trim()).filter(Boolean);
+    const partyFlow = partyEntries.join("  |  ");
+    let partyFontPt = 6;
+    for (let size = 20; size >= 6; size -= 0.5) {
+      const charsPerLine = Math.floor(460 / (size * 0.64));
+      const lines = Math.max(1, Math.ceil(partyFlow.length / charsPerLine));
+      if (lines * size * 1.15 <= 70) { partyFontPt = size; break; }
     }
     let logoDataUrl = "";
     try {
@@ -382,6 +370,13 @@ export default function TollVoucher() {
     const printOrderNumber = voucher.orderNumber
       ? voucher.orderNumber.replace('EV', 'TV')
       : '';
+
+    // Each voucher number stays whole: lines break only between numbers, never inside one.
+    const voucherNoHtml = printOrderNumber
+      .split(/\s*,\s*/)
+      .filter(Boolean)
+      .map((n) => `<span style="white-space: nowrap;">${n}</span>`)
+      .join(", ");
 
     // Voucher No. cell font sized by length so every number of a merged voucher fits (the print runs
     // in a hidden iframe, so runtime measurement can't be used here).
@@ -437,7 +432,7 @@ export default function TollVoucher() {
             .flex-col { display: flex; flex-direction: column; }
             .flex-grow { flex-grow: 1; }
             
-            .order-details-content { font-size: ${partyFontPt}pt; font-weight: bold; text-align: center; width: 100%; margin: 0; line-height: 1.1; white-space: pre-line; }
+            .order-details-content { font-size: ${partyFontPt}pt; font-weight: bold; text-align: center; width: 100%; margin: 0; line-height: 1.1; overflow-wrap: anywhere; }
             
             .w-2-1-a { width: 66.66%; }
             .w-2-1-b { width: 33.33%; }
@@ -446,7 +441,7 @@ export default function TollVoucher() {
                 : "linear-gradient(135deg, #e76e2eff 0%, #d26b42ff 100%)"
               } !important;}
             
-            .w-1-2-a { width: 31%; }
+            .w-1-2-a { width: 20%; }
             .w-1-2-b { width: 80%; }
             
             .w-tax-a { width: 15%; }
@@ -458,16 +453,16 @@ export default function TollVoucher() {
         </head>
         <body>
           <div class="voucher-container">
-            <div class="grid-row" style="height: auto;">
-              <div class="w-2-1-c">
+            <div class="grid-row" style="height: 22mm;">
+              <div class="w-2-1-c" style="display: flex; align-items: center; justify-content: center;">
                 <div class="title-text">TOLL TAX VOUCHER</div>
               </div>
-              <div class="col w-2-1-b" style="padding: 0; display: block;">
-                <div style="background-color: #6366f1; color: white; padding: 4px; text-align: center; border-bottom: 1px solid #000;">
-                  <span class="label-text">${voucher.orderDate || new Date().toLocaleDateString('en-GB')}</span>
+              <div class="col w-2-1-b" style="padding: 0; display: flex; flex-direction: column; align-items: stretch;">
+                <div style="background-color: #6366f1; color: white; padding: 3px; text-align: center; border-bottom: 1px solid #000;">
+                  <span class="label-text" style="font-size: 12pt;">${voucher.orderDate || new Date().toLocaleDateString('en-GB')}</span>
                 </div>
-                <div style="padding: 4px; text-align: center;">
-                  <span class="value-text" style="font-size: ${voucherNoFontPt}pt; overflow-wrap: anywhere;">${printOrderNumber}</span>
+                <div id="voucher-no-box" style="flex: 1; min-height: 0; overflow: hidden; padding: 3px 6px; display: flex; align-items: center; justify-content: center;">
+                  <p id="voucher-no" class="value-text" style="margin: 0; text-align: center; line-height: 1.15; font-size: ${voucherNoFontPt}pt;">${voucherNoHtml}</p>
                 </div>
               </div>
             </div>
@@ -477,8 +472,8 @@ export default function TollVoucher() {
                 <img src="${logoDataUrl}" alt="Logo" />
                 <div class="company-info">
                   <h2>KRUPA MARKETING</h2>
-                  <p>OPP. SUGAR & SPICE, 286,287, NEAR BALAJI WAFERS PVT LTD, N.H. NO 48,</p>
-                  <p>SHANKAR TALAV, VALSAD, GUJARAT, 396375</p>
+                  <p style="white-space: nowrap; font-size: 9pt;">OPP. SUGAR & SPICE, 286,287, NEAR BALAJI WAFERS PVT LTD,</p>
+                  <p style="white-space: nowrap; font-size: 9pt;">N.H. NO 48, SHANKAR TALAV, VALSAD, GUJARAT, 396375</p>
                   <p style="font-size: 12pt; font-weight: 600; margin-top: 4px;">Email : steer@krupamarketing.com</p>
                 </div>
               </div>
@@ -498,39 +493,47 @@ export default function TollVoucher() {
 
             <div class="grid-row details-row">
               <div class="col w-1-2-a">
-                <span class="label-text" style="font-size: 18pt;">Order Details:</span>
+                <span class="label-text">Order Details:</span>
               </div>
-              <div class="col w-1-2-b" style="overflow: hidden; position: relative;">
-                <p id="order-details-content" class="order-details-content">${partyText || 'N/A'}</p>
+              <div class="col w-1-2-b" style="overflow: hidden; position: relative; padding: 6px 8px;">
+                <p id="order-details-content" class="order-details-content">${partyFlow || 'N/A'}</p>
               </div>
             </div>
 
-            <div class="grid-row" style="height: 15mm; border-bottom: none;">
-              <div class="col w-tax-a">
-                <span class="label-text">Toll Tax:</span>
+            <div class="grid-row" style="height: 9mm; border-bottom: none;">
+              <div class="col w-tax-a" style="padding: 2px;">
+                <span class="label-text" style="font-size: 11pt;">Toll Tax:</span>
               </div>
-              <div class="col w-tax-b">
-                <span class="value-text" style="color: #dc2626;">₹${voucher.tollTax.toFixed(2)}</span>
+              <div class="col w-tax-b" style="padding: 2px;">
+                <span class="value-text" style="font-size: 12pt; color: #dc2626;">₹${voucher.tollTax.toFixed(2)}</span>
               </div>
-              <div class="col w-tax-c">
-                <span class="label-text" style="font-weight: 600;">${voucher.tollTaxInWords}</span>
+              <div class="col w-tax-c" style="padding: 2px;">
+                <span style="font-size: 9pt; font-weight: 600;">${voucher.tollTaxInWords}</span>
               </div>
             </div>
           </div>
 
           <script>
+            (function fitVoucherNo() {
+              const el = document.getElementById('voucher-no');
+              const box = document.getElementById('voucher-no-box');
+              if (!el || !box || !box.clientHeight) return; // no layout
+              let size = 18;
+              el.style.fontSize = size + 'pt';
+              while ((el.scrollHeight + 6 > box.clientHeight || el.scrollWidth + 12 > box.clientWidth) && size > 7) {
+                size -= 0.5;
+                el.style.fontSize = size + 'pt';
+              }
+            })();
             (function adjustFontSize() {
               const element = document.getElementById('order-details-content');
               if (!element || !element.parentElement || !element.parentElement.clientHeight) return; // hidden iframe has no layout
               
               const parent = element.parentElement;
-              let size = ${partyFontPt}; // Start with the calculated size
-              
-              // Ensure we start applying from this size
+              // Start large and shrink until the text fits, so it fills the box without being cut off.
+              let size = 22;
               element.style.fontSize = size + 'pt';
-              
-              // Allow shrinking further if it still overflows, down to 5pt
-              while ((element.scrollHeight + 8 > parent.clientHeight || element.scrollWidth > parent.clientWidth) && size > 6) {
+              while ((element.scrollHeight + 18 > parent.clientHeight || element.scrollWidth + 16 > parent.clientWidth) && size > 6) {
                 size -= 0.5;
                 element.style.fontSize = size + 'pt';
               }
@@ -542,7 +545,8 @@ export default function TollVoucher() {
 
     try {
       const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
+      // Off-screen but laid out at the page size (not display:none), so the fit script can measure the box.
+      iframe.style.cssText = "position: fixed; left: -10000px; top: 0; width: 220mm; height: 110mm; border: 0;";
       document.body.appendChild(iframe);
 
       const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
@@ -608,40 +612,26 @@ export default function TollVoucher() {
   }
 
   return (
-    <div className="min-h-screen bg-white p-4 md:p-8">
+    <div className="w-full p-6">
       {/* Header Section */}
-      <div className="mx-auto w-full max-w-[1800px] mb-6">
+      <div className="w-full mb-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <Receipt className="h-8 w-8 text-[#001d6e]" style={{fill: "#16a34a"}} />
             <h1 className="text-3xl font-bold text-[#001d6e]">Toll Voucher</h1>
           </div>
           <div className="flex gap-3">
-            <Button
-              onClick={() => setSelectedPlant('valsad')}
-              variant={selectedPlant === 'valsad' ? 'default' : 'outline'}
-              className={`flex items-center gap-2 ${selectedPlant === 'valsad' ? 'bg-orange-500 hover:bg-orange-600' : 'border-orange-500 text-orange-600 hover:bg-orange-50'}`}
-              data-testid="button-plant-valsad"
-            >
-              <div className="w-3 h-3 rounded-full bg-orange-500"></div>
-              Valsad
-            </Button>
-            <Button
-              onClick={() => setSelectedPlant('indore')}
-              variant={selectedPlant === 'indore' ? 'default' : 'outline'}
-              className={`flex items-center gap-2 ${selectedPlant === 'indore' ? 'bg-amber-700 hover:bg-amber-800' : 'border-amber-700 text-amber-700 hover:bg-amber-50'}`}
-              data-testid="button-plant-indore"
-            >
-              <div className="w-3 h-3 rounded-full bg-amber-700"></div>
-              Indore
-            </Button>
+            {/* Plant capsules — same colours as Plant Master (PlantBadge). */}
+            <PlantChoice plant="VALSAD" selected={selectedPlant === 'valsad'} onSelect={() => setSelectedPlant('valsad')} />
+            <PlantChoice plant="INDORE" selected={selectedPlant === 'indore'} onSelect={() => setSelectedPlant('indore')} />
+            <PlantChoice plant="LUCKNOW" selected={selectedPlant === 'lucknow'} onSelect={() => setSelectedPlant('lucknow')} />
           </div>
         </div>
       </div>
 
       {/* Search Section */}
-      <div className="mx-auto w-full max-w-[1800px] mb-6">
-        <Card className="shadow-lg">
+      <div className="w-full mb-6">
+        <Card>
           <CardHeader>
             <CardDescription>
               Enter a voucher number, or a driver name to list all of that driver's vouchers. Data is fetched live from Notion.
@@ -787,7 +777,7 @@ export default function TollVoucher() {
 
       {/* Error / Not Found State */}
       {((tollVoucherData && !tollVoucherData.success) || isError) && (
-        <div className="mx-auto w-full max-w-[1800px] mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div className="w-full mt-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <Card className="border-red-200 shadow-lg bg-white overflow-hidden">
             <div className="h-2 bg-red-500 w-full"></div>
             <CardContent className="p-12 flex flex-col items-center justify-center text-center">
@@ -833,7 +823,7 @@ export default function TollVoucher() {
       {tollVoucherData?.data?.vehicleOptions &&
         tollVoucherData.data.vehicleOptions.length > 1 &&
         selectedVehicleIndex === null && (
-          <div className="mx-auto w-full max-w-[1800px]">
+          <div className="w-full">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -870,7 +860,7 @@ export default function TollVoucher() {
 
       {/* Voucher Display - Landscape */}
       {voucher && (
-        <div className="mx-auto w-full max-w-[1800px]">
+        <div className="w-full">
           {/* Print Button */}
           <div className="mb-4 flex justify-end gap-2">
             {tollVoucherData?.data?.vehicleOptions && tollVoucherData.data.vehicleOptions.length > 1 && (
@@ -888,7 +878,7 @@ export default function TollVoucher() {
           <div className="bg-white p-8 rounded-lg shadow-lg">
             {/* Header */}
             <div className="flex items-center justify-between mb-6 border-b-2 border-gray-300 pb-4">
-              <img src={logoPath} alt="KM Finny" className="h-16" />
+              <img src={logoPath} alt="Team Finny" className="h-16" />
               <div className="text-right">
                 <h1 className="text-3xl font-bold text-gray-800">TOLL VOUCHER</h1>
               </div>

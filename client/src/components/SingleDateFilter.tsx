@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 // Constants for localStorage keys
-const STORED_DATE_KEY = 'kmtribe-single-date-filter';
+const STORED_DATE_KEY = 'teamfinny-single-date-filter';
 
 // Define date formats
 const DISPLAY_DATE_FORMAT = 'dd/MM/yyyy'; // Format for display to users
@@ -33,6 +33,8 @@ interface SingleDateFilterProps {
   className?: string;
   /** Extra classes merged onto the "Filter by date" / "Calendar" trigger buttons. */
   buttonClassName?: string;
+  /** Extra classes for the date (Today/Tomorrow/Yesterday) button only — e.g. to let it fill the row. */
+  dateButtonClassName?: string;
   size?: "sm" | "md" | "lg";
   children?: React.ReactNode;
   isLocked?: boolean; // Kept for backward compatibility but not used
@@ -44,6 +46,7 @@ export function SingleDateFilter({
   onDateChange,
   selectedDate,
   className,
+  dateButtonClassName,
   buttonClassName,
   size = "md",
   children,
@@ -169,6 +172,7 @@ export function SingleDateFilter({
               "justify-start text-left font-normal",
               !date && "text-muted-foreground",
               buttonClassName,
+              dateButtonClassName,
             )}
           >
             <CalendarIcon className="mr-2 h-4 w-4" />

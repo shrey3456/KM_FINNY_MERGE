@@ -1,23 +1,25 @@
-import { Package, History, Upload, FileUp, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, Receipt, IndianRupee, Activity, Factory, PrinterCheck, PackageCheck } from 'lucide-react';
+import { Package, Upload, FileUp, ScanLine, FileText, MoreHorizontal, UsersRound, ShoppingCart, IndianRupee, Activity, Factory, PrinterCheck, Truck, ClipboardList, PackageCheck } from 'lucide-react';
 import useEmblaCarousel from 'embla-carousel-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { apiRequest } from '@/lib/queryClient';
 import { isAdminOrSuperAdmin, getCurrentUserPermissions, hasPageViewAccess } from '@/lib/permissions';
+import Header from '@/components/Header';
+import { useSidebarContext } from '@/lib/sidebarContext';
 
-// Import the requested images
-import ganpatiImg from '@assets/ganpati.png';
-import awardImg from '@assets/IMG_20240117_171256.jpg';
-import holiImg from '@assets/download.jpeg';
 
 const Home = () => {
   const [emblaRef, emblaApi] = useEmblaCarousel({ loop: true });
   const [scrollProgress, setScrollProgress] = useState(0);
   const [isAdmin, setIsAdmin] = useState(false);
   const [showSalesPage, setShowSalesPage] = useState(false);
-  const [canAccessExpenseVoucher, setCanAccessExpenseVoucher] = useState(false);
   const [isScanUser, setIsScanUser] = useState(false);
+  // The Welcome header (logo, name, logout) is shown on Home only — other pages get the full height.
+  const { logout } = useSidebarContext();
+  const [userName] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('currentUser') || '{}').username || ''; } catch { return ''; }
+  });
 
   // Check user permissions
   useEffect(() => {
@@ -31,16 +33,9 @@ const Home = () => {
         const userPermissions = getCurrentUserPermissions();
         setShowSalesPage(userPermissions.canAccessSalesPage);
 
-        // Expense Voucher tile: admin-granted page access (Allowed Pages), not department.
-        let allowedPages: string[] = [];
-        try { allowedPages = JSON.parse(currentUser.allowedPages || '[]'); } catch { /* default [] */ }
-        setCanAccessExpenseVoucher(isAdminOrSuperAdmin(currentUser.role) || allowedPages.includes('expense-voucher'));
-
         // Non-admin/billing users are scanning dept users
         const role = (currentUser.role ?? '').toLowerCase().trim();
-        // ...and only those who can open the Scan page: without access the "Scan Available!" banner (and its poll)
-        // would show a "Scan Now" button to a page they cannot use.
-        setIsScanUser(!['admin', 'super-admin', 'billing'].includes(role) && hasPageViewAccess('scan-order'));
+        setIsScanUser(!['admin', 'super-admin', 'billing'].includes(role));
       }
     } catch (error) {
       console.error('Error checking user permissions:', error);
@@ -54,6 +49,14 @@ const Home = () => {
     enabled: isScanUser,
     refetchInterval: 30000,
   });
+
+  // Slider pictures are the "Product Ad" rows of the Notion attachment database (server/services/homeSlidesSync)
+  const { data: homeSlides } = useQuery<{ welcome: string | null; ads: { title: string; url: string }[] }>({
+    queryKey: ['/api/home-slides'],
+    queryFn: () => fetch('/api/home-slides').then((r) => r.json()),
+    staleTime: 5 * 60 * 1000,
+  });
+  const slides = homeSlides?.ads ?? [];
 
   // Automatically scroll every 5 seconds
   useEffect(() => {
@@ -83,41 +86,38 @@ const Home = () => {
   }, [emblaApi, onScroll]);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-white min-h-screen">
+    <div className="flex-1 overflow-y-auto bg-transparent min-h-screen">
+      <Header userName={userName} onLogout={logout} />
       <div className="p-4 lg:p-6 max-w-md mx-auto">
         
-        {/* Image Slider - Only Ganpati and Award images as requested */}
+        {/* Image Slider - Product Ad slides from Notion */}
         <div className="mb-4 overflow-hidden" ref={emblaRef}>
           <div className="flex">
-            <div className="flex-shrink-0 min-w-full">
-              <img 
-                src={ganpatiImg} 
-                alt="Ganpati" 
-                className="w-full h-48 object-contain mx-auto" 
-              />
-            </div>
-            <div className="flex-shrink-0 min-w-full">
-              <img 
-                src={awardImg} 
-                alt="Award Ceremony" 
-                className="w-full h-48 object-contain mx-auto" 
-              />
-            </div>
+            {slides.map((slide) => (
+              <div key={slide.url} className="flex-shrink-0 min-w-full flex justify-center">
+                {/* Sized to the image's own aspect (not a fixed box) so the rounded corners sit on
+                    the picture itself instead of on letterbox space around it */}
+                <img
+                  src={slide.url}
+                  alt={slide.title}
+                  className="max-w-full max-h-48 w-auto h-auto rounded-3xl shadow-md"
+                />
+              </div>
+            ))}
           </div>
         </div>
-        
-        {/* Dot indicators - Only 2 dots for 2 images */}
+
+        {/* Dot indicators - one per slide */}
         <div className="flex justify-center space-x-2 mb-6">
-          {[0, 1].map((index) => {
-            // Calculate if this dot is the active one based on scroll progress
-            // Each dot represents 1/2 of the total scroll
-            const isActive = 
-              (scrollProgress >= index/2) && 
-              (scrollProgress < (index+1)/2);
-            
+          {slides.map((slide, index) => {
+            // Each dot represents 1/n of the total scroll
+            const isActive =
+              (scrollProgress >= index / slides.length) &&
+              (scrollProgress < (index + 1) / slides.length);
+
             return (
-              <div 
-                key={index}
+              <div
+                key={slide.url}
                 className={`h-2 w-2 rounded-full transition-all duration-200 ${
                   isActive ? 'bg-[#001d6e]' : 'bg-gray-300'
                 }`}
@@ -160,7 +160,7 @@ const Home = () => {
           {hasPageViewAccess("print-operations") && (
             <div className="flex flex-col items-center">
               <Link href="/print-operations" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
                   <PrinterCheck className="h-7 w-7 text-[#001d6e]" style={{fill: "#8766e3"}} />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Print</span>
@@ -174,10 +174,21 @@ const Home = () => {
           {hasPageViewAccess("loading") && (
             <div className="flex flex-col items-center">
               <Link href="/loading" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
                   <Factory className="h-7 w-7 text-[#001d6e] fill-[#4d7eff]" />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Load</span>
+              </Link>
+            </div>
+          )}
+          {/* Sort Slip Button */}
+          {hasPageViewAccess("sort-slip") && (
+            <div className="flex flex-col items-center">
+              <Link href="/sort-slip" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
+                  <ClipboardList className="h-7 w-7 text-[#001d6e]" />
+                </div>
+                <span className="text-gray-800 text-sm text-center">Sort Slip</span>
               </Link>
             </div>
           )}
@@ -186,7 +197,7 @@ const Home = () => {
           {hasPageViewAccess("loading-overview") && (
             <div className="flex flex-col items-center">
               <Link href="/loading-overview" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
                   <PackageCheck className="h-7 w-7 text-[#001d6e]" />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Loading Overview</span>
@@ -194,14 +205,14 @@ const Home = () => {
             </div>
           )}
 
-          {/* Expense Voucher Button - Only show if user has access */}
-          {canAccessExpenseVoucher && (
+          {/* Dispatch Button */}
+          {hasPageViewAccess("dispatch") && (
             <div className="flex flex-col items-center">
-              <Link href="/expense-voucher" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                  <Receipt className="h-7 w-7 text-[#001d6e]" style={{fill: "#ea580c"}} />
+              <Link href="/dispatch" className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
+                  <Truck className="h-7 w-7 text-[#001d6e]" style={{fill: "#eab308"}} />
                 </div>
-                <span className="text-gray-800 text-sm text-center">Expense</span>
+                <span className="text-gray-800 text-sm text-center">Dispatch</span>
               </Link>
             </div>
           )}
@@ -211,22 +222,10 @@ const Home = () => {
           {hasPageViewAccess("scan-order") && (
             <div className="flex flex-col items-center">
               <Link href="/scan" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
                   <ScanLine className="h-7 w-7 text-[#001d6e]" />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Scan</span>
-              </Link>
-            </div>
-          )}
-
-          {/* Scan History Button */}
-          {hasPageViewAccess("scan-history") && (
-            <div className="flex flex-col items-center">
-              <Link href="/scan-history" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
-                  <History className="h-7 w-7 text-[#001d6e]" />
-                </div>
-                <span className="text-gray-800 text-sm text-center">Scan History</span>
               </Link>
             </div>
           )}
@@ -235,7 +234,7 @@ const Home = () => {
           {hasPageViewAccess("proforma") && (
             <div className="flex flex-col items-center">
               <Link href="/proforma-slips" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
                   <FileText className="h-7 w-7 text-[#001d6e]" />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Proforma Slips</span>
@@ -248,7 +247,7 @@ const Home = () => {
           {hasPageViewAccess("order-import") && (
             <div className="flex flex-col items-center">
               <Link href="/order-import" className="flex flex-col items-center">
-                <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-2 shadow-sm">
+                <div className="w-16 h-16 rounded-full glass flex items-center justify-center mb-2">
                   <FileUp className="h-7 w-7 text-[#001d6e]" />
                 </div>
                 <span className="text-gray-800 text-sm text-center">Order Management</span>

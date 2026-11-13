@@ -1,4 +1,6 @@
 import type { PoolClient } from 'pg';
+import { resolveLineProduct } from './productSap';
+import { stateOfPlant } from './stockV2';
 
 // Splits a total qty into {pallets, looseQty} — the same convention used by /scan's
 // splitPallets in order-scan.ts.
@@ -47,15 +49,26 @@ export async function remapDeletedSessionScans(
   );
   if (!lockRows[0] || lockRows[0].remappedToSessionId != null) return summary;
 
+  // The new CSV's lines are matched by barcode AND product (two products can share a barcode: 65 g / 60 g). Each new line finds its product from
+  // its barcode + SAP, the same way the scan items are seeded.
   const { rows: newItems } = await client.query(
-    `SELECT id, barcode, quantity FROM order_import_items WHERE session_id = $1`,
+    `SELECT i.id, i.barcode, i.quantity, i.sap_code AS "sapCode", s.plant FROM order_import_items i JOIN order_import_sessions s ON s.id = i.session_id WHERE i.session_id = $1`,
     [newSessionId],
   );
-  const newItemByBarcode = new Map<string, { id: number; quantity: number }>();
+  const newItemByLine = new Map<string, { id: number; quantity: number; productId: number | null }>();
+  const newItemByBarcode = new Map<string, { id: number; quantity: number; productId: number | null }>();
   for (const it of newItems) {
-    if (!it.barcode || newItemByBarcode.has(it.barcode)) continue;
-    newItemByBarcode.set(it.barcode, { id: it.id, quantity: Number(it.quantity ?? 0) });
+    if (!it.barcode) continue;
+    const state = await stateOfPlant(client, it.plant ?? '');
+    const lp = await resolveLineProduct(client, it.barcode, it.sapCode, state);
+    const entry = { id: it.id, quantity: Number(it.quantity ?? 0), productId: lp.productId };
+    const lineKey = `${it.barcode}|${lp.productId ?? ''}`;
+    if (!newItemByLine.has(lineKey)) newItemByLine.set(lineKey, entry);
+    if (!newItemByBarcode.has(it.barcode)) newItemByBarcode.set(it.barcode, entry);
   }
+  // The new line for an old scan: the same product when the file has it; a scan with no product (older) matches the barcode's first line.
+  const findNewItem = (barcode: string, productId: number | null) =>
+    newItemByLine.get(`${barcode}|${productId ?? ''}`) ?? (productId == null ? newItemByBarcode.get(barcode) : undefined);
 
   // ── Case A: D's own order_scan_items rows (barcode was on D's CSV) ─────────────────────
   const { rows: oldScanItems } = await client.query(
@@ -75,7 +88,7 @@ export async function remapDeletedSessionScans(
     const physicalQty = eventRows.reduce((s: number, e: any) => s + Number(e.total_qty ?? 0), 0);
     if (physicalQty <= 0) continue; // nothing physically scanned — leave as pure history
 
-    const match = newItemByBarcode.get(osi.barcode);
+    const match = findNewItem(osi.barcode, osi.product_id ?? null);
     const newExpectedQty = match ? match.quantity : 0;
     const newOrderQty = match ? Math.min(physicalQty, newExpectedQty) : 0;
     const overflow = physicalQty - newOrderQty;
@@ -115,24 +128,24 @@ export async function remapDeletedSessionScans(
 
   // ── Case B/C: D's "pure extra" events — scanned but never on D's own CSV at all ────────
   const { rows: pureExtraGroups } = await client.query(
-    `SELECT barcode, MAX(item_name) AS item_name, SUM(total_qty)::int AS total_qty
+    `SELECT barcode, product_id, MAX(item_name) AS item_name, SUM(total_qty)::int AS total_qty
      FROM order_scan_events
      WHERE session_id = $1 AND scan_item_id IS NULL AND is_extra = true AND voided IS NOT TRUE AND barcode IS NOT NULL
-     GROUP BY barcode`,
+     GROUP BY barcode, product_id`,
     [deletedSessionId],
   );
 
   for (const grp of pureExtraGroups) {
     const physicalQty = Number(grp.total_qty ?? 0);
     if (physicalQty <= 0) continue;
-    const match = newItemByBarcode.get(grp.barcode);
+    const match = findNewItem(grp.barcode, grp.product_id ?? null);
 
     if (!match) {
       // Case C: still no home for it — move the events over, stays a pure extra against S.
       await client.query(
         `UPDATE order_scan_events SET session_id = $1
-         WHERE session_id = $2 AND scan_item_id IS NULL AND is_extra = true AND barcode = $3 AND voided IS NOT TRUE`,
-        [newSessionId, deletedSessionId, grp.barcode],
+         WHERE session_id = $2 AND scan_item_id IS NULL AND is_extra = true AND barcode = $3 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $4`,
+        [newSessionId, deletedSessionId, grp.barcode, grp.product_id ?? null],
       );
       summary.extraQtyCreated += physicalQty;
       continue;
@@ -154,22 +167,22 @@ export async function remapDeletedSessionScans(
     const { rows: inserted } = await client.query(
       `INSERT INTO order_scan_items
          (session_id, order_import_item_id, barcode, item_name, expected_qty, items_per_pallet,
-          total_scanned_qty, scanned_pallets, scanned_loose_qty, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-      [newSessionId, match.id, grp.barcode, grp.item_name, newExpectedQty, itemsPerPallet, newOrderQty, pallets, looseQty, status],
+          total_scanned_qty, scanned_pallets, scanned_loose_qty, status, product_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [newSessionId, match.id, grp.barcode, grp.item_name, newExpectedQty, itemsPerPallet, newOrderQty, pallets, looseQty, status, match.productId ?? grp.product_id ?? null],
     );
     const newScanItemId = inserted[0].id;
 
     const { rows: eventRows } = await client.query(
       `SELECT id, total_qty, is_extra FROM order_scan_events
-       WHERE session_id = $1 AND scan_item_id IS NULL AND is_extra = true AND barcode = $2 AND voided IS NOT TRUE
+       WHERE session_id = $1 AND scan_item_id IS NULL AND is_extra = true AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3
        ORDER BY id ASC`,
-      [deletedSessionId, grp.barcode],
+      [deletedSessionId, grp.barcode, grp.product_id ?? null],
     );
     await client.query(
       `UPDATE order_scan_events SET session_id = $1, scan_item_id = $2
-       WHERE session_id = $3 AND scan_item_id IS NULL AND is_extra = true AND barcode = $4 AND voided IS NOT TRUE`,
-      [newSessionId, newScanItemId, deletedSessionId, grp.barcode],
+       WHERE session_id = $3 AND scan_item_id IS NULL AND is_extra = true AND barcode = $4 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $5`,
+      [newSessionId, newScanItemId, deletedSessionId, grp.barcode, grp.product_id ?? null],
     );
     await resplitEventsExtraFlag(client, eventRows, newOrderQty, itemsPerPallet);
 

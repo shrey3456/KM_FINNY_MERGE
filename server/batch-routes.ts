@@ -74,14 +74,11 @@ export function registerBatchRoutes(apiRouter: Router, storage: IStorage) {
             // Fetch the items for this slip
             const items = await storage.getProformaSlipItems(slip.id);
             
-            // Check if there's an existing operation for this order number
-            const operation = await storage.getLoadingOperationByReferenceNumber(orderNumber);
-            
             // Store the complete data in the result object
             result[orderNumber] = {
               slip,
               items: items || [],
-              operation: operation || null,
+              operation: null, // the legacy load_operations table is gone; field kept so the response shape is unchanged
             };
           } catch (error) {
             console.error(`Error fetching proforma slip for order #${orderNumber}:`, error);

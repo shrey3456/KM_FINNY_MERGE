@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { v2Purchase, orderStockLeft } from '../lib/stockV2';
 import { db, pool } from '../db';
 import { orderImportSessions, orderImportItems, users } from '../../shared/schema';
 import { eq, desc, and, sql, inArray, asc } from 'drizzle-orm';
@@ -7,6 +8,7 @@ import { seedAndActivateSession, seedSessionItems, sweepStaleCompletions, getUse
 import { computeGroupReport, resolveGroupId, computePartReport, reconcileCredits } from '../lib/orderGroupReport';
 import { remapDeletedSessionScans } from '../lib/orderScanRemap';
 import { storage } from '../storage';
+import { noSapWarningsForItems } from '../lib/productSap';
 
 export { broadcastOrderImportUpdate };
 
@@ -256,6 +258,16 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
     if (!normOrderDate) {
       return res.status(400).json({ message: 'Order Date is required — it determines which CSVs merge together as parts of one order.' });
     }
+    // Items whose product has no SAP for this plant's state would show a blank SAP: ask the person to confirm BEFORE anything is imported.
+    if (req.body?.confirmNoSap !== true) {
+      const noSap = await noSapWarningsForItems(pool, plant, items);
+      if (noSap.length > 0) {
+        return res.status(409).json({
+          code: 'NO_SAP_CONFIRM', warnings: noSap,
+          message: `${noSap.length} item(s) have no SAP for ${plant} in the Product Master. Confirm to import anyway.`,
+        });
+      }
+    }
     // ── Delete-with-rollback replacement: reclaim a deleted session's slot ─────────────────
     // If a CSV was deleted for this exact (plant, orderDate) slot and no replacement has
     // claimed it yet, THIS upload is that replacement — it reclaims the deleted session's
@@ -475,10 +487,18 @@ router.post('/order-import/sessions', requireOrderImportWrite, async (req: Reque
       console.log(`[order-import] session ${session.id} left 'available' — plant ${plant} already has an active session`);
     }
 
+    // Lines whose product has no SAP for this plant's state show a BLANK SAP - the person is told, so they can fix the Product Master.
+    const { rows: noSapRows } = await pool.query(
+      `SELECT DISTINCT barcode, item_name FROM order_scan_items WHERE session_id = $1 AND product_id IS NOT NULL AND COALESCE(TRIM(sap_code), '') = ''`,
+      [session.id],
+    );
+    const sapWarnings = noSapRows.map((r: any) => `No SAP for this plant: ${r.item_name || r.barcode} (${r.barcode}) has no SAP for ${plant}'s state in the Product Master, so it shows blank.`);
+
     res.status(201).json({
       success: true, session, rowCount: rows.length, activated,
       replacesSessionId: replacementFor?.id ?? null,
       remapSummary,
+      sapWarnings,
     });
 
     // Push change event AFTER responding so client response is never delayed
@@ -515,6 +535,12 @@ router.get('/order-import/sessions/:id/items', requireImportViewAccess, async (r
         oi.sap_code     AS "sapCode",
         oi.quantity,
         oi.expected_pallets AS "expectedPallets",
+        (SELECT product_id FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
+          ORDER BY osi.id DESC LIMIT 1)          AS "productId",
         (SELECT total_scanned_qty FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
              OR (osi.order_import_item_id IS NULL
@@ -856,49 +882,25 @@ router.delete('/order-import/sessions/:id', requireOrderImportWrite, async (req:
       // without ever setting stock_applied_at, so gating on that flag would skip the reversal
       // entirely for a normally-scanned session.
       const { rows: received } = await client.query(
-        `SELECT MAX(barcode) AS barcode,
+        `SELECT MAX(barcode) AS barcode, product_id AS "productId",
                 SUM(total_qty)::int AS qty,
                 COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS extra_qty
          FROM order_scan_events
          WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
            AND barcode <> 'EMPTY_BOX'
-         GROUP BY LOWER(barcode)
+         GROUP BY LOWER(barcode), product_id
          HAVING SUM(total_qty) <> 0`,
         [id],
       );
 
       for (const r of received) {
-        // Lock the plant-stock row and clamp against its CURRENT value before writing — stock
-        // may have moved (dispatch, another session) since this session's apply, so blindly
-        // subtracting r.qty with a GREATEST(0, ...) floor would silently remove less than the
-        // ledger row claims. Computing the actual delta up front keeps the negative
-        // stock_movements row truthful (what was actually reversed, not what was requested).
-        const { rows: plantRows } = await client.query(
-          `SELECT in_stock, extra_qty, product_id FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-          [r.barcode, session.plant],
-        );
-        const actualQty = Math.min(r.qty, Number(plantRows[0]?.in_stock ?? 0));
-        const actualExtraQty = Math.min(r.extra_qty, Number(plantRows[0]?.extra_qty ?? 0));
+        // Lock the stock line and clamp against its CURRENT value before writing - stock may have moved (loaded out, another CSV) since these
+        // scans were received, so only what is really still there is taken back.
+        const left = await orderStockLeft(client, id, session.plant, r.barcode, r.productId ?? null);
+        const actualQty = Math.min(r.qty, left);
+        const actualExtraQty = Math.min(r.extra_qty, actualQty);
         if (actualQty <= 0 && actualExtraQty <= 0) continue;
-        const productId = plantRows[0]?.product_id ?? null;
-
-        await client.query(
-          `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
-          [actualQty, r.barcode],
-        );
-        if (plantRows[0]) {
-          await client.query(
-            `UPDATE product_plant_stock
-             SET in_stock = in_stock - $1, extra_qty = extra_qty - $2, updated_at = NOW()
-             WHERE barcode = $3 AND plant = $4`,
-            [actualQty, actualExtraQty, r.barcode, session.plant],
-          );
-        }
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-           VALUES ($1, $2, $3, $4, $5, 'adjust', 'Order CSV deleted — rollback', $6, NOW())`,
-          [r.barcode, productId, session.plant, -actualQty, -actualExtraQty, id],
-        );
+        await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode: r.barcode, qty: -actualQty, extraQty: -actualExtraQty, productId: r.productId ?? null });
         stockReversed.push({ barcode: r.barcode, qty: actualQty, extraQty: actualExtraQty });
       }
 
@@ -1079,7 +1081,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       if (!report) continue;
       for (const part of report.parts) {
         for (const item of part.items) {
-          const key = `${part.id}::${item.barcode}`;
+          const key = `${part.id}::${item.barcode}::${item.productId ?? ''}`;
           const credited = item.adjustedFrom.reduce((sum, a) => sum + a.qty, 0);
           if (credited > 0) creditedQtyByKey.set(key, credited);
           if (item.extraQty > 0) remainingExtraByKey.set(key, item.remainingExtra);
@@ -1097,9 +1099,21 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         oi.session_id   AS "sessionId",
         oi.barcode,
         oi.item_name    AS "itemName",
-        oi.sap_code     AS "sapCode",
+        -- The SAP the line was given when its order was seeded (the product's SAP for the plant's state, blank when it has none) - not the raw CSV value.
+        COALESCE((SELECT osi.sap_code FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
+          ORDER BY osi.id DESC LIMIT 1), CASE WHEN EXISTS (SELECT 1 FROM order_scan_items x WHERE x.session_id = oi.session_id) THEN NULL ELSE oi.sap_code END) AS "sapCode",
         oi.quantity,
         oi.expected_pallets AS "expectedPallets",
+        (SELECT product_id FROM order_scan_items osi
+          WHERE osi.order_import_item_id = oi.id
+             OR (osi.order_import_item_id IS NULL
+                 AND osi.session_id = oi.session_id
+                 AND osi.barcode IS NOT DISTINCT FROM oi.barcode)
+          ORDER BY osi.id DESC LIMIT 1)          AS "productId",
         (SELECT total_scanned_qty FROM order_scan_items osi
           WHERE osi.order_import_item_id = oi.id
              OR (osi.order_import_item_id IS NULL
@@ -1163,17 +1177,20 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     // newSr rides along with the pallet size because it has to be resolved the SAME way: a
     // barcode can sit on more than one product row, and picking a different row for the Sr than
     // for the pallet size would label the item with a number belonging to another plant's row.
-    type PackRow = { plant: string | null; gjPlt: number; mpPlt: number; newSr: string | null };
+    type PackRow = { id?: number; plant: string | null; gjPlt: number; mpPlt: number; newSr: string | null; sapOfState?: Record<string, string | null> };
     const packRowsByBarcode = new Map<string, PackRow[]>();
+    const packRowById = new Map<number, PackRow>();
     if (itemBarcodes.length > 0) {
       const { rows: prodRows } = await pool.query(
-        `SELECT LOWER(barcode) AS barcode, plant, gj_plt, mp_plt, new_sr FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
+        `SELECT id, LOWER(barcode) AS barcode, plant, gj_plt, mp_plt, new_sr, gj_sap, mp_sap, up_sap FROM products WHERE LOWER(barcode) = ANY($1::text[]) ORDER BY id`,
         [itemBarcodes.map((b) => b.toLowerCase())],
       );
       for (const p of prodRows as any[]) {
         const list = packRowsByBarcode.get(p.barcode) ?? [];
-        list.push({ plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0, newSr: p.new_sr ?? null });
+        const row: PackRow = { id: p.id, plant: p.plant ?? null, gjPlt: Number(p.gj_plt) || 0, mpPlt: Number(p.mp_plt) || 0, newSr: p.new_sr ?? null, sapOfState: { GJ: p.gj_sap ?? null, MP: p.mp_sap ?? null, UP: p.up_sap ?? null } };
+        list.push(row);
         packRowsByBarcode.set(p.barcode, list);
+        packRowById.set(p.id, row);
       }
     }
     // Which product row a barcode means for THIS session's plant. The row for the session's own
@@ -1181,9 +1198,12 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
     // that actually has a pallet size for this state is used — a duplicated barcode usually has
     // the size filled in on only one of its rows, and picking blindly would report "no pallet
     // size" for an item that has one. Only when no row has a size does it fall back to the first.
-    const resolveProductRow = (sessionId: number, barcode: string | null): { row: PackRow; state: string } | null => {
+    const resolveProductRow = (sessionId: number, barcode: string | null, productId?: number | null): { row: PackRow; state: string } | null => {
       if (!barcode) return null;
       const state = stateBySession.get(sessionId);
+      // The line's OWN product (65 g / 60 g share a barcode), else the usual pick for the barcode.
+      const own = productId != null ? packRowById.get(productId) : undefined;
+      if (own && state) return { row: own, state };
       const rows = packRowsByBarcode.get(barcode.toLowerCase());
       if (!rows || rows.length === 0 || !state) return null;
       const sizeOf = (r: PackRow) => (state === 'GJ' ? r.gjPlt : state === 'MP' ? r.mpPlt : 0);
@@ -1194,29 +1214,29 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
           ?? rows[0];
       return { row, state };
     };
-    const resolvePackSize = (sessionId: number, barcode: string | null): number => {
-      const resolved = resolveProductRow(sessionId, barcode);
+    const resolvePackSize = (sessionId: number, barcode: string | null, productId?: number | null): number => {
+      const resolved = resolveProductRow(sessionId, barcode, productId);
       if (!resolved) return 0;
       const { row, state } = resolved;
       return state === 'GJ' ? row.gjPlt : state === 'MP' ? row.mpPlt : 0;
     };
     // Inventory Sr. No (products.new_sr) for the SAME row the pallet size came from, so an item
     // can never carry one plant's Sr and another's pack size.
-    const resolveSrNo = (sessionId: number, barcode: string | null): string | null =>
-      resolveProductRow(sessionId, barcode)?.row.newSr ?? null;
+    const resolveSrNo = (sessionId: number, barcode: string | null, productId?: number | null): string | null =>
+      resolveProductRow(sessionId, barcode, productId)?.row.newSr ?? null;
 
     const allItems: Array<{
       id: number; sessionId: number; barcode: string | null; itemName: string | null;
       sapCode: string | null; quantity: number | null; expectedPallets: number | null;
       scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
-      lastScannedAt?: string | null; itemsPerPallet?: number; srNo?: string | null;
+      lastScannedAt?: string | null; itemsPerPallet?: number; srNo?: string | null; productId?: number | null;
     }> = rawItems.map((item: any) => {
-      const credited = item.barcode ? creditedQtyByKey.get(`${item.sessionId}::${item.barcode}`) ?? 0 : 0;
+      const credited = item.barcode ? creditedQtyByKey.get(`${item.sessionId}::${item.barcode}::${item.productId ?? ''}`) ?? 0 : 0;
       const withCredit = credited > 0 ? { ...item, scannedQty: (item.scannedQty ?? 0) + credited } : item;
       return {
         ...withCredit,
-        itemsPerPallet: resolvePackSize(item.sessionId, item.barcode),
-        srNo: resolveSrNo(item.sessionId, item.barcode),
+        itemsPerPallet: resolvePackSize(item.sessionId, item.barcode, item.productId),
+        srNo: resolveSrNo(item.sessionId, item.barcode, item.productId),
       };
     });
 
@@ -1236,8 +1256,11 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
       SELECT
         ose.session_id          AS "sessionId",
         ose.barcode,
+        ose.product_id          AS "productId",
         MAX(ose.item_name)      AS "itemName",
         SUM(ose.total_qty)::int AS "scannedQty",
+        -- What is still an Extra: the part given to an earlier shortfall (Adjust Exchange Extra, or an automatic credit) is no longer an Extra.
+        SUM(GREATEST(0, ose.total_qty - COALESCE(ose.credited_qty, 0)))::int AS "unclaimedQty",
         MAX(ose.scanned_at)     AS "lastScannedAt"
       FROM order_scan_events ose
       WHERE ose.session_id = ANY($1::int[])
@@ -1245,7 +1268,7 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         AND ose.voided IS NOT TRUE
         AND ose.barcode IS NOT NULL
         AND ose.barcode <> 'EMPTY_BOX'
-      GROUP BY ose.session_id, ose.barcode
+      GROUP BY ose.session_id, ose.barcode, ose.product_id
     `, [sessionIds]);
 
     // Extra scans can be for barcodes that never appeared in any CSV, so they weren't covered
@@ -1269,7 +1292,13 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
 
     extraRows.forEach((ex: any, idx: number) => {
       const list = itemsBySession.get(ex.sessionId) ?? [];
-      const remaining = remainingExtraByKey.get(`${ex.sessionId}::${ex.barcode}`);
+      // An extra with no product (an older scan) belongs to the barcode's only product on that file, when there is exactly one.
+      const sole = Array.from(new Set(rawItems.filter((r: any) => r.sessionId === ex.sessionId && r.barcode === ex.barcode && r.productId != null).map((r: any) => r.productId)));
+      const exPid: number | null = ex.productId ?? (sole.length === 1 ? (sole[0] as number) : null);
+      const remaining = remainingExtraByKey.get(`${ex.sessionId}::${ex.barcode}::${exPid ?? ''}`);
+      const stillExtra = Math.min(remaining ?? ex.scannedQty, Number(ex.unclaimedQty ?? ex.scannedQty));
+      // Nothing left of this Extra (all of it went to an earlier shortfall): it is not shown as an Extra any more.
+      if (stillExtra <= 0) return;
       list.push({
         id: -1 - idx,
         sessionId: ex.sessionId,
@@ -1282,12 +1311,13 @@ router.get('/order-import/master-view', requireImportViewAccess, async (req: Req
         // "still sitting unclaimed" — remaining is what's left after that, not the full
         // original amount ever logged. Falls back to the raw total for sessions outside a
         // FIFO batch (remainingExtraByKey has no entry there).
-        scannedQty: remaining ?? ex.scannedQty,
+        scannedQty: stillExtra,
         scanStatus: 'extra',
         isExtra: true,
         lastScannedAt: ex.lastScannedAt ?? null,
-        itemsPerPallet: resolvePackSize(ex.sessionId, ex.barcode),
-        srNo: resolveSrNo(ex.sessionId, ex.barcode),
+        itemsPerPallet: resolvePackSize(ex.sessionId, ex.barcode, exPid),
+        srNo: resolveSrNo(ex.sessionId, ex.barcode, exPid),
+        productId: exPid,
       });
       itemsBySession.set(ex.sessionId, list);
     });
@@ -1337,6 +1367,9 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
   try {
     const barcode = String(req.query.barcode ?? '').trim();
     const sessionIdsParam = String(req.query.sessionIds ?? '').trim();
+    // Two products can share a barcode (65 g / 60 g): the history of a clicked row is that PRODUCT's entries only.
+    const productIdRaw = parseInt(String(req.query.productId ?? ''), 10);
+    const productId = Number.isFinite(productIdRaw) ? productIdRaw : null;
     if (!barcode || !sessionIdsParam) {
       return res.status(400).json({ message: 'barcode and sessionIds are required' });
     }
@@ -1362,12 +1395,27 @@ router.get('/order-import/master-view/item-history', requireImportViewAccess, as
         ose.scanned_by_name AS "scannedByName", ose.scanned_at AS "scannedAt",
         ose.voided, ose.voided_by_code AS "voidedByCode", ose.voided_at AS "voidedAt",
         ose.void_reason AS "voidReason",
+        ose.is_credit AS "isCredit", COALESCE(ose.credited_qty, 0) AS "creditedQty",
+        (ose.is_credit AND COALESCE(ose.scanned_by_name, '') LIKE '%(Adjust Exchange Extra, from %') AS "isManualCredit",
+        -- Where an Extra went: each credit of it onto an earlier shortfall (Adjust Exchange Extra, or an automatic credit), with that CSV's name and date.
+        (SELECT COALESCE(json_agg(json_build_object('csv', s2.csv_file_name, 'orderDate', s2.order_date, 'qty', c.total_qty) ORDER BY c.id), '[]'::json)
+           FROM order_scan_events c JOIN order_import_sessions s2 ON s2.id = c.session_id
+          WHERE c.credit_source_event_id = ose.id AND c.voided IS NOT TRUE) AS "creditedTo",
+        -- A credit row: the Extra it came from.
+        (SELECT json_build_object('csv', s3.csv_file_name, 'orderDate', s3.order_date)
+           FROM order_scan_events x JOIN order_import_sessions s3 ON s3.id = x.session_id
+          WHERE x.id = ose.credit_source_event_id) AS "creditedFrom",
         ois.csv_file_name AS "orderName", ois.part_index AS "partIndex"
       FROM order_scan_events ose
       JOIN order_import_sessions ois ON ois.id = ose.session_id
       WHERE ose.session_id = ANY($1::int[]) AND LOWER(ose.barcode) = LOWER($2)
+        AND ($3::int IS NULL
+             OR ose.product_id = $3::int
+             -- an older entry with no product belongs to the barcode's only product
+             OR (ose.product_id IS NULL AND (SELECT COUNT(DISTINCT osi.product_id) FROM order_scan_items osi
+                   WHERE osi.session_id = ANY($1::int[]) AND LOWER(osi.barcode) = LOWER($2) AND osi.product_id IS NOT NULL) <= 1))
       ORDER BY ose.scanned_at DESC
-    `, [allowedSessionIds, barcode]);
+    `, [allowedSessionIds, barcode, productId]);
 
     res.json({ items: rows });
   } catch (err) {

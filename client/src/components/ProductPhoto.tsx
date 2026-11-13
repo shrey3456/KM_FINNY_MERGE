@@ -25,6 +25,11 @@ function urlFor(source: Source, productId: number | null | undefined, name: stri
   }
 }
 
+// The image routes serve a 144px copy with ?size=thumb — what list rows need, at a fraction of the bytes.
+export function withThumbSize(src: string): string {
+  return `${src}${src.includes("?") ? "&" : "?"}size=thumb`;
+}
+
 // Click-to-enlarge popup for a product picture — the small thumbnails/cards are hard to read on a
 // phone or a wall-mounted screen, so tapping one opens it big in a dialog.
 export function ImageLightbox({ src, title, open, onClose }: { src: string; title?: string | null; open: boolean; onClose: () => void }) {
@@ -42,14 +47,16 @@ export function ImageLightbox({ src, title, open, onClose }: { src: string; titl
 }
 
 // A plain <img> that opens in the lightbox when clicked (used where the image URL is already known).
-export function ZoomableImg({ src, alt = "", title, className, style, onError }: {
+export function ZoomableImg({ src, alt = "", title, className, style, onError, thumb = false }: {
   src: string; alt?: string; title?: string | null; className?: string; style?: React.CSSProperties; onError?: React.ReactEventHandler<HTMLImageElement>;
+  /** Load the small list-size copy; the popup still opens the full photo. */
+  thumb?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <img
-        src={src}
+        src={thumb ? withThumbSize(src) : src}
         alt={alt}
         loading="lazy"
         className={`${className ?? ""} cursor-zoom-in`}
@@ -63,7 +70,7 @@ export function ZoomableImg({ src, alt = "", title, className, style, onError }:
 }
 
 export function ProductPhoto({
-  productId, name, className, style, alt = "", onLoadState, zoomable = false,
+  productId, name, className, style, alt = "", onLoadState, zoomable = false, thumb = false,
 }: {
   productId?: number | null;
   name?: string | null;
@@ -76,6 +83,8 @@ export function ProductPhoto({
   onLoadState?: (failed: boolean) => void;
   /** Clicking the picture opens it enlarged in a popup. */
   zoomable?: boolean;
+  /** Load the small list-size copy (rows and chips); the popup still opens the full photo. */
+  thumb?: boolean;
 }) {
   const [sourceIndex, setSourceIndex] = useState(0);
   const [zoomOpen, setZoomOpen] = useState(false);
@@ -101,7 +110,7 @@ export function ProductPhoto({
     <>
       <img
         key={`${productId ?? ""}:${name ?? ""}`}
-        src={src}
+        src={thumb ? withThumbSize(src) : src}
         alt={alt}
         loading="lazy"
         className={zoomable ? `${className ?? ""} cursor-zoom-in` : className}

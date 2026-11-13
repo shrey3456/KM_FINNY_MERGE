@@ -4,7 +4,6 @@ import { Client } from '@notionhq/client';
 import type { Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
 import { requirePageWrite, requirePageAccess } from '../lib/pageAccess';
-import { logProformaSync } from '../services/proformaNotionSync';
 
 const router = Router();
 
@@ -62,7 +61,7 @@ router.post('/proforma-slips/import-api', async (req, res) => {
     });
     
     // Extract database ID from the Notion page URL
-    const notionPageUrl = process.env.NOTION_PAGE_URL!;
+    const notionPageUrl = process.env.NOTION_PROFORMA_DATABASE_ID!;
     const databaseIdMatch = notionPageUrl.match(/([a-f0-9]{32})/);
     if (!databaseIdMatch) {
       throw new Error('Invalid Notion page URL - could not extract database ID');
@@ -125,12 +124,12 @@ router.post('/proforma-slips/import-api', async (req, res) => {
       console.log(`Retrieved ${allResults.length} total records from Notion (filtered by date)`);
 
       // Also fetch from the order database to get plant information
-      const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+      const ORDER_DATABASE_ID = process.env.NOTION_ORDER_DATABASE_ID;
       if(!ORDER_DATABASE_ID) {
-        return res.status(500).json({ success: false, message: 'ORDER_DATABASE_ID environment variable is not set' });
+        return res.status(500).json({ success: false, message: 'NOTION_ORDER_DATABASE_ID environment variable is not set' });
       }
       
-      //console.log(`Fetching order data from Notion database: ${ORDER_DATABASE_ID}`);
+      //console.log(`Fetching order data from Notion database: ${NOTION_ORDER_DATABASE_ID}`);
       
       const allOrderResults = [];
       let orderHasMore = true;
@@ -479,14 +478,6 @@ router.post('/proforma-slips/import-api', async (req, res) => {
       console.log(`⚠️  Summary: ${unmatchedItems.size} unmatched item types were skipped`);
     }
     
-    {
-      const u = (req as any).user;
-      void logProformaSync(
-        `Notion import API (Proforma Slips) by ${u ? (u.name || u.username || u.userCode) : 'a request with no login'}: ${startDate} to ${endDate} — ${slipsCreated} slip(s) created, ${slipsUpdated} existing slip(s) updated, ${itemsCreated} item(s) processed`,
-        { userCode: u?.userCode ?? null, userName: u ? (u.name || u.username || u.userCode) : 'Unknown (no login)' },
-      );
-    }
-
     return res.status(200).json({
       success: true,
       message: `Successfully imported from Notion API. Created ${slipsCreated} new slips, updated ${slipsUpdated} existing slips, and processed ${itemsCreated} items.`,

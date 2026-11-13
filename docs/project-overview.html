@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>KM Finny — Project Overview</title>
+<title>Team Finny — Project Overview</title>
 <style>
   :root {
     --paper: #F3F5F8;
@@ -466,7 +466,7 @@
   <main>
     <div class="intro">
       <p class="eyebrow">Read this first — everything else in docs/ goes deeper on one piece of this</p>
-      <h2>KM Finny is a warehouse &amp; dispatch operations system for a multi-plant FMCG distributor.</h2>
+      <h2>Team Finny is a warehouse &amp; dispatch operations system for a multi-plant FMCG distributor.</h2>
       <p>It runs the whole physical flow of a delivery: a CSV order comes in, warehouse staff scan boxes against it as they arrive, stock totals update live per plant, and the paperwork that goes with a shipment (proforma slips, dispatch labels, vouchers) gets generated and printed along the way. Everything is scoped by <strong>plant</strong> (a physical warehouse location — Indore, Valsad, Rajkot, …) and, as of the most recent addition, by the <strong>Indian state</strong> each plant is in, since pricing and pallet configuration are really state-level facts, not plant-level ones.</p>
       <div class="stack-row">
         <span class="chip">React + Vite</span>
@@ -632,7 +632,6 @@
           <li>Set <span class="mono">DATABASE_URL</span> and <span class="mono">SESSION_SECRET</span> in a <span class="mono">.env</span> file (see <span class="filepath">LOCAL_SETUP.md</span> for the exact format).</li>
           <li><span class="mono">npm run db:push</span> — applies the Drizzle schema to your database. (Most of the day-to-day incremental changes since then run automatically as startup migrations in <span class="filepath">server/index.ts</span>, not through this command.)</li>
           <li><span class="mono">npm run dev</span> — starts the server with hot reload at <span class="mono">http://localhost:5000</span> (or your configured <span class="mono">PORT</span>).</li>
-          <li>Emergency admin login: PIN <span class="mono">9999</span>.</li>
         </ol>
       </article>
 
@@ -641,7 +640,6 @@
         <div class="doclink"><a href="field-manual.html">field-manual.html</a><span class="desc">— every page, how it works, and the API routes underneath it</span></div>
         <div class="doclink"><a href="permissions-manual.html">permissions-manual.html</a><span class="desc">— every button and API route's exact permission rule</span></div>
         <div class="doclink"><span class="filepath">LOCAL_SETUP.md</span><span class="desc">— full local dev environment setup, step by step</span></div>
-        <div class="doclink"><span class="filepath">DATABASE_MIGRATION_GUIDE.md</span><span class="desc">— schema migration workflow and troubleshooting</span></div>
         <div class="doclink"><span class="filepath">BACKEND_TROUBLESHOOTING.md</span><span class="desc">— common backend issues and fixes</span></div>
       </article>
     </section>
@@ -649,7 +647,7 @@
   </main>
 
   <footer class="colophon">
-    <span>KM Finny — internal reference, not user-facing</span>
+    <span>Team Finny — internal reference, not user-facing</span>
     <span>Start here, then go deep in field-manual.html or permissions-manual.html</span>
   </footer>
 </div>

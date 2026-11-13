@@ -80,7 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       toast({
         title: "Login successful",
-        description: `Welcome back to KM Finny, ${user.name || user.username}`,
+        description: `Welcome back to Team Finny, ${user.name || user.username}`,
         variant: "success",
       });
     },
@@ -107,7 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       toast({
         title: "Logged out successfully",
-        description: "You have been logged out of KM Finny",
+        description: "You have been logged out of Team Finny",
         variant: "success",
       });
     },

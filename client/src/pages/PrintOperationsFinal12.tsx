@@ -1073,7 +1073,7 @@ const PrintOperations: React.FC = () => {
   };
   
   return (
-    <div className="container mx-auto px-4 py-8">
+    <div className="w-full px-4 py-8">
       <h1 className="mb-6 text-2xl font-bold text-[#001d6e] flex items-center">
         <PrinterCheck className="mr-2 h-6 w-6 text-[#001d6e]" style={{fill: "#8766e3"}} />
         Print Operations

@@ -33,6 +33,7 @@ import {
 import { Result } from "@zxing/library";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import { useSidebarContext } from "@/lib/sidebarContext";
+import { useActiveTabRef } from "@/lib/appTabs";
 import CameraPermissionBanner from "@/components/CameraPermissionBanner";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { PlantBadge } from "@/components/PlantBadge";
@@ -92,6 +93,8 @@ type Product = {
 
 type OsScanItem = {
   id: number; sessionId: number;
+  // The product this line means - two products can share a barcode (65 g / 60 g); a scan is sent with it so it counts on this line.
+  productId?: number | null;
   barcode: string | null; itemName: string | null; sapCode: string | null;
   expectedQty: number; itemsPerPallet: number;
   // The pallet size actually configured in Product Master for this plant's state (GJ PLT /
@@ -104,6 +107,8 @@ type OsScanItem = {
 
 type MvItem = {
   id: number; barcode: string | null; itemName: string | null;
+  // The product of this line (two products can share a barcode: 65 g / 60 g).
+  productId?: number | null;
   sapCode: string | null; quantity: number | null; expectedPallets: number | null;
   scannedQty: number | null; scanStatus: string | null; isExtra?: boolean;
   lastScannedAt?: string | null;
@@ -117,6 +122,7 @@ type MvFile = {
 type MvResponse = { date: string; totalFiles: number; totalRows: number; files: MvFile[] };
 type MvMergedItem = {
   barcode: string | null; itemName: string | null; sapCode: string | null;
+  productId?: number | null;
   quantity: number; scannedQty: number; extraQty: number; expectedPallets: number | null;
   itemsPerPallet: number;
   _files: string[]; _isExtra: boolean;
@@ -180,19 +186,6 @@ function scanFmtUploadDate(dt: string | null | undefined): string {
     month: "short",
     year: "numeric",
   });
-}
-
-// Barcodes that the files list under more than one SAP code: those are different items and are not merged into one Master View row.
-function sharedBarcodeSetOf(files: Array<{ items: Array<{ barcode?: string | null; sapCode?: string | null }> }>): Set<string> {
-  const saps = new Map<string, Set<string>>();
-  files.forEach((f) => f.items.forEach((i) => {
-    const b = i.barcode?.trim().toLowerCase();
-    const sap = i.sapCode?.trim().toLowerCase();
-    if (!b || !sap) return;
-    if (!saps.has(b)) saps.set(b, new Set());
-    saps.get(b)!.add(sap);
-  }));
-  return new Set(Array.from(saps.entries()).filter(([, set]) => set.size > 1).map(([b]) => b));
 }
 
 const normalize = (value?: string | number | null) =>
@@ -298,12 +291,12 @@ const CUSTOM_SCAN_SOUND_URL = "/sounds/scan-beep.mp3";
 
 // Remembers the operator's STV pick across page navigations (the Scan page unmounts when you
 // leave it, which would otherwise clear the selection and re-trigger "Select an STV").
-const OS_STV_STORAGE_KEY = "km-finny.scan.selectedStv";
+const OS_STV_STORAGE_KEY = "team-finny.scan.selectedStv";
 // Width split (percent) between the totals card and the scanner column — operator-draggable.
-const OS_TOTALS_PCT_KEY = "km-finny.scan.totalsWidthPct";
+const OS_TOTALS_PCT_KEY = "team-finny.scan.totalsWidthPct";
 // Remembers which plant's active session the operator was last on, so returning to the Scan
 // page (or reloading) defaults back to that plant instead of always the first active session.
-const OS_LAST_PLANT_KEY = "km-finny.scan.lastPlant";
+const OS_LAST_PLANT_KEY = "team-finny.scan.lastPlant";
 const OS_TOTALS_PCT_MIN = 30;
 const OS_TOTALS_PCT_MAX = 80;
 let customScanSoundBroken = false; // set once the custom file is confirmed missing/unplayable
@@ -468,6 +461,7 @@ export default function ScanOrderPage() {
   const osRotateNext = () =>
     setOsRotation((r) => ROTATIONS[(ROTATIONS.indexOf(r) + 1) % ROTATIONS.length]);
   const { setKioskRotateClass: setSidebarKioskRotateClass, setPortalRotation } = useSidebarContext();
+  const tabActiveRef = useActiveTabRef();
   const osRotated = osRotation !== 0;
   // A quarter turn swaps the screen's axes — what the CSS calls height then runs along the
   // viewport's width. Anything sized in vh/vw has to know which case it's in; a half turn leaves
@@ -797,6 +791,7 @@ export default function ScanOrderPage() {
   >(null);
   const osAutoScanFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (osAutoScanFeedbackTimerRef.current) clearTimeout(osAutoScanFeedbackTimerRef.current); }, []);
+  const [osProductPick, setOsProductPick] = useState<{ barcode: string; products: Product[] } | null>(null);
   const [osMultiMatch, setOsMultiMatch] = useState<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const osMultiMatchRef = useRef<{ barcode: string; matches: OsScanItem[]; inventoryProduct: Product | null; plantPalletSize: number } | null>(null);
   const [osPallets, setOsPallets] = useState(1);
@@ -895,7 +890,7 @@ export default function ScanOrderPage() {
   // earlier part's over-scan (e.g. a box arrived early and got scanned against Part 1
   // even though Part 1 didn't need it — that extra offsets Part 2's shortfall here).
   // Empty/no-op for a session that isn't part of a FIFO batch upload.
-  const osGroupCreditsQuery = useQuery<{ credits: { barcode: string | null; itemName: string | null; creditedQty: number; sources: { fromCsvFileName: string; qty: number }[] }[]; partIndex: number | null; totalParts: number }>({
+  const osGroupCreditsQuery = useQuery<{ credits: { barcode: string | null; productId?: number | null; itemName: string | null; creditedQty: number; sources: { fromCsvFileName: string; qty: number }[] }[]; partIndex: number | null; totalParts: number }>({
     queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "group-credits"],
     queryFn: () =>
       apiRequest("GET", `/api/order-scan/sessions/${activeOrderScanSession!.id}/group-credits`).then((r) => r.json()),
@@ -903,9 +898,12 @@ export default function ScanOrderPage() {
     refetchInterval: wsConnected ? 30000 : 8000,
     refetchIntervalInBackground: false,
   });
-  const osCreditByBarcode = new Map(
-    (osGroupCreditsQuery.data?.credits ?? []).map((c) => [normalize(c.barcode), c]),
+  // A credit belongs to ONE product (two products can share a barcode: an extra of the 65 g never covers the 60 g).
+  const osCreditByLine = new Map(
+    (osGroupCreditsQuery.data?.credits ?? []).map((c) => [`${normalize(c.barcode)}|${c.productId ?? ""}`, c]),
   );
+  const osCreditFor = (i: { barcode: string | null; productId?: number | null }) =>
+    osCreditByLine.get(`${normalize(i.barcode)}|${i.productId ?? ""}`) ?? osCreditByLine.get(`${normalize(i.barcode)}|`);
 
   // Every part of the current FIFO group is scannable at once now (sequential cross-part
   // search — see the server's /scan handler), so a physical scan can land on a sibling part
@@ -920,7 +918,7 @@ export default function ScanOrderPage() {
   });
   const osGroupSessionIds = osGroupSessionIdsQuery.data?.sessionIds ?? (activeOrderScanSession ? [activeOrderScanSession.id] : []);
 
-  type OsExtraRow = { barcode: string; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null; partIndexes: number[] };
+  type OsExtraRow = { barcode: string; productId?: number | null; itemName: string | null; totalQty: number; scanCount: number; lastScannedAt: string | null; scannedByName: string | null; partIndexes: number[] };
   const osExtrasQuery = useQuery<OsExtraRow[]>({
     queryKey: ["/api/order-scan/sessions", activeOrderScanSession?.id, "extras"],
     queryFn: () =>
@@ -999,7 +997,7 @@ export default function ScanOrderPage() {
   const osItemsKey = ["/api/order-scan/sessions", activeOrderScanSession?.id, "items"] as const;
 
   const osScanMutation = useMutation({
-    mutationFn: async (payload: { barcode: string; qty: number; isExtra: boolean; stv: string | null; sapCode?: string | null }) => {
+    mutationFn: async (payload: { barcode: string; qty: number; isExtra: boolean; stv: string | null; productId?: number | null }) => {
       // Tries live first; falls back to the offline queue only on a genuine network failure —
       // see client/src/lib/offlineQueue.ts. onMutate below already applied this scan
       // optimistically to the UI regardless of network state; a queued result just skips the
@@ -1258,8 +1256,7 @@ export default function ScanOrderPage() {
       // Lock stays held (set by the caller before this ran) until the mutation settles — this
       // is the only path that never opens a dialog, so it needs its own release point.
       osScanMutation.mutate(
-        // sapCode: which CSV row this scan is for — only matters when the barcode is listed under more than one SAP code.
-        { barcode, qty, isExtra: false, stv: osSelectedStv || null, sapCode: match?.sapCode ?? null },
+        { barcode, qty, isExtra: false, stv: osSelectedStv || null, productId: match?.productId ?? null },
         { onSettled: () => { osScanLockRef.current = false; } },
       );
       return;
@@ -1284,7 +1281,7 @@ export default function ScanOrderPage() {
     // there becomes a permanently different barcode as far as product_plant_stock is concerned
     // (it's keyed on the literal string), silently splitting stock into an orphaned row.
     const barcode = rawBarcode.trim();
-    if (osPendingRef.current || osMultiMatchRef.current || osScanLockRef.current) return;
+    if (osPendingRef.current || osMultiMatchRef.current || osProductPick || osScanLockRef.current) return;
     // STV (when the plant has any configured) is picked once up front via the persistent
     // selector above the scanner, not per scan — see osSelectedStv's own comment. Scanning
     // is a no-op until it's chosen, so every auto-confirmed AND dialog-confirmed scan always
@@ -1313,7 +1310,9 @@ export default function ScanOrderPage() {
     playScanBeep();
     const normBarcode = normalize(barcode);
     const matches = osItemsRef.current.filter((i) => normalize(i.barcode ?? "") === normBarcode);
-    const invProduct = resolveInvProduct(normalize(barcode), activeOrderScanSession?.plant ?? "");
+    // With one line for this barcode, its product is the product; with several lines the product is chosen in the picker below; with no line
+    // (an extra) the barcode's own product, or the picker when the barcode has two.
+    const invProduct = resolveInvProduct(normalize(barcode), activeOrderScanSession?.plant ?? "", matches.length === 1 ? matches[0].productId : null);
 
     // Not on this part's CSV AND not a known product in Inventory at all — this isn't a
     // legitimate "extra" (early arrival of a real item), it's a barcode the system has no
@@ -1326,18 +1325,26 @@ export default function ScanOrderPage() {
 
     const plantPalletSize = _computePlantPalletSize(matches[0] ?? null, invProduct);
 
-    // More than one row with this barcode (e.g. the same barcode under two SAP codes): ask which item — unless only one of them
-    // still has quantity left, which is then the one this scan is for.
-    const stillOpen = matches.length > 1 ? matches.filter((i) => (i.totalScannedQty ?? 0) < (i.expectedQty ?? 0)) : [];
-    const candidates = stillOpen.length === 1 ? stillOpen : matches;
-    if (candidates.length > 1) {
+    // An extra (not on this order) whose barcode has two Product Master products: ask which one, so the stock never lands on the first by accident.
+    if (matches.length === 0) {
+      const twins = (productLookupAll.get(normBarcode) ?? []).filter((p) => normalize(p.barcode) === normBarcode);
+      if (twins.length > 1) {
+        osScanLockRef.current = false;
+        osMultiMatchAtRef.current = Date.now();
+        setOsProductPick({ barcode, products: twins });
+        return;
+      }
+    }
+
+    if (matches.length > 1) {
       // osMultiMatchRef takes over as the reentrancy guard once the picker is open.
       osScanLockRef.current = false;
-      setOsMultiMatch({ barcode, matches: candidates, inventoryProduct: invProduct, plantPalletSize });
+      osMultiMatchAtRef.current = Date.now();
+      setOsMultiMatch({ barcode, matches, inventoryProduct: invProduct, plantPalletSize });
       return;
     }
 
-    const match = candidates[0] ?? null;
+    const match = matches[0] ?? null;
     // Auto Scan ON → full-pallet matches auto-confirm (with the 5s image popup); loose/extra
     // amounts open the dialog. Auto Scan OFF → always opens the dialog. All handled inside
     // _resolveOsScan, which also manages the osScanLockRef release for each path.
@@ -1355,10 +1362,26 @@ export default function ScanOrderPage() {
   const handleOsBarcodeRef = useRef(handleOsBarcode);
   useEffect(() => { handleOsBarcodeRef.current = handleOsBarcode; });
 
+  // The scanner's own Enter keypress can land on the first option the instant the picker opens - ignore taps for a moment.
+  const osMultiMatchAtRef = useRef(0);
+  const handleOsProductPick = (p: Product) => {
+    if (!osProductPick) return;
+    if (Date.now() - osMultiMatchAtRef.current < 450) return;
+    const barcode = osProductPick.barcode;
+    const plantPalletSize = _computePlantPalletSize(null, p);
+    setOsProductPick(null);
+    setOsQty(plantPalletSize);
+    setOsPalletsInput(plantPalletSize > 0 ? (plantPalletSize / plantPalletSize).toFixed(2) : "");
+    setOsPallets(1);
+    setOsLooseQty(0);
+    setOsPending({ barcode, matchedItem: null, inventoryProduct: p, plantPalletSize });
+  };
   const handleOsMultiMatchSelect = (item: OsScanItem) => {
     if (!osMultiMatch) return;
+    if (Date.now() - osMultiMatchAtRef.current < 450) return;
     const barcode = osMultiMatch.barcode;
-    const invProduct = osMultiMatch.inventoryProduct;
+    // The chosen line's own product - not the barcode's first one.
+    const invProduct = resolveInvProduct(normalize(barcode), activeOrderScanSession?.plant ?? "", item.productId) ?? osMultiMatch.inventoryProduct;
     const plantPalletSize = _computePlantPalletSize(item, invProduct);
     // Same rule as the single-match path: no real GJ/MP PLT → empty quantity box, no guess.
     const packSizeMissing = !((item.realPackSize ?? 0) > 0);
@@ -1396,7 +1419,7 @@ export default function ScanOrderPage() {
       qty,
       isExtra: !osPending.matchedItem || itemAlreadyComplete,
       stv: osSelectedStv || null,
-      sapCode: osPending.matchedItem?.sapCode ?? null,
+      productId: osPending.matchedItem?.productId ?? osPending.inventoryProduct?.id ?? null,
     });
   };
 
@@ -1711,7 +1734,13 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // is in the SAME STATE as plantName, same rule pallet size already follows. Falls back to the
   // first candidate when there's only one, no plant given, or no state-matching candidate — so a
   // key with just one product is completely unaffected either way.
-  const resolveInvProduct = (key: string, plantName: string): Product | null => {
+  // `productId` is the PRODUCT of the line being scanned (two products can share a barcode: 35GM / 37GM) - when the line has one, that product
+  // is the answer; the barcode-only guess below is for a barcode with no line.
+  const resolveInvProduct = (key: string, plantName: string, productId?: number | null): Product | null => {
+    if (productId != null) {
+      const own = products.find((p) => p.id === productId);
+      if (own) return own;
+    }
     const list = productLookupAll.get(key);
     if (!list || list.length === 0) return null;
     if (list.length === 1 || !plantName) return list[0];
@@ -1795,6 +1824,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     };
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Hidden tabs stay mounted — leave scans to the tab that is on screen.
+      if (!tabActiveRef.current) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target as HTMLInputElement | null;
       const gunQtyKind = target?.dataset?.gunQty as "os" | undefined;
@@ -1886,6 +1917,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     pallets: number | null; totalQty: number; isExtra: boolean;
     scannedByName: string | null; scannedAt: string;
     voided: boolean | null; voidedAt: string | null; voidReason: string | null;
+    isCredit?: boolean | null; isManualCredit?: boolean | null; creditedQty?: number | null;
+    creditedTo?: Array<{ csv: string; orderDate: string | null; qty: number }> | null; creditedFrom?: { csv: string; orderDate: string | null } | null;
     orderName: string; partIndex: number | null;
   };
   // Item-history drill-down lives on the SCAN tab: click an item to expand its arrival history
@@ -1919,11 +1952,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // all of them (not just one file), matching what "history of this item in this order" means.
   const mvSessionIds = (mvQuery.data?.files ?? []).map((f) => f.sessionId);
   const mvHistoryQuery = useQuery<{ items: MvHistoryEvent[] }>({
-    queryKey: ["/api/order-import/master-view/item-history", osHistoryItem?.barcode, osGroupSessionIds.join(",")],
+    queryKey: ["/api/order-import/master-view/item-history", osHistoryItem?.barcode, osHistoryItem?.productId ?? null, osGroupSessionIds.join(",")],
     queryFn: () =>
       apiRequest(
         "GET",
-        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(osHistoryItem!.barcode!)}&sessionIds=${osGroupSessionIds.join(",")}`,
+        `/api/order-import/master-view/item-history?barcode=${encodeURIComponent(osHistoryItem!.barcode!)}&sessionIds=${osGroupSessionIds.join(",")}${osHistoryItem!.productId != null ? `&productId=${osHistoryItem!.productId}` : ""}`,
       ).then((r) => r.json()),
     enabled: !!osHistoryItem?.barcode && osGroupSessionIds.length > 0,
   });
@@ -1940,7 +1973,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view/item-history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setMvVoidTarget(null);
       setMvVoidReason("");
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
@@ -1951,7 +1984,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // Stable per-row id for the item-history expansion — barcode is already the merge/dedup key
   // (see allMvItems above), so it's unique on its own; "empty-box" covers the one synthetic
   // row that has barcode: null.
-  const mvRowKey = (item: MvMergedItem) => item.barcode ?? "empty-box";
+  const mvRowKey = (item: MvMergedItem) => (item.barcode ? `${item.barcode}|${item.productId ?? ""}` : "empty-box");
 
   // Inline history panel — same content whether it renders as a DataTable expanded row
   // (desktop) or a plain <tr> below the clicked row (mobile custom table). Reads mvHistoryItem/
@@ -2003,11 +2036,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       </span>
                     </td>
                     <td className="px-2 py-2 text-[11px] border-r border-gray-100 truncate">
-                      <HistoryStatus source="scan" isExtra={ev.isExtra} voided={ev.voided} voidReason={ev.voidReason} />
+                      <HistoryStatus source="scan" isExtra={ev.isExtra} isCredit={ev.isCredit} voided={ev.voided} voidReason={ev.voidReason} creditedQty={ev.creditedQty} creditedTo={ev.creditedTo} creditedFrom={ev.creditedFrom} />
                     </td>
                     {canVoidScan && (
                       <td className="px-2 py-2 text-right">
-                        {!ev.voided && (
+                        {!ev.voided && !ev.isManualCredit && (
                           <Button
                             size="sm" variant="ghost"
                             className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"
@@ -2058,8 +2091,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               </p>
               {(
                 <div className="mt-1.5 flex items-center justify-between">
-                  <HistoryStatus source="scan" isExtra={ev.isExtra} voided={ev.voided} voidReason={ev.voidReason} />
-                  {canVoidScan && !ev.voided && (
+                  <HistoryStatus source="scan" isExtra={ev.isExtra} isCredit={ev.isCredit} voided={ev.voided} voidReason={ev.voidReason} creditedQty={ev.creditedQty} creditedTo={ev.creditedTo} creditedFrom={ev.creditedFrom} />
+                  {canVoidScan && !ev.voided && !ev.isManualCredit && (
                     <Button
                       size="sm" variant="ghost"
                       className="h-6 px-2 text-[11px] text-red-600 hover:bg-red-50 hover:text-red-700"
@@ -2105,14 +2138,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
   // view rather than just the flattened per-file list (that's what Separate CSVs is for).
   const allMvItems: MvMergedItem[] = (() => {
     if (!mvData) return [];
-    const sharedBarcodes = sharedBarcodeSetOf(mvData.files);
     const groups = new Map<string, MvMergedItem>();
     mvData.files.forEach((f) => {
       f.items.forEach((item) => {
-        const bc = item.barcode?.trim().toLowerCase();
-        const key = bc
-          ? (sharedBarcodes.has(bc) ? `${bc}::${item.sapCode?.trim().toLowerCase() ?? ''}` : bc)
-          : (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
+        // Two products can share a barcode (65 g / 60 g): each is its own Master View row.
+        const key = (item.barcode ? `${item.barcode.trim().toLowerCase()}|${item.productId ?? ""}` : "")
+          || (item.itemName ? `name::${item.itemName.trim().toLowerCase()}` : `id::${item.id}`);
         let g = groups.get(key);
         if (!g) {
           // Only the GJ/MP-PLT-defined size (0 if not defined) — the expected-qty fallback
@@ -2120,7 +2151,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           // isn't known until the accumulation loop below finishes, so that fallback is
           // applied in one pass over `merged` further down instead of here.
           g = {
-            barcode: item.barcode, itemName: item.itemName, sapCode: item.sapCode,
+            barcode: item.barcode, productId: item.productId ?? null, itemName: item.itemName, sapCode: item.sapCode,
             quantity: 0, scannedQty: 0, extraQty: 0, expectedPallets: null,
             itemsPerPallet: resolvePackSizeForPlant(normalize(item.barcode ?? item.itemName ?? ""), mvPlant),
             _files: [], _isExtra: true, _lastScannedAt: null,
@@ -2696,13 +2727,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // line backing them; osRowState's own doneQty (effScanned + extra) still correctly shows
     // the physical qty received via the Extra column.
     const osRealItems = osItemsQuery.data ?? [];
+    // An extra belongs to a CSV row when the barcode AND product match (an older extra with no product matches any row of its barcode).
+    const osMatchedLines = new Set(osRealItems.map((i) => `${normalize(i.barcode ?? "")}|${i.productId ?? ""}`));
     const osMatchedBarcodes = new Set(osRealItems.map((i) => normalize(i.barcode ?? "")));
     const osExtraOnlyItems: OsScanItem[] = (osExtrasQuery.data ?? [])
-      .filter((e) => e.barcode && !osMatchedBarcodes.has(normalize(e.barcode)))
+      .filter((e) => e.barcode && (e.productId == null ? !osMatchedBarcodes.has(normalize(e.barcode)) : !osMatchedLines.has(`${normalize(e.barcode)}|${e.productId}`)))
       .map((e, idx) => ({
         id: -1000 - idx,
         sessionId: activeOrderScanSession.id,
         barcode: e.barcode,
+        productId: e.productId ?? null,
         itemName: e.itemName,
         sapCode: null,
         expectedQty: 0,
@@ -2747,7 +2781,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osIsItemFullyDone = (i: OsScanItem) => {
       const exp = i.expectedQty ?? 0;
       if (exp <= 0) return false;
-      const creditQty = osCreditByBarcode.get(normalize(i.barcode))?.creditedQty ?? 0;
+      const creditQty = osCreditFor(i)?.creditedQty ?? 0;
       return (i.totalScannedQty ?? 0) + creditQty >= exp;
     };
     const osCsvOnlyItems = osItems.filter((i) => (i.expectedQty ?? 0) > 0);
@@ -2763,7 +2797,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     const osQtyExpected = osCsvOnlyItems.reduce((sum, i) => sum + (i.expectedQty ?? 0), 0);
     const osQtyReceived = osCsvOnlyItems.reduce((sum, i) => {
       const exp = i.expectedQty ?? 0;
-      const creditQty = osCreditByBarcode.get(normalize(i.barcode))?.creditedQty ?? 0;
+      const creditQty = osCreditFor(i)?.creditedQty ?? 0;
       return sum + Math.min((i.totalScannedQty ?? 0) + creditQty, exp);
     }, 0);
     const osPct = osQtyExpected ? Math.min(100, Math.round((osQtyReceived / osQtyExpected) * 100)) : 0;
@@ -2772,12 +2806,16 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // CSV Items table and the Extra-pallets total below. extraPartIndexesByBarcode carries which
     // part(s) each barcode's extra actually happened on, so a "from Part X" label can be shown
     // when it's not the part you're currently looking at.
-    const extraByBarcode = new Map(
-      (osExtrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.totalQty ?? 0]),
+    // Keyed by barcode AND product - an extra of the 65 g is not an extra of the 60 g that shares its barcode.
+    const extraKey = (barcode: string | null | undefined, productId?: number | null) => `${normalize(barcode ?? "")}|${productId ?? ""}`;
+    const extraByLine = new Map(
+      (osExtrasQuery.data ?? []).map((e) => [extraKey(e.barcode, e.productId), e.totalQty ?? 0]),
     );
-    const extraPartIndexesByBarcode = new Map(
-      (osExtrasQuery.data ?? []).map((e) => [normalize(e.barcode), e.partIndexes ?? []]),
+    const extraPartsByLine = new Map(
+      (osExtrasQuery.data ?? []).map((e) => [extraKey(e.barcode, e.productId), e.partIndexes ?? []]),
     );
+    const extraOf = (item: { barcode: string | null; productId?: number | null }) => extraByLine.get(extraKey(item.barcode, item.productId)) ?? extraByLine.get(extraKey(item.barcode)) ?? 0;
+    const extraPartsOf = (item: { barcode: string | null; productId?: number | null }) => extraPartsByLine.get(extraKey(item.barcode, item.productId)) ?? extraPartsByLine.get(extraKey(item.barcode)) ?? [];
     const currentPartIndex = osGroupCreditsQuery.data?.partIndex ?? null;
 
     // Per-row derived values shared by the CSV Items columns and the row tint.
@@ -2787,11 +2825,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // Received/doneQty below so Received always reads as the full physical count, same as
     // Master View.
     const osRowState = (item: OsScanItem) => {
-      const credit = osCreditByBarcode.get(normalize(item.barcode));
+      const credit = osCreditFor(item);
       const exp = item.expectedQty ?? 0;
       const effScanned = (item.totalScannedQty ?? 0) + (credit?.creditedQty ?? 0);
-      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-      const extraPartIndexes = extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [];
+      const extra = extraOf(item);
+      const extraPartIndexes = extraPartsOf(item);
       // Only worth labeling when some of this barcode's extra happened on a DIFFERENT part
       // than the one currently open — an extra scanned on this same part needs no "from Part
       // X" note, that's just... this part.
@@ -2840,8 +2878,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
     // its total are derived identically.
     const osKioskTotals = sumKioskTotals(osVisible, (item) => {
       const exp = item.expectedQty ?? 0;
-      const effScanned = (item.totalScannedQty ?? 0) + (osCreditByBarcode.get(normalize(item.barcode))?.creditedQty ?? 0);
-      const extra = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
+      const effScanned = (item.totalScannedQty ?? 0) + (osCreditFor(item)?.creditedQty ?? 0);
+      const extra = extraOf(item);
       return {
         exp,
         done: effScanned + extra,
@@ -2883,7 +2921,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           // the scan-time-resolved itemsPerPallet (which can be a per-scan fallback when no
           // real pack size is set, so isn't a fact about the product itself). Shown so an
           // operator can see the pack size at a glance without it affecting any calculation.
-          const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "") : null;
+          const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "", item.productId) : null;
           const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
           return (
             <>
@@ -3152,7 +3190,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
 
 
     return (
-      <div className={`flex-1 overflow-x-hidden bg-gray-50 sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-3 lg:pb-4 lg:pt-3 ${kioskRotateClass}`}>
+      <div className={`flex-1 overflow-x-hidden bg-white sm:overflow-y-auto sm:px-4 sm:pb-4 sm:pt-2 lg:px-3 lg:pb-4 lg:pt-3 ${kioskRotateClass}`}>
         <RotateToggleButton />
         {osRotated && (
           <div className="fixed bottom-24 right-4 z-[60] rounded-3xl bg-[#001d6e] px-2.5 py-3 text-white shadow-xl ring-1 ring-white/10">
@@ -3742,12 +3780,12 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                           {osItems.length === 0 ? "Loading items…" : "No items match."}
                         </p>
                       ) : osVisible.map((item) => {
-                        const credit    = osCreditByBarcode.get(normalize(item.barcode));
+                        const credit    = osCreditFor(item);
                         const creditQty = credit?.creditedQty ?? 0;
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
-                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-                        const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+                        const extra      = extraOf(item);
+                        const extraFromOtherParts = (extraPartsOf(item))
                           .filter((p) => p !== currentPartIndex);
                         // Received = full physical count (order-matched + credit, plus extra) —
                         // matches Master View's convention. See osRowState's comment above.
@@ -3782,7 +3820,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP: ${item.sapCode}`}
                               </p>
                               {(() => {
-                                const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "") : null;
+                                const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "", item.productId) : null;
                                 const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
                                 return packSize > 0 ? (
                                   <p className="mt-0.5 text-sm font-semibold text-gray-600">{packSize} per pallet</p>
@@ -3861,7 +3899,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                     </thead>
                     <tbody>
                       {osVisible.map((item) => {
-                        const credit    = osCreditByBarcode.get(normalize(item.barcode));
+                        const credit    = osCreditFor(item);
                         const creditQty = credit?.creditedQty ?? 0;
                         // The credit from an earlier part's extra counts toward this part's
                         // progress: it adds to "done" and subtracts from "left". Real over-scan
@@ -3869,8 +3907,8 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                         // Received below (full physical count) — same convention as Master View.
                         const effScanned = (item.totalScannedQty ?? 0) + creditQty;
                         const exp        = item.expectedQty ?? 0;
-                        const extra      = extraByBarcode.get(normalize(item.barcode ?? "")) ?? 0;
-                        const extraFromOtherParts = (extraPartIndexesByBarcode.get(normalize(item.barcode ?? "")) ?? [])
+                        const extra      = extraOf(item);
+                        const extraFromOtherParts = (extraPartsOf(item))
                           .filter((p) => p !== currentPartIndex);
                         const scanned    = effScanned + extra;
                         const remaining  = Math.max(0, exp - effScanned);
@@ -3903,7 +3941,7 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                                 {item.barcode ?? "—"}{item.sapCode && ` · SAP ${item.sapCode}`}
                               </p>
                               {(() => {
-                                const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "") : null;
+                                const invProduct = item.barcode ? resolveInvProduct(normalize(item.barcode), activeOrderScanSession?.plant ?? "", item.productId) : null;
                                 const packSize = invProduct ? getStatePalletSize(invProduct, getPlantState(activeOrderScanSession?.plant ?? "")) : 0;
                                 return packSize > 0 ? (
                                   <p className="text-sm font-semibold text-gray-600 mt-0.5">{packSize} per pallet</p>
@@ -5348,6 +5386,31 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
           </DialogContent>
         </Dialog>
 
+        {/* An extra whose barcode has two Product Master products: pick which one. */}
+        <Dialog open={!!osProductPick} onOpenChange={(o) => { if (!o) { setOsProductPick(null); resetOsConfirmation(); } }}>
+          <DialogContent className="w-[calc(100%-2rem)] max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
+                <AlertTriangle className="h-5 w-5 text-amber-500" />
+                Which item?
+              </DialogTitle>
+              <DialogDescription className="text-left pt-1">
+                Barcode <span className="font-mono font-semibold text-gray-700">{osProductPick?.barcode}</span> is not on this order and belongs to {osProductPick?.products.length} products. Tap the item you are scanning.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2 py-1 max-h-72 overflow-y-auto pr-1">
+              {osProductPick?.products.map((p) => (
+                <button key={p.id} onClick={() => handleOsProductPick(p)} className="w-full border-2 border-gray-200 bg-white px-4 py-3 text-left transition-colors hover:border-[#001d6e] hover:bg-[#001d6e]/5">
+                  <p className="font-semibold text-gray-900 text-sm leading-tight">{p.name}</p>
+                </button>
+              ))}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => { setOsProductPick(null); resetOsConfirmation(); }}>Cancel</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         {/* Multi-match selection dialog. */}
         <Dialog open={!!osMultiMatch} onOpenChange={(o) => { if (!o) { setOsMultiMatch(null); resetOsConfirmation(); } }}>
           <DialogContent className={`w-[calc(100%-2rem)] max-w-sm`}>
@@ -5377,12 +5440,6 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
                       {item.itemName ?? <span className="italic text-gray-400">Unknown</span>}
                     </p>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1">
-                      <span className="text-[11px] text-gray-400">
-                        SAP: <span className="font-mono font-medium text-gray-600">{item.sapCode || "—"}</span>
-                      </span>
-                      <span className="text-[11px] text-gray-400">
-                        Left: <span className="font-medium text-gray-600">{Math.max(0, (item.expectedQty ?? 0) - (item.totalScannedQty ?? 0))}</span>
-                      </span>
                       <span className="text-[11px] text-gray-400">
                         Expected: <span className="font-medium text-gray-600">{item.expectedQty}</span>
                       </span>
@@ -5481,8 +5538,9 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
               {/* Inventory + CSV info */}
               {(osPending?.inventoryProduct || osPending?.matchedItem) && (
                 <div className="rounded-xl bg-gray-50 px-4 py-3 text-base text-gray-600 space-y-1.5">
-                  {osPending.inventoryProduct?.sapCode && (
-                    <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.inventoryProduct.sapCode}</span></p>
+                  {/* The line's own SAP (this plant's state SAP, blank when the product has none) - never the product's general SAP. */}
+                  {osPending.matchedItem?.sapCode && (
+                    <p>SAP: <span className="font-mono font-bold text-gray-700">{osPending.matchedItem.sapCode}</span></p>
                   )}
                   {osPending.matchedItem && (
                     <div className={`space-y-1 ${osPending.inventoryProduct ? "border-t border-gray-200 pt-1.5" : ""}`}>
@@ -5724,32 +5782,11 @@ const csvItemsQuery2 = useQuery<ImpItem[]>({
       <div className="mx-auto w-full max-w-[1800px] space-y-4">
         <CameraPermissionBanner onPermissionGranted={() => toast({ title: "Camera Permission Granted", description: "You can now start scanning. Click 'New Scan Order' to begin." })} />
 
-        {/* Greeting Header */}
-        <div className="bg-gradient-to-r from-[#001d6e] to-[#1a3a9c] px-4 py-3 shadow-md">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-full bg-white/20 border-2 border-white/40 flex items-center justify-center text-white font-bold text-base shrink-0 select-none">
-                {(currentUser?.name || currentUser?.username || "U").split(" ").map((w: string) => w[0] ?? "").join("").slice(0, 2).toUpperCase()}
-              </div>
-              <div>
-                <p className="text-blue-200 text-xs font-medium">
-                  {(() => { const h = new Date().getHours(); return h >= 5 && h < 12 ? "Good Morning" : h >= 12 && h < 17 ? "Good Afternoon" : h >= 17 && h < 21 ? "Good Evening" : "Welcome Back"; })()}!
-                </p>
-                <h1 className="text-lg font-bold text-white leading-tight">
-                  {currentUser?.name || currentUser?.username || "User"}
-                </h1>
-                <p className="text-blue-300 text-[11px]">
-                  {new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={() => navigate("/")} className="h-8 px-3 text-xs border-white/40 bg-white/10 text-white hover:bg-white/20 hover:text-white">
-                <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Home
-              </Button>
-            </div>
-          </div>
-        </div>
+        {/* Page title — same icon as "Scan Operations" in the sidebar. */}
+        <h1 className="flex items-center gap-2 text-2xl font-bold text-[#001d6e]">
+          <ScanLine className="h-6 w-6 text-[#001d6e]" />
+          Scan Operations
+        </h1>
 
         {/* ── DISPATCH USER DASHBOARD ─────────────────────────────── */}
         {isDispatchUser ? (

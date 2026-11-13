@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>KM Finny — Notion Webhook Setup Guide</title>
+<title>Team Finny — Notion Webhook Setup Guide</title>
 <style>
   :root {
     --paper: #FFFFFF;
@@ -90,9 +90,9 @@
 <div class="page">
 
   <div class="cover">
-    <div class="eyebrow">KM Finny · Setup guide</div>
+    <div class="eyebrow">Team Finny · Setup guide</div>
     <h1>Notion Webhook</h1>
-    <p class="lede">How changes made in Notion reach the KM Finny app automatically — what it does, how to set it up step by step, and how to check it is working.</p>
+    <p class="lede">How changes made in Notion reach the Team Finny app automatically — what it does, how to set it up step by step, and how to check it is working.</p>
     <div class="meta">
       <span><b>For:</b> admins and whoever sets up the server</span>
       <span><b>Version:</b> 1.0</span>
@@ -160,7 +160,7 @@
     <li><strong>The app is reachable on the internet over https.</strong> Notion cannot reach <code>localhost</code>. For testing on a PC, use a tunnel (step A).</li>
     <li><strong>Admin access in Notion</strong> to the connection (integration) the app already uses.</li>
     <li><strong>Access to the server's <code>.env</code> file</strong> and permission to restart the server.</li>
-    <li><strong>An admin login to the KM Finny app</strong>, to open the status page.</li>
+    <li><strong>An admin login to the Team Finny app</strong>, to open the status page.</li>
   </ul>
 
   <!-- ─────────────────────────────────────────── -->
@@ -232,9 +232,9 @@
     <thead><tr><th style="width:40%">Setting</th><th>What it is for</th></tr></thead>
     <tbody>
       <tr><td><code>NOTION_INTEGRATION_SECRET</code></td><td>Lets the app read pages from Notion (already in use).</td></tr>
-      <tr><td><code>ORDER_DATABASE_ID</code></td><td>Tells the app which Notion database is Orders (already in use).</td></tr>
+      <tr><td><code>NOTION_ORDER_DATABASE_ID</code></td><td>Tells the app which Notion database is Orders (already in use).</td></tr>
       <tr><td><code>NOTION_VEHICLE_DATABASE_ID</code></td><td>Which database is Vehicle Master (already in use).</td></tr>
-      <tr><td><code>NOTION_INVENTORY_DATABASE_ID</code></td><td>Which database is Product Master (already in use).</td></tr>
+      <tr><td><code>NOTION_PRODUCTS_MASTER_DATABASE_ID</code></td><td>Which database is Product Master (already in use).</td></tr>
       <tr><td><code>NOTION_WEBHOOK_VERIFICATION_TOKEN</code> <span class="small">(new)</span></td><td>The secret token from step D. Required — without it all messages are ignored.</td></tr>
       <tr><td><code>NOTION_WEBHOOK_STATUS_URL</code> <span class="small">(new, optional)</span></td><td>Link opened by the <strong>Open status</strong> button in Settings. Example: <code>https://yourdomain.com/api/webhooks/notion/status</code></td></tr>
     </tbody>
@@ -334,7 +334,7 @@
   <h3>Signature</h3>
   <pre>X-Notion-Signature: sha256=&lt;HMAC-SHA256 of the raw request body, key = verification token&gt;</pre>
 
-  <footer>KM Finny · Notion Webhook Setup Guide · Version 1.0 · 17 September 2026</footer>
+  <footer>Team Finny · Notion Webhook Setup Guide · Version 1.0 · 17 September 2026</footer>
 </div>
 </body>
 </html>

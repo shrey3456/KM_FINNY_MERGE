@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
@@ -31,6 +31,7 @@ import PageHeader from "../../components/PageHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { DataTable, buildPageList, type DataTableColumn } from "@/components/ui/data-table";
 import { PlantBadge } from "@/components/PlantBadge";
+import { PlantRoute } from "@/components/PlantRoute";
 import { TableCard } from "@/components/ui/table-card";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { ColumnFilterPopoverContent, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
@@ -62,20 +63,8 @@ export function scanTypeLabel(row: {
     // Godown picking on the Sort Slip page — typed in, never scanned, and it moves no stock.
     : source === "sorting" ? "Sort"
     : "Scan";
-  // A real Scan/Unload/Load event whose ledger row was reconstructed afterward (Settings > Data
-  // Management > Fill Stock Ledger), most often after restoring into a different database — see
-  // its own reason text in stockRecalc.ts. Same text this page's "Remove entry" option already
-  // sniffs for the Remove-Operations-Data rows, just a different prefix.
-  const isBackfill = !!row.orderName?.startsWith("Backfilled from");
-  // A ledger-only row Adjust Exchange Extra wrote when moving Purchase from the Extra's own day
-  // to whichever order it was credited to (see the 'credit' branch of the Scan History combined
-  // query, and the two new stock_movements inserts in order-scan.ts's own /exchange/credit) —
-  // same text-sniffing idea isBackfill uses just above, different prefix.
-  const isCreditMove = !!row.orderName?.startsWith("Purchase moved");
   const kind = row.isExchange ? "Exchange"
     : row.isAdjust ? "Adjust"
-    : isBackfill ? "Backfill"
-    : isCreditMove ? "Purchase Moved"
     : row.isEmptyBox ? "Empty Box"
     : row.isExtra ? "Extra"
     : source === "sorting" ? "Pick"
@@ -94,6 +83,7 @@ export function scanTypeLabel(row: {
 type ScanHistoryItem = {
   id: number;
   barcode: string | null;
+  sapCode?: string | null;
   itemName: string | null;
   pallets: number | null;
   totalQty: number;
@@ -131,6 +121,8 @@ type ScanHistoryItem = {
   orderDate: string | null;
   srNo: string | null;
   plant: string;
+  // Unloading rows only: the plant the purchase belongs to when it differs from `plant` (the stock plant).
+  purchasePlant?: string | null;
   voided: boolean | null;
   voidedAt: string | null;
   voidReason: string | null;
@@ -164,7 +156,7 @@ type ScanHistoryResponse = {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// Solid navy fill, matching Overall Stock / Product Master's filter buttons. Squared off
+// Solid navy fill, matching Stock Overview / Product Master's filter buttons. Squared off
 // (rounded-xl) for the business-report look — no soft/pill-shaped filter controls.
 const FILTER_BTN_CLASS = "h-8 rounded-full border-0 bg-[#001d6e] text-white hover:bg-[#001552] hover:text-white text-xs";
 
@@ -378,11 +370,6 @@ const ALL_NOTION_COLUMNS = ["#", "Scanned By", "Code", "Item", "Barcode", "Order
 // Each source's own void endpoint takes the real underlying id, not the combined-table one.
 const LOADING_EVENT_ID_OFFSET = 3000000000;
 const UNLOAD_EVENT_ID_OFFSET = 4000000000;
-// A manual Stock adjustment (made from Stock Overview's Adjust dialog) is (5000000000 + stock_movements.id) — see the 'stock' branch of
-// SCAN_HISTORY_COMBINED_SOURCE in server/routes/scan-sessions.ts. Those rows can be edited here (see the edit dialog below).
-const STOCK_MOVEMENT_ID_OFFSET = 5000000000;
-const isManualStockRow = (row: { id: number; isAdjust?: boolean }) =>
-  row.id >= STOCK_MOVEMENT_ID_OFFSET && row.id < STOCK_MOVEMENT_ID_OFFSET + 1000000000 && !!row.isAdjust;
 
 const ScanHistory = () => {
   const { user } = useAuth();
@@ -402,19 +389,12 @@ const ScanHistory = () => {
   // server/routes/unloading.ts is deliberately unloading-write-only — it does NOT also require
   // scan-history write.
   const canVoidUnloadEvent = isAdmin || hasPageWriteAccess("unloading");
-  // Editing a manual Stock entry: anyone with write access to Scan History (admins always) — server: requirePageWrite('scan-history').
-  const canEditStockEntry = isAdmin || hasPageWriteAccess("scan-history");
   const [voidTarget, setVoidTarget] = useState<ScanHistoryItem | null>(null);
   const [voidReason, setVoidReason] = useState("");
-  // "Remove entry" — takes a finished row out of this list for good. Offered on exactly two
-  // kinds of row, and the server re-checks both: a scan that is already VOIDED (it counts
-  // towards nothing any more), and a stock line written by Settings > Remove All Operations
-  // Data (the minus entries that removal leaves behind). A live scan or somebody's manual
-  // Stock Adjust is never offered — those still mean something.
+  // "Remove entry" - takes a finished row out of this list for good. Offered only on a scan that is already VOIDED (it counts towards nothing any
+  // more), and the server re-checks it. A live scan or a Stock Adjust / Exchange (a correction on the Stock book) is never offered.
   const canRemoveEntry = isAdmin || hasPageWriteAccess("scan-history");
-  const isRemovableEntry = (row: ScanHistoryItem) =>
-    !!row.voided
-    || (row.sourceKind === "stock" && (row.orderName ?? "").startsWith("Remove operations data (Settings)"));
+  const isRemovableEntry = (row: ScanHistoryItem) => !!row.voided && row.sourceKind !== "stock";
   const [removeTarget, setRemoveTarget] = useState<ScanHistoryItem | null>(null);
   const removeMutation = useMutation({
     mutationFn: (row: ScanHistoryItem) =>
@@ -447,7 +427,7 @@ const ScanHistory = () => {
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
       // Voiding reverses real stock (product_plant_stock/products.in_stock) — keep Overall
       // Stock's cache from showing a now-stale number if that tab is already open.
-      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setVoidTarget(null);
       setVoidReason("");
       toast({ title: "Scan voided", description: "Excluded from totals and stock; kept in history." });
@@ -462,24 +442,8 @@ const ScanHistory = () => {
   const [editQty, setEditQty] = useState("");
   const [editStv, setEditStv] = useState("");
   const editStvSupported = !editTarget?.isDispatch;
-  // Editing a manual Stock entry: the dialog shows the live stock the change would move and refuses a result below zero.
-  const editingStock = !!editTarget && isManualStockRow(editTarget);
-  const stockPreviewQuery = useQuery<{ currentStock: number; oldQty: number; plant: string; lowestAllowed: number }>({
-    queryKey: ["/api/plant-stock/movements", editTarget?.id, "edit-preview"],
-    queryFn: () => apiRequest("GET", `/api/plant-stock/movements/${editTarget!.id - STOCK_MOVEMENT_ID_OFFSET}/edit-preview`).then((r) => r.json()),
-    enabled: editingStock,
-    staleTime: 0,
-  });
-  const stockEditQty = Number(editQty);
-  const stockAfterEdit = editingStock && stockPreviewQuery.data && Number.isFinite(stockEditQty)
-    ? stockPreviewQuery.data.currentStock + (stockEditQty - stockPreviewQuery.data.oldQty) : null;
-  const stockEditBlocked = editingStock && stockAfterEdit !== null && stockAfterEdit < 0;
   const editMutation = useMutation({
-    mutationFn: (payload: { id: number; totalQty?: number; stv?: string | null; isDispatch?: boolean; isUnload?: boolean; isStock?: boolean }) => {
-      if (payload.isStock) {
-        // A manual Stock entry: the new signed quantity; the server refuses an edit that would take stock below zero.
-        return apiRequest("PUT", `/api/plant-stock/movements/${payload.id}`, { qty: payload.totalQty }).then((r) => r.json());
-      }
+    mutationFn: (payload: { id: number; totalQty?: number; stv?: string | null; isDispatch?: boolean; isUnload?: boolean }) => {
       const body: Record<string, unknown> = {};
       if (payload.totalQty !== undefined) body.totalQty = payload.totalQty;
       if (payload.stv !== undefined) body.stv = payload.stv;
@@ -497,10 +461,9 @@ const ScanHistory = () => {
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/scan-history"] });
       queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/load-events"] });
       queryClient.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/scan-sessions/reports/plant-stock"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/plant-stock/movements"] });
+      queryClient.invalidateQueries({ predicate: (q) => String(q.queryKey[0] ?? "").startsWith("/api/stock-v2") });
       setEditTarget(null);
-      toast({ title: editingStock ? "Stock entry updated" : "Scan updated" });
+      toast({ title: "Scan updated" });
     },
     onError: (err: any) => toast({ title: "Failed to edit scan", description: err?.message, variant: "destructive" }),
   });
@@ -517,7 +480,7 @@ const ScanHistory = () => {
   // back next time instead of re-picking on every visit.
   const [historyPageSize, setHistoryPageSize] = usePersistentFilter<number>("scanHistory:pageSize", HISTORY_PAGE_SIZE);
   const [historyExporting, setHistoryExporting] = useState<string | null>(null);
-  // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Overall Stock's
+  // Date/Scanner/Type — single-value filters, same "+ Filter" chip pattern as Stock Overview's
   // Date (kept separate from the generic column engine below since each is a simple exact-match
   // server param, not a column/operator/value condition). Plant used to live here too, but is
   // now a regular generic column (see filterableColumns) so it gets the same Values checklist
@@ -586,7 +549,7 @@ const ScanHistory = () => {
         { value: "adjust", label: "Adjust (Scan + Stock)" },
       ];
 
-  // Date filter — same control/encoding as Overall Stock: the stored value is either a single
+  // Date filter — same control/encoding as Stock Overview: the stored value is either a single
   // day ("d:YYYY-MM-DD") or a from–to range ("r:YYYY-MM-DD:YYYY-MM-DD"), both resolving to a
   // from/to window sent to the server. Presets just compute one of those. Filters scan date
   // (scannedAt) — "Scan Date" below, to read distinctly from "Order Date" (its own generic
@@ -646,7 +609,7 @@ const ScanHistory = () => {
   };
 
   // Every distinct value for every generic filter column, fetched once from the server (Scan
-  // History is paginated, so — unlike Overall Stock, which builds its Values checklist straight
+  // History is paginated, so — unlike Stock Overview, which builds its Values checklist straight
   // from the fully-loaded rows already in the browser — there's no complete dataset on the
   // client to read distinct values from otherwise).
   const { data: filterValues = {} } = useQuery<Record<string, { value: string; label: string }[]>>({
@@ -656,7 +619,7 @@ const ScanHistory = () => {
   });
 
   // Excel-style per-column filters — Item, Barcode, Order, Qty, Pallets, STV, Time, Plant. Scan
-  // History is server-paginated, so (unlike Overall Stock) these are sent to the server as a
+  // History is server-paginated, so (unlike Stock Overview) these are sent to the server as a
   // `filters` param rather than matched client-side — see applyScanHistoryColumnFilters on the
   // backend. `accessor` is unused here for that same reason (no client-side matching happens);
   // it's only present to satisfy FilterableColumn's shape.
@@ -665,6 +628,7 @@ const ScanHistory = () => {
   // filter these two, so only the Condition tab shows for them.
   const filterableColumns: FilterableColumn<ScanHistoryItem>[] = useMemo(() => [
     { id: "barcode", label: "Barcode", filterType: "text", options: filterValues.barcode ?? [], accessor: (r) => r.barcode },
+    { id: "sapCode", label: "SAP Code", filterType: "text", options: filterValues.sapCode ?? [], accessor: (r) => r.sapCode },
     { id: "qty", label: "Qty", filterType: "number", options: [], disableValues: true, accessor: (r) => r.totalQty },
     { id: "pallets", label: "Pallets", filterType: "number", options: [], disableValues: true, accessor: (r) => r.pallets },
     { id: "stv", label: "Dispatch Directory", filterType: "text", options: filterValues.stv ?? [], accessor: (r) => r.stv },
@@ -710,7 +674,7 @@ const ScanHistory = () => {
   }, [columnConditions]);
 
   // The single "+ Filter" entry point — Date/Scanner/Type plus every generic column (including
-  // Plant), same unified list-then-builder pattern as Overall Stock.
+  // Plant), same unified list-then-builder pattern as Stock Overview.
   const [filterPickerOpen, setFilterPickerOpen] = useState(false);
   const [filterPickerKey, setFilterPickerKey] = useState("");
   const [filterPickerSearch, setFilterPickerSearch] = useState("");
@@ -1000,13 +964,14 @@ const ScanHistory = () => {
   }
 
   const historyExportRows = (src: ScanHistoryItem[]) => [
-    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "Order No.", "Party Name", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
+    ["Sr. No", "Scanned By", "Code", "Item", "Barcode", "SAP Code", "Order No.", "Party Name", "Order Date", "Plant", "Qty", "Pallets", "Dispatch Directory", "Type", "Time"],
     ...src.map((h) => [
       h.srNo ?? "",
       h.scannedByName ?? "",
       h.scannedByCode ?? "",
       h.itemName ?? "",
       h.barcode ?? "",
+      h.sapCode ?? "",
       h.orderName ?? "",
       h.partyName ?? "",
       h.orderDate ?? "",
@@ -1021,7 +986,7 @@ const ScanHistory = () => {
 
   const dash = <span className="text-gray-300">—</span>;
 
-  // Same table structure/styling as Overall Stock (DataTable + TableCard): sortable/resizable/
+  // Same table structure/styling as Stock Overview (DataTable + TableCard): sortable/resizable/
   // hideable columns, zebra stripes, business-report borders, plus a totals row.
   //
   // The table only ever holds one 20-row page, so DataTable's own row-summing would report the
@@ -1089,6 +1054,16 @@ const ScanHistory = () => {
       render: (row) => row.barcode ?? dash,
     },
     {
+      // The SAP code of the line scanned — what tells two products that share one barcode apart.
+      id: "sapCode",
+      header: columnHeader("sapCode", "SAP Code"),
+      width: 110,
+      accessor: (row) => row.sapCode ?? "",
+      totalable: false,
+      cellClassName: "font-mono text-gray-500",
+      render: (row) => row.sapCode || dash,
+    },
+    {
       // Which order this entry belongs to — the receiving CSV/session name for a Scan History
       // row, or the proforma slip's order number for a Load Event row (see "orderName" in
       // SCAN_HISTORY_COMBINED_SOURCE, server/routes/scan-sessions.ts).
@@ -1123,7 +1098,7 @@ const ScanHistory = () => {
       width: 90,
       accessor: (row) => row.plant,
       totalable: false,
-      render: (row) => (row.plant ? <PlantBadge plant={row.plant} /> : <span className="text-gray-300">—</span>),
+      render: (row) => (row.plant ? <PlantRoute plant={row.plant} purchasePlant={row.purchasePlant} /> : <span className="text-gray-300">—</span>),
     },
     {
       id: "qty",
@@ -1218,7 +1193,7 @@ const ScanHistory = () => {
         </>
       ),
     },
-    ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent || canRemoveEntry || canEditStockEntry
+    ...(canVoidScan || canVoidLoadEvent || canVoidUnloadEvent || canRemoveEntry
       ? [
           {
             id: "edit",
@@ -1229,15 +1204,12 @@ const ScanHistory = () => {
             render: (row: ScanHistoryItem) =>
               // Same permission-pair-per-source and stock-row exclusion as Void below. A Load
               // Adjust is a +/- correction with no qty to re-edit — void it and press +/- again.
-              !row.voided && !(row.isAdjust && row.isDispatch)
+              !row.voided && scanTypeLabel(row).source !== "Stock" && !(row.isAdjust && row.isDispatch)
               && scanTypeLabel(row).source !== "Sort"
-              && (isManualStockRow(row)
-                // a manual Stock entry: editable by anyone who can edit on this page; other Stock rows (exchange, backfill ...) are not
-                ? canEditStockEntry
-                : scanTypeLabel(row).source !== "Stock" && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan)) && (
+              && (row.isDispatch ? canVoidLoadEvent : row.isUnload ? canVoidUnloadEvent : canVoidScan) && (
                 <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-gray-400 hover:text-[#001d6e]"
                   onClick={() => { setEditTarget(row); setEditQty(String(row.totalQty ?? 0)); setEditStv(row.stv ?? ""); }}
-                  title={isManualStockRow(row) ? "Edit this stock adjustment" : "Edit this scan"}>
+                  title="Edit this scan">
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
               ),
@@ -1320,7 +1292,7 @@ const ScanHistory = () => {
         </Select>
 
 
-        {/* Table card — same shared DataTable component as Overall Stock: sortable/resizable/
+        {/* Table card — same shared DataTable component as Stock Overview: sortable/resizable/
             hideable columns, zebra stripes, mobile swipe hint. No pagination — the whole filtered
             list loads and the table body scrolls under a sticky header, matching the Scan page's
             Master View. */}
@@ -1833,7 +1805,7 @@ const ScanHistory = () => {
                       </p>
                       <p className="mt-0.5 font-mono text-xs text-gray-400">{row.barcode ?? "—"}</p>
                     </div>
-                    {row.plant && <PlantBadge plant={row.plant} />}
+                    {row.plant && <PlantRoute plant={row.plant} purchasePlant={row.purchasePlant} />}
                   </div>
                   <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
                     <span>
@@ -2098,35 +2070,22 @@ const ScanHistory = () => {
     <Dialog open={!!editTarget} onOpenChange={(o) => { if (!o) { setEditTarget(null); setEditQty(""); setEditStv(""); } }}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>{editingStock ? "Edit this stock adjustment" : "Edit this scan"}</DialogTitle>
+          <DialogTitle>Edit this scan</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-gray-600">
-          <span className="font-semibold text-gray-900">{editTarget?.itemName ?? editTarget?.barcode}</span>
-          {editingStock ? ` — adjusted by ${editTarget?.scannedByName ?? "—"} at ${editTarget?.plant ?? "—"}.` : ` — scanned by ${editTarget?.scannedByName ?? "—"}.`}
+          <span className="font-semibold text-gray-900">{editTarget?.itemName ?? editTarget?.barcode}</span> — scanned by {editTarget?.scannedByName ?? "—"}.
         </p>
         <div className="space-y-1.5">
-          <Label className="text-sm">{editingStock ? "Quantity change (+ added / − removed)" : "Qty"}</Label>
-          <Input type="number" min={editingStock ? undefined : "1"} value={editQty} onChange={(e) => setEditQty(e.target.value)} />
+          <Label className="text-sm">Qty</Label>
+          <Input type="number" min="1" value={editQty} onChange={(e) => setEditQty(e.target.value)} />
         </div>
-        {editingStock && (
-          stockPreviewQuery.isLoading ? <p className="text-xs text-gray-400">Checking stock…</p>
-          : stockPreviewQuery.data ? (
-            <div className={`rounded-md border px-3 py-2 text-xs ${stockEditBlocked ? "border-red-300 bg-red-50 text-red-800" : "border-gray-200 bg-gray-50 text-gray-700"}`}>
-              Stock now <span className="font-semibold">{stockPreviewQuery.data.currentStock}</span>
-              {stockAfterEdit !== null && Number.isFinite(stockEditQty) && stockEditQty !== stockPreviewQuery.data.oldQty && (
-                <> → after this edit <span className="font-semibold">{stockAfterEdit}</span></>
-              )}
-              {stockEditBlocked && <> — <span className="font-semibold">not allowed</span>: stock cannot go below zero. The lowest you can set this to is {stockPreviewQuery.data.lowestAllowed > 0 ? "+" : ""}{stockPreviewQuery.data.lowestAllowed}.</>}
-            </div>
-          ) : <p className="text-xs text-red-600">Could not read the stock for this entry.</p>
-        )}
-        {editStvSupported && !editingStock && (
+        {editStvSupported && (
           <div className="space-y-1.5">
             <Label className="text-sm">Dispatch Directory</Label>
             <Input value={editStv} onChange={(e) => setEditStv(e.target.value)} placeholder="e.g. PLT-08" />
           </div>
         )}
-        {!editingStock && Number(editQty) !== (editTarget?.totalQty ?? 0) && (
+        {Number(editQty) !== (editTarget?.totalQty ?? 0) && (
           <p className="text-xs text-amber-600">
             Changing Qty voids this scan and records a new one for {editQty || 0} — stock and totals are adjusted by the difference.
           </p>
@@ -2142,11 +2101,7 @@ const ScanHistory = () => {
                 : editTarget.isUnload ? editTarget.id - UNLOAD_EVENT_ID_OFFSET
                 : editTarget.id;
               const qtyChanged = Number(editQty) !== (editTarget.totalQty ?? 0);
-              const stvChanged = editStvSupported && !editingStock && editStv.trim() !== (editTarget.stv ?? "");
-              if (editingStock) {
-                editMutation.mutate({ id: editTarget.id - STOCK_MOVEMENT_ID_OFFSET, isStock: true, totalQty: Number(editQty) });
-                return;
-              }
+              const stvChanged = editStvSupported && editStv.trim() !== (editTarget.stv ?? "");
               editMutation.mutate({
                 id,
                 isDispatch: editTarget.isDispatch,
@@ -2155,7 +2110,7 @@ const ScanHistory = () => {
                 ...(stvChanged ? { stv: editStv.trim() || null } : {}),
               });
             }}
-            disabled={editMutation.isPending || !editQty || (editingStock ? (Number(editQty) === 0 || Number(editQty) === (editTarget?.totalQty ?? 0) || stockEditBlocked || !stockPreviewQuery.data) : Number(editQty) <= 0) || (Number(editQty) === (editTarget?.totalQty ?? 0) && (!editStvSupported || editStv.trim() === (editTarget?.stv ?? "")))}
+            disabled={editMutation.isPending || !editQty || Number(editQty) <= 0 || (Number(editQty) === (editTarget?.totalQty ?? 0) && (!editStvSupported || editStv.trim() === (editTarget?.stv ?? "")))}
             className="bg-[#001d6e] hover:bg-[#00154b] text-white"
           >
             {editMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

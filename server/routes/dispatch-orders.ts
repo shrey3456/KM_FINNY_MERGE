@@ -14,12 +14,12 @@ router.get('/dispatch-orders', async (req, res) => {
     });
     
     // Use order database to get orders with correct status
-    const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+    const ORDER_DATABASE_ID = process.env.NOTION_ORDER_DATABASE_ID;
     
     if (!ORDER_DATABASE_ID) {
       return res.status(500).json({
         success: false,
-        message: 'ORDER_DATABASE_ID environment variable is not set'
+        message: 'NOTION_ORDER_DATABASE_ID environment variable is not set'
       });
     }
     

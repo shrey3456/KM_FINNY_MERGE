@@ -15,14 +15,16 @@ types.setTypeParser(types.builtins.DATE, (value: string) => value);
 
 const connectionString =
   process.env.DATABASE_URL ||
-  "postgresql://kmuser:km_pass@localhost:5432/km_finny";
+  "postgresql://kmuser:km_pass@localhost:5432/team_finny";
 
 // Create pool with better configuration for handling concurrent operations
 export const pool = new Pool({
   connectionString,
   max: 20, // Increase connection pool size for better concurrency
   idleTimeoutMillis: 30000, // How long a client is allowed to remain idle before being closed
-  connectionTimeoutMillis: 5000, // How long to wait for a connection
+  // Neon suspends idle computes; waking one plus the TLS handshake can take well over 5s,
+  // which surfaced as "Connection terminated due to connection timeout" on the first queries.
+  connectionTimeoutMillis: 20000,
 });
 
 // Monitor connection pool for issues

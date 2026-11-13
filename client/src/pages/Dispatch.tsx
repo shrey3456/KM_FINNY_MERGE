@@ -10,7 +10,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
 import { TruckLoadingAnimation } from '@/components/TruckLoadingAnimation';
 import * as QRCode from 'qrcode';
-import logoPath from '@assets/logo_og_1756804412382.jpeg';
+const logoPath = '/logo_og_1756804412382.jpeg'; // served from client/public
 
 interface DispatchItem {
   productCode: string;

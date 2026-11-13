@@ -32,6 +32,7 @@ import {
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { pinProblem } from "@shared/pinRules";
 import { useToast } from "@/hooks/use-toast";
 import {
   Form,
@@ -75,8 +76,11 @@ const DIALOG_SHELL_CLASS =
 const userFormSchema = z.object({
   userCode: z.string().optional(),
   username: z.string().min(3, "Username must be at least 3 characters")
-    .transform(val => val.includes('@km-finny') ? val : `${val}@km-finny`),
-  pin: z.string().length(4, "PIN must be exactly 4 digits").regex(/^\d{4}$/, "PIN must contain only numbers"),
+    .transform(val => val.includes('@team-finny') ? val : `${val}@team-finny`),
+  pin: z.string().superRefine((val, ctx) => {
+    const problem = pinProblem(val);
+    if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+  }),
   name: z.string().optional(),
   role: z.enum(["admin", "super-admin", "read/write", "read"]).default("read"),
   department: z.string().optional(),
@@ -548,6 +552,7 @@ const Users = () => {
                 <FormControl>
                   <Input placeholder="Enter user code" {...field} />
                 </FormControl>
+                {isEdit && <p className="text-[11px] text-gray-500">Changing the User Code updates it everywhere (activity, scans, loads) and keeps the user signed in.</p>}
                 <FormMessage />
               </FormItem>
             )} />

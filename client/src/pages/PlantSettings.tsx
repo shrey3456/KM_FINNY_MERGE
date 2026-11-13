@@ -1,4 +1,5 @@
-import React, { useState, type ReactNode } from "react";
+import React, { useEffect, useRef, useState, type ReactNode } from "react";
+import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { sortNatural } from "@/lib/utils";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -55,8 +56,8 @@ const normalizePlantResponse = (
   response: PlantRecord | { plant?: PlantRecord } | null | undefined,
 ): PlantRecord | null => {
   if (!response) return null;
-  if ("plant" in response) return response.plant ?? null;
-  return response;
+  if ("plant" in response) return (response as { plant?: PlantRecord }).plant ?? null;
+  return response as PlantRecord;
 };
 
 const updatePlantsCache = (
@@ -113,8 +114,12 @@ export default function PlantSettings() {
   const queryClient = useQueryClient();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingPlant, setEditingPlant] = useState<any>(null);
-  const [expandedPlantId, setExpandedPlantId] = useState<number | null>(null);
-  const [plantSearch, setPlantSearch] = useState("");
+  // The search, the open plant, and the table's page, page size and sort are kept for the browser session (leave the page and come back to where you were).
+  const [expandedPlantId, setExpandedPlantId] = usePersistentFilter<number | null>("plantSettings:expanded", null);
+  const [plantSearch, setPlantSearch] = usePersistentFilter<string>("plantSettings:search", "");
+  const [pageIndex, setPageIndex] = usePersistentFilter<number>("plantSettings:page", 0);
+  const [pageSize, setPageSize] = usePersistentFilter<number>("plantSettings:pageSize", 10);
+  const [tableSort, setTableSort] = usePersistentFilter<{ columnId: string; direction: "asc" | "desc" } | null>("plantSettings:sort", null);
   const [newStv, setNewStv] = useState("");
   const [editingStvId, setEditingStvId] = useState<number | null>(null);
   const [editingStvValue, setEditingStvValue] = useState("");
@@ -152,6 +157,10 @@ export default function PlantSettings() {
   });
 
   const selectedPlant = plants?.find((plant) => plant.id === expandedPlantId) ?? null;
+  // A saved open plant that no longer exists is closed; a new search starts again from the first page (the first run keeps the saved page).
+  useEffect(() => { if (plants && expandedPlantId != null && !plants.some((p: any) => p.id === expandedPlantId)) setExpandedPlantId(null); }, [plants, expandedPlantId]);
+  const firstSearchRun = useRef(true);
+  useEffect(() => { if (firstSearchRun.current) { firstSearchRun.current = false; return; } setPageIndex(0); }, [plantSearch]);
 
   const { data: stvs, isLoading: isStvsLoading } = useQuery<any[]>({
     queryKey: ["/api/plants", expandedPlantId, "stvs"],
@@ -649,7 +658,7 @@ export default function PlantSettings() {
       width: 105,
       render: (p) => (
         <div
-          className="w-24 rounded border px-2 py-1 text-center text-xs font-bold"
+          className="w-24 rounded-full border px-2 py-1 text-center text-xs font-bold"
           style={{ backgroundColor: p.bgColor, color: p.textColor, borderColor: p.borderColor, borderWidth: "1px" }}
         >
           {p.name}
@@ -821,17 +830,10 @@ export default function PlantSettings() {
     <div className="w-full px-4 py-6 sm:py-8 sm:px-6">
       <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-xl sm:text-2xl font-bold flex items-center gap-2">
-            <Factory className="h-6 w-6 shrink-0 text-[#001d6e]" style={{ fill: "#4d7eff" }} />
+            <Factory className="h-6 w-6 shrink-0 text-[#001d6e]" style={{ fill: "#9ca3af" }} />
             Plant Master
         </h1>
         <div className="flex gap-2">
-          <Link href="/print-operations" className="flex-1 sm:flex-initial">
-            <Button variant="outline" className="w-full sm:w-auto">
-              <Printer className="mr-2 h-4 w-4 shrink-0" />
-              <span className="sm:hidden">Print Ops</span>
-              <span className="hidden sm:inline">Print Operations</span>
-            </Button>
-          </Link>
           <Dialog open={isDialogOpen} onOpenChange={handleDialogChange}>
             <DialogTrigger asChild>
               <Button onClick={handleAddNew} disabled={!canWrite} title={!canWrite ? "You have read-only access to Plant Management" : undefined} className="flex-1 sm:flex-initial">
@@ -1051,8 +1053,8 @@ export default function PlantSettings() {
 
       <TableCard
         icon={Factory}
-        title="Configured Plants"
-        subtitle="Manage plant colors and print locking behavior"
+        compactHeader
+        title={`${filteredPlants.length} plant${filteredPlants.length === 1 ? "" : "s"}`}
         searchValue={plantSearch}
         onSearchChange={setPlantSearch}
         searchPlaceholder="Search plants…"
@@ -1071,6 +1073,12 @@ export default function PlantSettings() {
             noResultsState="No plants match your search."
             hasActiveFilters={!!plantSearch}
             sortMode="client"
+            defaultSort={tableSort}
+            onSortingChange={(sv: any) => setTableSort(sv)}
+            pageIndex={pageIndex}
+            onPageIndexChange={setPageIndex}
+            pageSize={pageSize}
+            onPageSizeChange={setPageSize}
             // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box of
             // its own — matching develop.
             paginationMode="client"
@@ -1102,7 +1110,7 @@ export default function PlantSettings() {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-2">
                     <div
-                      className="rounded border px-2.5 py-1 text-sm font-bold truncate"
+                      className="rounded-full border px-2.5 py-1 text-sm font-bold truncate"
                       style={{ backgroundColor: plant.bgColor, color: plant.textColor, borderColor: plant.borderColor, borderWidth: "1px" }}
                     >
                       {plant.name}

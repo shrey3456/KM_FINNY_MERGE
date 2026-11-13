@@ -1,4 +1,5 @@
 ﻿import React, { useState, useEffect, useRef, useMemo } from "react";
+import { SingleDateFilter } from "@/components/SingleDateFilter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import ProformaSlipCSVImport from "@/components/ProformaSlipCSVImport";
 import { NotionStatusBadge } from "@/components/NotionStatusBadge";
@@ -63,7 +64,6 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import { DataTable, DataTableColumnToggle, DATA_TABLE_TOTALS_ROW, buildPageList, type DataTableColumn, type DataTableFooterContext } from "@/components/ui/data-table";
 import { toast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { productMatchesSearch, stateOfPlant } from "@/lib/sapByState";
 import { hasPageWriteAccess } from "@/lib/permissions";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -211,7 +211,10 @@ export default function ProformaSlips() {
     direction: 'asc'
   });
 
-  const DEFAULT_VISIBLE_COLUMN_IDS = ['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'actions'];
+  const DEFAULT_VISIBLE_COLUMN_IDS = ['orderDate', 'orderNumber', 'partyName', 'plant', 'totalQuantity', 'totalVolume', 'vehicleNumber', 'driverName', 'invoiceNumber', 'notionStatus', 'loadingStv', 'storeKeeperInfo', 'actions'];
+  // Notion Status, Dispatch Directory and StoreKeeper Info are shown by default. A browser that already saved a column choice from before gets them
+  // added once (after that its own choice is respected, including hiding them again).
+  const NEW_DEFAULT_COLUMN_IDS = ['notionStatus', 'loadingStv', 'storeKeeperInfo'];
   // Column visibility/order are real preferences, not working context for one sitting — saved to
   // localStorage (not sessionStorage) so choosing which columns to see survives closing the
   // browser/logging out, and only changes again when the user actually touches it here.
@@ -219,7 +222,13 @@ export default function ProformaSlips() {
     try {
       const raw = localStorage.getItem("proformaSlips:visibleColumnIds");
       const parsed = raw ? JSON.parse(raw) : null;
-      return Array.isArray(parsed) ? new Set(parsed) : new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+      if (!Array.isArray(parsed)) return new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+      const ids = new Set<string>(parsed);
+      if (localStorage.getItem("proformaSlips:statusColumnsDefault") !== "1") {
+        NEW_DEFAULT_COLUMN_IDS.forEach((id) => ids.add(id));
+        localStorage.setItem("proformaSlips:statusColumnsDefault", "1");
+      }
+      return ids;
     } catch {
       return new Set(DEFAULT_VISIBLE_COLUMN_IDS);
     }
@@ -252,7 +261,7 @@ export default function ProformaSlips() {
     }));
   };
   
-  // ── Filters — same model as Overall Stock ────────────────────────────────────
+  // ── Filters — same model as Stock Overview ────────────────────────────────────
   // Plant is a tab strip (single active plant, "" = All). Date is its own standalone control
   // (single day "d:YYYY-MM-DD" or range "r:from:to", both editable, plus quick-range presets).
   // Every other column gets an Excel-style per-column filter via the shared column-filter engine.
@@ -267,6 +276,8 @@ export default function ProformaSlips() {
     const saved = readSavedSlipFilters().date;
     return saved !== undefined ? saved : `d:${format(new Date(), "yyyy-MM-dd")}`;
   });
+  // The date control is single-day now; a range saved by the old filter would keep filtering unseen.
+  useEffect(() => { if (dateValue.startsWith("r:")) setDateValue(""); }, [dateValue]);
   const [dateOpen, setDateOpen] = useState(false);
   // The calendar half opens separately from the quick-ranges half — two buttons, two
   // popovers, one shared date value.
@@ -1035,7 +1046,7 @@ export default function ProformaSlips() {
   };
   
   // Excel-style per-column filters — every column except Plant (tab strip) and Order Date (its
-  // own Date control). Options are the column's own distinct values, same as Overall Stock.
+  // own Date control). Options are the column's own distinct values, same as Stock Overview.
   const filterableColumns: FilterableColumn<LockedProformaSlip>[] = useMemo(() => {
     const slips = (proformaSlips ?? []) as LockedProformaSlip[];
     const textOptions = (pick: (s: LockedProformaSlip) => string | null | undefined) =>
@@ -1635,16 +1646,15 @@ export default function ProformaSlips() {
               <div className="relative">
                 <Input
                   type="text"
-                  placeholder="Search items by name, Sr.No, barcode or SAP..."
+                  placeholder="Search items by name or Sr.No..."
                   value={searchQuery}
                   onChange={(e) => {
                     setSearchQuery(e.target.value);
                     if (e.target.value.trim() !== '' && products) {
-                      // Name / Sr.No as before; barcode and SAP follow the slip plant's state (the SAP of another state is not matched).
-                      const sapState = stateOfPlant(slip.plant, dbPlants);
                       const filtered = products.filter(product =>
+                        product.name?.toLowerCase().includes(e.target.value.toLowerCase()) ||
                         product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
-                        productMatchesSearch(product as any, e.target.value, sapState)
+                        product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
                       );
                       setFilteredProducts(filtered);
                     } else if (searchFocused && products) {
@@ -1754,15 +1764,15 @@ export default function ProformaSlips() {
                           <Input
                             autoFocus
                             type="text"
-                            placeholder="Search by name, Sr.No, barcode or SAP..."
+                            placeholder="Search by name, Sr.No, or barcode..."
                             value={skuEditQuery}
                             onChange={(e) => {
                               setSkuEditQuery(e.target.value);
                               if (e.target.value.trim() !== '' && products) {
-                                const sapState = stateOfPlant(slip.plant, dbPlants);
                                 setFilteredSkuProducts(products.filter(product =>
+                                  product.name?.toLowerCase().includes(e.target.value.toLowerCase()) ||
                                   product.newSr?.toLowerCase().includes(e.target.value.toLowerCase()) ||
-                                  productMatchesSearch(product as any, e.target.value, sapState)
+                                  product.barcode?.toLowerCase().includes(e.target.value.toLowerCase())
                                 ));
                               } else {
                                 setFilteredSkuProducts(products ?? null);
@@ -2147,7 +2157,7 @@ export default function ProformaSlips() {
       </div>
 
       {/* Plant tabs — single-select (All + each plant), coloured per Plant Management. Sits
-          between the page header and the table (same placement as Overall Stock). */}
+          between the page header and the table (same placement as Stock Overview). */}
       {plantOptions.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 mb-3">
           <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Plant</span>
@@ -2183,17 +2193,6 @@ export default function ProformaSlips() {
         {/* Header bar — title + search on top, filters directly beneath (matches Product Master) */}
         <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-            <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-full bg-[#001d6e] text-white">
-                <FileText className="h-4 w-4 sm:h-5 sm:w-5" />
-              </div>
-              <div>
-                <div className="text-lg sm:text-xl font-bold tracking-tight text-gray-900">Proforma Slips</div>
-                <div className="text-xs text-gray-400 leading-none mt-0.5">
-                  View and manage all proforma slips. Click on a row to view details.
-                </div>
-              </div>
-            </div>
 
             {/* Controls — on the same line as the title, pushed right. Collapsible search first,
                 then Date, + Filter, active filters, and Columns. */}
@@ -2211,46 +2210,13 @@ export default function ProformaSlips() {
                 from/to range is picked. Both write the same value, so each reflects the other.
                 Deliberately not the shared SingleDateFilter: that offers Today/Tomorrow/Yesterday and
                 is single-date only, so it can express neither of those two requirements. */}
-            <div className="flex items-center gap-1">
-              <Popover open={dateOpen} onOpenChange={setDateOpen}>
-                <PopoverTrigger asChild>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className={`h-8 gap-1.5 rounded-md text-xs font-medium ${dateValue ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "border-gray-300 text-gray-600 hover:bg-gray-50"}`}
-                  >
-                    <CalendarDays className="h-3.5 w-3.5" />
-                    {/* Shows what's actually applied — a single date, or "from – to" for a
-                        range — so the filter is readable without opening either panel. */}
-                    {dateValue ? describeDate(dateValue) : "Filter by date"}
-                    {dateValue && (
-                      <span
-                        role="button"
-                        aria-label="Clear date"
-                        onClick={(e) => { e.stopPropagation(); setDateValue(""); }}
-                        className="ml-0.5 rounded p-0.5 hover:bg-[#001d6e]/10"
-                      >
-                        <X className="h-3 w-3" />
-                      </span>
-                    )}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-72">
-                  {dateQuickBody}
-                </PopoverContent>
-              </Popover>
-
-              <Popover open={dateCalOpen} onOpenChange={(o) => { setDateCalOpen(o); if (o) setDatePickMode(dateIsRange ? "range" : "single"); }}>
-                <PopoverTrigger asChild>
-                  <Button size="sm" variant="outline" className="h-8 rounded-md border-gray-300 text-xs font-medium text-gray-500 hover:bg-gray-50">
-                    Calendar
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent align="start" sideOffset={6} avoidCollisions={false} className="w-auto p-3">
-                  {dateCustomBody}
-                </PopoverContent>
-              </Popover>
-            </div>
+            {/* Same date filter + calendar as Load Operations (single day). */}
+            <SingleDateFilter
+                pageKey="proforma-slips"
+                buttonClassName="h-8 text-xs"
+                selectedDate={dateValue.startsWith("d:") ? new Date(`${dateValue.slice(2)}T00:00:00`) : null}
+                onDateChange={(d: Date | null) => setDateValue(d ? `d:${format(d, "yyyy-MM-dd")}` : "")}
+              />
 
 
             {/* + Filter — every column except Plant, which is the tab strip. Date has its own

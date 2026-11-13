@@ -31,6 +31,7 @@ import {
   FileUp,
   PackageCheck,
   ChevronsLeft,
+  ChevronsRight,
   ChevronDown,
   LayoutList,
   Eye,
@@ -46,6 +47,7 @@ interface SidebarProps {
   onLogout?: () => void;
   onCollapse?: () => void;
   isMobile?: boolean;
+  collapsed?: boolean;
 }
 
 interface SidebarMenuItem {
@@ -66,7 +68,7 @@ interface SidebarMenuCategory {
   items: SidebarMenuItem[];
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => {
+const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile, collapsed = false }) => {
   const [location] = useLocation();
   const { user: authUser } = useAuth();
   const [fallbackUser, setFallbackUser] = useState(null);
@@ -169,11 +171,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           path: "/messages",
         },
         {
-          label: "Check In/Out",
-          icon: <Clock className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/inout",
-        },
-        {
           label: "Profile",
           icon: <UserRound className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/profile",
@@ -210,12 +207,6 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           ),
           path: "/loading",
           pageKey: "loading",
-        },
-        {
-          label: "Loading Overview",
-          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
-          path: "/loading-overview",
-          pageKey: "loading-overview",
         },
         {
           label: "Unload Operations",
@@ -277,6 +268,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           pageKey: "proforma",
         },
         {
+          label: "Load Master",
+          icon: <PackageCheck className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/load-master",
+          pageKey: "loading-overview",
+        },
+        {
           label: "Adjust Exchange Extra",
           icon: <ArrowLeftRight className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/adjust-exchange",
@@ -306,7 +303,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: (
             <Factory
               className="h-5 w-5 mr-3 text-[#001d6e]"
-              style={{ fill: "#4d7eff" }}
+              style={{ fill: "#9ca3af" }}
             />
           ),
           path: "/plant-settings",
@@ -317,6 +314,12 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
           icon: <Truck className="h-5 w-5 mr-3 text-[#001d6e]" />,
           path: "/vehicle-master",
           pageKey: "vehicle-master",
+        },
+        {
+          label: "Driver Master",
+          icon: <UserRound className="h-5 w-5 mr-3 text-[#001d6e]" />,
+          path: "/driver-master",
+          pageKey: "driver-master",
         },
         {
           label: "Vehicle Planning",
@@ -413,20 +416,48 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
   });
 
   return (
-    <aside className={isMobile ? "flex flex-col w-64 bg-white h-full" : "hidden lg:flex lg:flex-col lg:w-64 bg-white border-r border-gray-200 h-screen"}>
-      {/* Collapse button */}
-      <div className="flex justify-end px-3 pt-3 pb-1">
+    <aside className={isMobile ? "flex flex-col w-64 bg-white h-full" : `hidden lg:flex lg:flex-col ${collapsed ? "lg:w-16" : "lg:w-64"} bg-white border-r border-gray-200 h-full transition-[width]`}>
+      {/* Collapse / expand button */}
+      <div className={`flex px-3 pt-3 pb-1 ${collapsed ? "justify-center" : "justify-end"}`}>
         <button
           onClick={onCollapse}
           className="p-1.5 text-[#001d6e] hover:bg-gray-100 rounded-md transition-colors"
-          aria-label="Collapse sidebar"
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
-          <ChevronsLeft className="h-5 w-5" />
+          {collapsed ? <ChevronsRight className="h-5 w-5" /> : <ChevronsLeft className="h-5 w-5" />}
         </button>
       </div>
 
+      {/* Collapsed rail: icons only, label as tooltip. Section headings are dropped. */}
+      {collapsed && (
+        <div className="flex-1 py-2 overflow-y-auto overflow-x-hidden">
+          {filteredCategories.map((category, index) => (
+            <ul key={index} className={`space-y-1 px-2 ${index > 0 ? "mt-2 pt-2 border-t border-gray-100" : ""}`}>
+              {category.items.filter(isItemVisible).map((item) => (
+                <li key={item.path}>
+                  <Link
+                    href={item.path}
+                    title={item.label}
+                    aria-label={item.label}
+                    className={`relative flex items-center justify-center h-10 rounded-full hover:bg-gray-100 [&>svg]:mr-0 ${
+                      location === item.path ? "bg-[#001d6e]/10" : ""
+                    } ${item.disabled ? "pointer-events-none grayscale opacity-60" : ""}`}
+                  >
+                    {item.icon}
+                    {/* @ts-ignore */}
+                    {item.badge > 0 && location !== item.path && (
+                      <span className="absolute top-1 right-1 h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
+                    )}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          ))}
+        </div>
+      )}
+
       {/* Sidebar content */}
-      <div className="flex-1 py-2 overflow-y-auto">
+      <div className={`flex-1 py-2 overflow-y-auto ${collapsed ? "hidden" : ""}`}>
         {filteredCategories.map((category, index) => {
           const isCollapsed = collapsedSections.has(category.title);
           return (
@@ -461,9 +492,9 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
                     <li key={item.path}>
                       <Link
                         href={item.path}
-                        className={`flex items-center py-2 text-sm hover:bg-gray-50 ${
+                        className={`flex items-center py-2 text-sm rounded-full hover:bg-gray-100 ${
                           location === item.path
-                            ? "text-black font-medium border-l-4 border-[#001d6e] pl-3"
+                            ? "bg-[#001d6e]/10 text-[#001d6e] font-semibold pl-4"
                             : "text-black font-medium pl-4"
                         }`}
                       >
@@ -486,14 +517,15 @@ const Sidebar: React.FC<SidebarProps> = ({ onLogout, onCollapse, isMobile }) => 
       </div>
 
       {/* Logout at bottom */}
-      <div className="mt-auto px-4 py-4">
+      <div className={`mt-auto py-4 ${collapsed ? "px-2" : "px-4"}`}>
         <Link
           href="/logout"
           onClick={handleLogoutClick}
-          className="flex items-center text-sm text-black py-2 pl-4 hover:bg-gray-50"
+          title={collapsed ? "Log Out" : undefined}
+          className={`flex items-center text-sm text-black py-2 rounded-full hover:bg-gray-100 ${collapsed ? "justify-center" : "pl-4"}`}
         >
-          <LogOut className="h-5 w-5 mr-3 text-[#001d6e]" />
-          Log Out
+          <LogOut className={`h-5 w-5 text-[#001d6e] ${collapsed ? "" : "mr-3"}`} />
+          {!collapsed && "Log Out"}
         </Link>
       </div>
     </aside>

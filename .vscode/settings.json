@@ -1,0 +1,6 @@
+{
+  "git.useEditorAsCommitInput": false,
+  "git.postCommitCommand": "sync",
+  "git.enableSmartCommit": true,
+  "git.confirmSync": false
+}

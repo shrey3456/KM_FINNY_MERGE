@@ -7,6 +7,8 @@ export interface DataTableColumn<TData> {
   /** rowIndex is the row's 0-based position in the full sorted/filtered dataset (not just the current page). */
   render?: (row: TData, rowIndex: number) => ReactNode;
   sortable?: boolean;
+  /** Value the built-in sort compares, when it should differ from accessor (e.g. a padded code). */
+  sortAccessor?: (row: TData) => unknown;
   width?: number;
   minWidth?: number;
   /**

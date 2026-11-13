@@ -12,7 +12,7 @@ import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
 import { useRef } from 'react';
 import QRCode from 'qrcode';
-import finnyLogo from '@assets/finny-logo.png';
+const finnyLogo = '/finny-logo.png'; // served from client/public
 import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
 const Profile = () => {

@@ -1,17 +1,18 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import {
+import { ArrowUpDown,
   AlertTriangle, Calendar, Camera, CheckCircle2, ClipboardList, Factory, ChevronLeft, ChevronRight, Download, FileText,
   ChevronDown, ChevronUp, Keyboard, Layers, Link2, Loader2, Lock, Menu, Package, PackagePlus, Pencil, Plus, RotateCcw, RotateCw, ScanLine, Search, Trash2,
-  Truck, UserCircle2, X, Zap, Pause,
+  Truck, UserCircle2, X, Zap, Pause, Columns3,
 } from "lucide-react";
 import type { Result } from "@zxing/library";
+import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import { useSidebarContext } from "@/lib/sidebarContext";
+import { plantShortCode, useActiveTabRef, useTabSubtitle } from "@/lib/appTabs";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
-import { productMatchesSearch, stateOfPlant } from "@/lib/sapByState";
 import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, type FilterOption, matchAllConditions } from "@/lib/columnFilters";
 import { format as formatDay } from "date-fns";
@@ -21,7 +22,7 @@ import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { CollapsibleSearch } from "@/components/ui/collapsible-search";
 import { buildPageList } from "@/components/ui/data-table/data-table-pagination";
-import { DataTable, DataTableColumnToggle, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,9 +30,12 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { PlantFilter } from "@/components/PlantFilter";
 import { NotionStatusBadge } from "@/components/NotionStatusBadge";
 import { withNotionNotice } from "@/lib/notionSyncNotice";
@@ -99,6 +103,7 @@ function ItemRowThumb({ name, className = "h-10 w-10" }: { name: string | null; 
       key={attempt}
       name={name}
       zoomable
+      thumb
       onLoadState={setFailed}
       className={`${className} shrink-0 rounded border border-gray-200 bg-white object-contain`}
     />
@@ -106,9 +111,11 @@ function ItemRowThumb({ name, className = "h-10 w-10" }: { name: string | null; 
 }
 
 type ProformaItem = {
-  id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
-  // The exact Product Master product of this line. Two lines can share a barcode (the 35 g and the 37 g peanuts) and are told apart by it.
+  // The PRODUCT this line means - two products can share a barcode (65 g / 60 g); every scan / correction is sent with it so it counts on this line.
   productId?: number | null;
+  // The product has no SAP for this plant's state (the SAP shows blank).
+  noSapForPlant?: boolean;
+  id: number; barcode: string | null; itemName: string | null; sapCode: string | null;
   srNo: string | null; volumeInCuFt: string | null;
   quantity: number | null;
   // Progress fields, added by withProgress() server-side
@@ -132,7 +139,7 @@ type ProformaSlip = {
   vehicleNumber: string | null; driverName: string | null; rtoNumber: string | null;
   vehicleVolume: number | null;
   loadingCompletedAt: string | null; loadingCompletedByCode: string | null;
-  // An admin reopened this load from Dispatched: normal Complete is off, only an admin's "Complete & return" finishes it.
+  // An admin reopened this load from a later status: normal Complete is off, only an admin's "Complete & return" finishes it.
   reopenedFromDispatch?: boolean;
   // The status it was reopened from (SHORTAGE, DISPATCHED ...): the admin's "Complete & return" puts it back there.
   reopenedFromStatus?: string | null;
@@ -170,8 +177,6 @@ type VehicleSuggestion = {
   fromNotion?: boolean;
 };
 type LoadingRecord = {
-  // generated from the Sales Orders file: view only, no Reopen / Delete
-  systemGenerated?: boolean;
   // the status stored on the slip (Notion's "Finny Status"), and whether it was created under Auto Dispatch
   notionStatus?: string | null; autoDispatch?: boolean; dispatchedAt?: string | null;
   id: number; orderNumber: string; partyName: string | null; plant: string | null;
@@ -183,6 +188,9 @@ type LoadingRecord = {
   createdAt: string; orderDate: string | null;
   // Order's total quantity and how much of it is loaded so far (non-voided scans).
   totalQty?: number; loadedQty?: number;
+  // When the first (non-voided) box was scanned — used as the start of Time Taken when the row itself was
+  // created later than its own work.
+  firstScanAt?: string | null;
   // The order's own cargo volume and how much of it is loaded so far (cu ft).
   orderVolume?: number | null; loadedVolume?: number;
   loadingCompletedAt: string | null;
@@ -200,7 +208,7 @@ type ScanResponse = { slip: ProformaSlip; items: ProformaItem[]; allComplete: bo
 type LoadHistoryEvent = {
   id: number; barcode: string | null; itemName: string | null; totalQty: number;
   isExtra: boolean; voided: boolean | null; scannedByName: string | null; scannedAt: string;
-  stv: string | null;
+  stv: string | null; sapCode?: string | null;
   // Written by the Items table's +/- buttons, not a scan — shown as "Loading Adjust".
   isAdjust?: boolean;
 };
@@ -452,6 +460,12 @@ export default function LoadOperation() {
     ? `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, "0")}-${String(selectedDate.getDate()).padStart(2, "0")}`
     : "";
   const [selectedPlants, setSelectedPlants] = usePersistentFilter<string[]>("loading:listPlants", []);
+  // Show the plant filter on this page's tab in short form, e.g. "Load Operations · IND, VAL".
+  useTabSubtitle(
+    selectedPlants.length > 3
+      ? `${selectedPlants.length} plants`
+      : selectedPlants.map(plantShortCode).join(", "),
+  );
   const [activeViewTab, setActiveViewTab] = usePersistentFilter("loading:listTab", "overall");
   // "My Slips" — one-click filter to just the slips the current user created (link-vehicle's own
   // created_by_code), applied server-side (see /api/loading/records) same as every other filter
@@ -467,31 +481,6 @@ export default function LoadOperation() {
   }, [activeViewTab, createdByMe]); // eslint-disable-line react-hooks/exhaustive-deps
   const [sortBy, setSortBy] = usePersistentFilter<"orderNumber" | "creationDate" | "completedAt">("loading:listSortBy", "creationDate");
   const [sortOrder, setSortOrder] = usePersistentFilter<"asc" | "desc">("loading:listSortOrder", "desc");
-  // Which columns the landing list shows. Volume and Loaded / Total start hidden; anyone can switch them on from the Columns menu,
-  // and the choice is remembered in this browser. Actions is not hideable, so the open button can never be lost.
-  const RECORD_COLUMN_LABELS: Record<string, string> = {
-    orderDate: "Order Date", loadDate: "Load Date", orderNumber: "Order Number", party: "Party Name", plant: "Plant", vehicle: "Vehicle No.",
-    stv: "Dispatch Directory", status: "Status", owner: "Current Owner", loaded: "Loaded / Total", volume: "Volume", timeTaken: "Time Taken",
-    completedBy: "Completed By", creator: "Creator", actions: "Actions",
-  };
-  const RECORD_DEFAULT_HIDDEN = ["loaded", "volume"];
-  const RECORD_COLUMNS_KEY = "loading:listVisibleColumns";
-  const [recordVisibleCols, setRecordVisibleCols] = useState<Set<string>>(() => {
-    const all = Object.keys(RECORD_COLUMN_LABELS);
-    try {
-      const raw = localStorage.getItem(RECORD_COLUMNS_KEY);
-      const parsed = raw ? JSON.parse(raw) : null;
-      if (Array.isArray(parsed)) return new Set<string>([...parsed.filter((c: string) => all.includes(c)), "actions"]);
-    } catch { /* storage unavailable */ }
-    return new Set(all.filter((c) => !RECORD_DEFAULT_HIDDEN.includes(c)));
-  });
-  useEffect(() => {
-    try { localStorage.setItem(RECORD_COLUMNS_KEY, JSON.stringify(Array.from(recordVisibleCols))); } catch { /* storage unavailable */ }
-  }, [recordVisibleCols]);
-  const showCol = (id: string) => recordVisibleCols.has(id);
-  const recordToggleColumns: DataTableColumn<LoadingRecord>[] = Object.keys(RECORD_COLUMN_LABELS)
-    .filter((id) => id !== "actions")
-    .map((id) => ({ id, header: RECORD_COLUMN_LABELS[id] }));
   // Excel-style column filters for the landing list (see recordFilterColumns below).
   const [recordColumnConditions, setRecordColumnConditions] = usePersistentFilter<Record<string, FilterCondition>>("loading:columnFilters", {});
 
@@ -523,7 +512,7 @@ export default function LoadOperation() {
       setRecordsPage(1);
     }
   }, [recordsFilterSignature]);
-  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; totals?: { slips: number; qty: number; loadedQty: number; volume: number; loadedVolume: number }; slipsCount: number; loadingCount: number; readyDespCount: number; dispatchedCount?: number; otherCount?: number }>({
+  const recordsQuery = useQuery<{ records: LoadingRecord[]; total: number; slipsCount: number; loadingCount: number; readyDespCount: number; dispatchedCount?: number; otherCount?: number }>({
     queryKey: ["/api/loading/records", recordsPage, recordsPageSize, selectedDateParam, debouncedListSearch, selectedPlants.join(","), activeViewTab, createdByMe],
     queryFn: async () => {
       const params = new URLSearchParams({ limit: String(recordsPageSize), offset: String(recordsOffset) });
@@ -571,7 +560,7 @@ export default function LoadOperation() {
   const recordAccentBorderClass = (r: LoadingRecord) =>
     r.loadingCompletedAt ? "border-l-4 border-l-emerald-400" : r.loadingPausedAt ? "border-l-4 border-l-amber-400" : "border-l-4 border-l-blue-400";
 
-  // Same filter engine and UI as Overall Stock / Scan History / Scan Viewer: a "+ Filter" button,
+  // Same filter engine and UI as Stock Overview / Scan History / Scan Viewer: a "+ Filter" button,
   // a filter icon on each column header, and removable chips. Options come from the records on
   // this page, so a checklist never offers a value that would filter everything away.
   const recordDistinct = (values: (string | null | undefined)[]): FilterOption[] =>
@@ -584,13 +573,10 @@ export default function LoadOperation() {
     r.loadingCompletedAt ? (r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "") : "";
   // Reopen: an admin/super-admin, Supervisor, or the load's current owner (server enforces the
   // same rule).
-  // A load created under Auto Dispatch cannot be reopened once it has gone out (Dispatched, Delivered ...) — the server refuses it too.
+  // A load created under Auto Dispatch cannot be reopened by anyone but an admin once it has gone out (the server refuses it too).
   const isLockedByDispatch = (r: LoadingRecord) => !!r.autoDispatch && (!!r.dispatchedAt || !!laterStageOf(r));
-  // A Dispatched load can be reopened by an admin only; every other stage after it stays locked for loads created under Auto Dispatch.
-  const isDispatchedRecord = (r: LoadingRecord) => String(r.notionStatus ?? "").trim().toUpperCase() === "DISPATCHED";
   // A load that has gone out (any later status, or still stamped dispatched) is the admin's to reopen from ANY of those statuses, but only for a recent
-  // slip: order date within the last 3 days (server enforces it too). Every other load needs to be completed first. A load Notion marked Dispatched may
-  // never have been completed in the app, so the completion stamp is not required for a gone-out load.
+  // slip: order date within the last 3 days (server enforces it too). Every other load needs to be completed first.
   const REOPEN_WINDOW_DAYS = 3;
   const isRecentSlip = (r: LoadingRecord) => {
     const day = String(r.orderDate ?? "").slice(0, 10);
@@ -599,11 +585,11 @@ export default function LoadOperation() {
     cutoff.setUTCDate(cutoff.getUTCDate() - REOPEN_WINDOW_DAYS);
     return day >= cutoff.toISOString().slice(0, 10);
   };
-  const hasGoneOut = (r: LoadingRecord) => isDispatchedRecord(r) || !!laterStageOf(r) || !!r.dispatchedAt;
+  const hasGoneOut = (r: LoadingRecord) => !!laterStageOf(r) || !!r.dispatchedAt;
   const canReopenRecord = (r: LoadingRecord) =>
-    !r.systemGenerated && (hasGoneOut(r)
+    hasGoneOut(r)
       ? admin && isRecentSlip(r)
-      : !!r.loadingCompletedAt && !isLockedByDispatch(r) && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode)));
+      : !!r.loadingCompletedAt && !isLockedByDispatch(r) && (canBypassOwnership || (!!r.loadingOwnerCode && r.loadingOwnerCode === currentUser()?.userCode));
   const recordFilterColumns: FilterableColumn<LoadingRecord>[] = [
     { id: "orderNumber", label: "Order No.", filterType: "text", options: recordDistinct(recordsItems.map((r) => r.orderNumber)), accessor: (r) => r.orderNumber },
     { id: "orderDate", label: "Order Date", filterType: "date", options: recordDayOptions(recordsItems.map((r) => r.orderDate)), accessor: (r) => r.orderDate },
@@ -638,6 +624,155 @@ export default function LoadOperation() {
     );
   };
 
+  // ── The landing table's columns ────────────────────────────────────────────────────────────────
+  // Each can be hidden (Columns menu above the table) and dragged wider or narrower (grab the right
+  // edge of a heading; double-click it to reset). Both choices are remembered on this device.
+  // Shown by default: Load Date, Order Date, Order Number, Party Name, Plant, Vehicle, Dispatch Directory, Status,
+  // Current Owner, Time Taken, Completed By, Creator (and Actions). Loaded / Total and Volume stay hidden until
+  // someone adds them from Columns.
+  const DEFAULT_HIDDEN_LIST_COLS = ["loadedQty", "volume"];
+  const LIST_COLUMN_ORDER = ["loadDate", "orderDate", "orderNumber", "party", "plant", "vehicle", "stv", "status", "owner", "loadedQty", "volume", "timeTaken", "completedBy", "creator"];
+  type ListColumn = {
+    id: string; label: string; title?: string; filterId?: string; cellClassName?: string; stopClick?: boolean;
+    render: (r: LoadingRecord) => ReactNode;
+  };
+  const [hiddenListCols, setHiddenListCols] = useState<string[]>(() => {
+    try { const raw = localStorage.getItem("loading:list:hiddenCols:v3"); if (raw == null) return DEFAULT_HIDDEN_LIST_COLS; const v = JSON.parse(raw); return Array.isArray(v) ? v : DEFAULT_HIDDEN_LIST_COLS; } catch { return DEFAULT_HIDDEN_LIST_COLS; }
+  });
+  const [listColWidths, setListColWidths] = useState<Record<string, number>>(() => {
+    try { const v = JSON.parse(localStorage.getItem("loading:list:colWidths") ?? "{}"); return v && typeof v === "object" ? v : {}; } catch { return {}; }
+  });
+  useEffect(() => { try { localStorage.setItem("loading:list:hiddenCols:v3", JSON.stringify(hiddenListCols)); } catch { /* private mode */ } }, [hiddenListCols]);
+  useEffect(() => { try { localStorage.setItem("loading:list:colWidths", JSON.stringify(listColWidths)); } catch { /* private mode */ } }, [listColWidths]);
+
+  const listDay = (iso: string) => new Date(iso).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" });
+  const rawListColumns: ListColumn[] = [
+    {
+      id: "orderDate", label: "Order Date", filterId: "orderDate", title: "The proforma slip's own order date",
+      render: (r) => (r.orderDate ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" }) : "-"),
+    },
+    { id: "loadDate", label: "Load Date", filterId: "loadDate", title: "When this load operation was started", render: (r) => listDay(r.createdAt) },
+    { id: "orderNumber", label: "Order Number", filterId: "orderNumber", render: (r) => `#${r.orderNumber}` },
+    { id: "party", label: "Party Name", filterId: "party", render: (r) => r.partyName || "-" },
+    { id: "plant", label: "Plant", filterId: "plant", render: (r) => (r.plant ? <PlantBadge plant={r.plant} /> : "-") },
+    {
+      id: "vehicle", label: "Vehicle No.", filterId: "vehicle", title: "Vehicle number (top) and RTO number (below)",
+      render: (r) => (
+        <div className="flex flex-col">
+          <span>{r.vehicleNumber || "-"}</span>
+          {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
+        </div>
+      ),
+    },
+    {
+      id: "stv", label: "Dispatch Directory", filterId: "stv", title: "The Dispatch Directory this load was started on — set once at Create Operation",
+      render: (r) => (r.loadingStv
+        ? <span className="inline-flex items-center whitespace-nowrap rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
+        : <span className="text-muted-foreground">-</span>),
+    },
+    {
+      id: "status", label: "Status", filterId: "status",
+      render: (r) => (
+        <div className="flex flex-wrap items-center gap-1">
+          <NotionStatusBadge status={recordStatus(r)} />
+          {r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}
+        </div>
+      ),
+    },
+    {
+      id: "owner", label: "Current Owner", filterId: "owner", title: "Whoever currently has the right to scan this load", stopClick: true,
+      render: (r) => (r.loadingCompletedAt ? (
+        "-"
+      ) : r.loadingPausedAt ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-amber-700">Paused · {r.loadingOwnerName ?? r.loadingOwnerCode ?? "—"}</span>
+          {canWrite && (
+            <Button
+              size="sm"
+              className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
+              disabled={claimLoadMutation.isPending}
+              onClick={() => setClaimTarget(r.orderNumber)}
+            >
+              Claim
+            </Button>
+          )}
+        </div>
+      ) : r.loadingOwnerName || r.loadingOwnerCode ? (
+        <span className="text-xs text-gray-600">{r.loadingOwnerName ?? r.loadingOwnerCode}</span>
+      ) : (
+        <span className="text-xs text-gray-300">—</span>
+      )),
+    },
+    {
+      id: "loadedQty", label: "Loaded / Total", title: "Quantity loaded so far out of the order's total quantity", cellClassName: "whitespace-nowrap tabular-nums",
+      render: (r) => <><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></>,
+    },
+    {
+      id: "volume", label: "Volume", title: "Volume loaded so far out of the order's total volume", cellClassName: "whitespace-nowrap tabular-nums",
+      render: (r) => (r.orderVolume != null
+        ? <><span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.orderVolume.toFixed(2)}</span></>
+        : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>),
+    },
+    {
+      id: "timeTaken", label: "Time Taken", title: "Time from when the load was created to when it was marked complete — blank until the load is completed",
+      render: (r) => {
+        // The creation time — or, if the row was written AFTER its own scans (so the clock would run
+        // backwards), the moment the first box was scanned.
+        const startMs = Math.min(new Date(r.createdAt).getTime(), r.firstScanAt ? new Date(r.firstScanAt).getTime() : Infinity);
+        const start = Number.isFinite(startMs) ? new Date(startMs).toISOString() : r.createdAt;
+        // Filled only once the load is completed (the Complete button); blank while it is still loading.
+        if (r.loadingCompletedAt) return formatDuration(start, r.loadingCompletedAt) ?? "-";
+        return " ";
+      },
+    },
+    {
+      id: "completedBy", label: "Completed By", filterId: "completedBy", title: "Who marked this load complete — the Complete button, or the scan that finished it",
+      render: (r) => (r.loadingCompletedAt
+        ? <span className="text-xs font-medium text-gray-700">{r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "—"}</span>
+        : <span className="text-xs text-gray-300">—</span>),
+    },
+    {
+      id: "creator", label: "Creator", filterId: "creator",
+      render: (r) => (
+        <div className="flex flex-col">
+          <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
+          <span className="text-xs text-muted-foreground">
+            {listDay(r.createdAt)}{" "}
+            {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
+          </span>
+        </div>
+      ),
+    },
+  ];
+  const listColumns = [...rawListColumns].sort((a, b) => LIST_COLUMN_ORDER.indexOf(a.id) - LIST_COLUMN_ORDER.indexOf(b.id));
+  const visibleListColumns = listColumns.filter((c) => !hiddenListCols.includes(c.id));
+  const listColStyle = (id: string) => {
+    const w = listColWidths[id];
+    return w ? { width: w, minWidth: w, maxWidth: w } : undefined;
+  };
+  const toggleListColumn = (id: string) =>
+    setHiddenListCols((cur) => {
+      if (cur.includes(id)) return cur.filter((x) => x !== id);
+      // Never hide the last visible column — the table would have nothing left to show but Actions.
+      return listColumns.length - cur.length <= 1 ? cur : [...cur, id];
+    });
+  const resetListColumns = () => { setHiddenListCols(DEFAULT_HIDDEN_LIST_COLS); setListColWidths({}); };
+  const resetListColWidth = (id: string) => setListColWidths((cur) => { const next = { ...cur }; delete next[id]; return next; });
+  const startListColResize = (e: ReactMouseEvent<HTMLElement>, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = e.currentTarget.parentElement as HTMLElement;
+    const startX = e.clientX;
+    const startW = th.getBoundingClientRect().width;
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(60, Math.round(startW + ev.clientX - startX));
+      setListColWidths((cur) => ({ ...cur, [id]: w }));
+    };
+    const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
   // Whether any filter narrowing the list is currently active — drives the empty-state message
   // below ("nothing loaded yet" vs "nothing matches"), now that recordsItems IS the already
   // server-filtered page rather than the raw unfiltered one.
@@ -660,11 +795,6 @@ export default function LoadOperation() {
       return dir * (new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     });
 
-  // Totals over the WHOLE list for the current filters (every page), computed by the server.
-  const listTotals = recordsQuery.data?.totals ?? { slips: 0, qty: 0, loadedQty: 0, volume: 0, loadedVolume: 0 };
-  const totalsLeftQty = Math.max(0, listTotals.qty - listTotals.loadedQty);
-  const totalsLeftVolume = Math.max(0, listTotals.volume - listTotals.loadedVolume);
-
   function refreshOwnerHistory(orderNumber: string | null | undefined) {
     if (!orderNumber) return;
     queryClient.invalidateQueries({ queryKey: ["/api/loading/proforma", orderNumber, "handoffs"] });
@@ -681,8 +811,8 @@ export default function LoadOperation() {
     },
     onSuccess: (_data, orderNumber) => {
       toast(withNotionNotice({ title: "Load reopened" }, _data));
-      // A dispatched load that was reopened is back in Loading — show that tab.
-      if (activeViewTab === "dispatched") setActiveViewTab("loading");
+      // A load that had gone out and was reopened is back in Loading — show that tab.
+      if (activeViewTab === "dispatched" || activeViewTab === "other") setActiveViewTab("loading");
       recordsQuery.refetch();
       refreshOwnerHistory(orderNumber);
     },
@@ -848,6 +978,7 @@ export default function LoadOperation() {
   // the rotated container, so it turns with the content) reopens a path back to real
   // navigation. Same pattern Unloading's own rotate view already uses.
   const { setKioskRotateClass: setSidebarKioskRotateClass, setPortalRotation } = useSidebarContext();
+  const tabActiveRef = useActiveTabRef();
   const rotated = rotation !== 0;
   const kioskRotateClass = rotated ? `kiosk-rotate-${rotation}` : "";
   const quarterTurn = rotation === 90 || rotation === 270;
@@ -1143,6 +1274,15 @@ export default function LoadOperation() {
   }
 
   useEffect(() => {
+    // Opened from Load Master (/loading?order=<number>): open that slip — the existing load if one was
+    // started, otherwise the Create Operation dialog — instead of resuming the remembered order.
+    let fromLink: string | null = null;
+    try { fromLink = new URLSearchParams(window.location.search).get("order"); } catch { /* ignore */ }
+    if (fromLink && fromLink.trim()) {
+      try { window.history.replaceState(null, "", window.location.pathname); } catch { /* ignore */ }
+      openOrder(fromLink.trim(), { confirm: true });
+      return;
+    }
     if (admin) return; // admin never auto-resumes a remembered order — always starts on the list
     const saved = localStorage.getItem(LAST_ORDER_KEY);
     if (saved) openOrder(saved, { silent: true });
@@ -1268,6 +1408,8 @@ export default function LoadOperation() {
       buffer = "";
     };
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Hidden tabs stay mounted — leave scans to the tab that is on screen.
+      if (!tabActiveRef.current) return;
       const target = e.target as HTMLElement | null;
       if (target === orderInputRef.current) return;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
@@ -1541,9 +1683,9 @@ export default function LoadOperation() {
     : null;
   // Stock available for the picked product — it may not be on the slip, so no items row has it.
   const extraStockQuery = useQuery<{ stock: number }>({
-    queryKey: ["/api/loading/proforma", slip?.orderNumber, "stock", extraTarget?.barcode],
+    queryKey: ["/api/loading/proforma", slip?.orderNumber, "stock", extraTarget?.barcode, extraTarget?.id],
     queryFn: async () => {
-      const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/stock?barcode=${encodeURIComponent(extraTarget!.barcode)}`);
+      const res = await apiRequest("GET", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/stock?barcode=${encodeURIComponent(extraTarget!.barcode)}&productId=${extraTarget!.id}`);
       if (!res.ok) throw new Error("Failed to fetch stock");
       return res.json();
     },
@@ -1552,11 +1694,12 @@ export default function LoadOperation() {
   const extraSearchResults = (() => {
     const q = extraSearch.trim().toLowerCase();
     if (!q) return [];
-    // SAP search follows the slip's plant state (GJ / MP / UP); name and barcode are not limited by state, so a barcode two products
-    // share shows both. See lib/sapByState.ts.
-    const sapState = stateOfPlant((slip as any)?.plant, allPlants);
     return (allProductsQuery.data ?? [])
-      .filter((p) => productMatchesSearch(p as any, q, sapState))
+      .filter((p) =>
+        (p.name ?? "").toLowerCase().includes(q) ||
+        (p.barcode ?? "").toLowerCase().includes(q) ||
+        (p.sapCode ?? "").toLowerCase().includes(q),
+      )
       .slice(0, 20);
   })();
   function resetExtraDialog() {
@@ -1582,8 +1725,6 @@ export default function LoadOperation() {
   function tryAutoPickExtraBarcode(value: string): boolean {
     const q = value.trim();
     if (!q) return false;
-    const sameBarcode = (allProductsQuery.data ?? []).filter((p) => (p.barcode ?? "").toLowerCase() === q.toLowerCase());
-    if (sameBarcode.length > 1) return false; // two products share this barcode: show both in the list, never pick one for them
     const exact = resolveExtraProductForBarcode(q);
     if (exact) { pickExtraTarget(exact); return true; }
     return false;
@@ -1644,13 +1785,13 @@ export default function LoadOperation() {
       if (!adjustTarget || !slip) throw new Error("Nothing to adjust");
       const delta = adjustTarget.direction === "add" ? adjustQty : -adjustQty;
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip.orderNumber)}/adjust-load`, {
-        barcode: adjustTarget.item.barcode, delta, productId: adjustTarget.item.productId ?? undefined,
+        barcode: adjustTarget.item.barcode, delta, productId: adjustTarget.item.productId ?? null,
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to adjust quantity");
       return res.json() as Promise<ScanResponse>;
     },
     onSuccess: (data) => {
-      markItemScanned(adjustTarget?.item.barcode, data.items, adjustTarget?.item.productId);
+      markItemScanned(adjustTarget?.item.barcode, data.items);
       refreshOwnerHistory(data.slip.orderNumber);
       setSlip(data.slip);
       setItems(data.items);
@@ -1730,9 +1871,8 @@ export default function LoadOperation() {
   // Which item was touched most recently (see filteredItems' sort). Reset when another order is
   // opened, so one order's scan order never carries into the next.
   const itemScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
-  function markItemScanned(barcode: string | null | undefined, list: ProformaItem[], productId?: number | null) {
-    const hit = (productId != null ? list.find((i) => normalize(i.barcode) === normalize(barcode ?? "") && i.productId === productId) : undefined)
-      ?? list.find((i) => normalize(i.barcode) === normalize(barcode ?? ""));
+  function markItemScanned(barcode: string | null | undefined, list: ProformaItem[]) {
+    const hit = list.find((i) => normalize(i.barcode) === normalize(barcode ?? ""));
     if (!hit) return;
     const s = itemScanSeqRef.current;
     s.seq += 1;
@@ -1759,8 +1899,23 @@ export default function LoadOperation() {
   // Pending confirm dialog (opens for anything that isn't a clean full-pallet auto-scan). Never
   // an extra — that goes through its own dedicated Add Extra popup instead (extraDialogOpen).
   const [pending, setPending] = useState<{ barcode: string; item: ProformaItem | null } | null>(null);
-  // "Which item?" — the scanned barcode is on two lines of this slip (two products); the operator picks, then the normal scan flow continues.
-  const [chooseItem, setChooseItem] = useState<{ barcode: string; options: ProformaItem[] } | null>(null);
+  // A barcode on more than one item of this order (65 g / 60 g): the person picks which one this scan is for.
+  const [multiMatch, setMultiMatch] = useState<{ barcode: string; matches: ProformaItem[] } | null>(null);
+  // A scan terminator (Enter) can still be arriving when the picker opens and would tap its first button: taps in the first moments are ignored.
+  const multiMatchAtRef = useRef(0);
+  // Items whose product has no SAP for this plant's state show a blank SAP - the person is told once per order, so the Product Master can be fixed.
+  const noSapNotifiedRef = useRef("");
+  useEffect(() => {
+    if (!slip?.orderNumber || items.length === 0) return;
+    const missing = items.filter((i) => i.noSapForPlant);
+    if (missing.length === 0 || noSapNotifiedRef.current === slip.orderNumber) return;
+    noSapNotifiedRef.current = slip.orderNumber;
+    toast({
+      title: `No SAP for this plant (${missing.length} item${missing.length === 1 ? "" : "s"})`,
+      description: missing.slice(0, 4).map((i) => i.itemName ?? i.barcode).join(" · ") + (missing.length > 4 ? ` · …and ${missing.length - 4} more` : "") + ` — no ${slip.plant ?? "plant"} SAP in the Product Master.`,
+      variant: "destructive",
+    });
+  }, [slip?.orderNumber, items]);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
 
@@ -1796,7 +1951,7 @@ export default function LoadOperation() {
       // immediately; the 15s silent poll above (and the real response on a live scan) corrects it.
       const result = await scanOrQueue(
         `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/scan`,
-        { barcode, qty, extra: !!extra, ...(productId != null ? { productId } : {}) },
+        { barcode, qty, extra: !!extra, productId: productId ?? null },
         `${barcode} × ${qty}${extra ? " (extra)" : ""} — Loading #${slip!.orderNumber}`,
       );
       if (result.queued) return { queued: true };
@@ -1844,7 +1999,7 @@ export default function LoadOperation() {
         return;
       }
       const data = result.data;
-      markItemScanned(data.event?.barcode, data.items, data.event?.productId);
+      markItemScanned(data.event?.barcode, data.items);
       refreshOwnerHistory(data.slip.orderNumber);
       setSlip(data.slip);
       setItems(data.items);
@@ -1899,7 +2054,7 @@ export default function LoadOperation() {
 
   // Admin only: finishes a load reopened from a later status and puts it straight back to that status.
   const returnStatusName = String(slip?.reopenedFromStatus ?? "").trim().toUpperCase() || "DISPATCHED";
-  const completeDispatchMutation = useMutation({
+  const completeReturnMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/complete-and-return`, {});
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Complete & return failed");
@@ -1916,6 +2071,25 @@ export default function LoadOperation() {
       toast(withNotionNotice({ title: `Load completed and returned to ${returnStatusName}` }, data));
     },
     onError: (err: any) => toast({ title: "Complete & return failed", description: parseApiErrorMessage(err), variant: "destructive" }),
+  });
+
+  // "Sync to Notion" — re-checks this load's vehicle and status in Notion right now and fixes
+  // whatever differs (the server only writes to Notion here, never to this app).
+  const syncNotionMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/loading/proforma/${encodeURIComponent(slip!.orderNumber)}/sync-notion`, {});
+      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Sync failed");
+      return res.json() as Promise<{ notion: { state: string; message: string } }>;
+    },
+    onSuccess: (data) => {
+      const state = data.notion?.state;
+      toast({
+        title: state === "ok" ? "Notion is up to date" : state === "skipped" ? "Nothing changed in Notion" : "Notion not updated yet",
+        description: data.notion?.message,
+        variant: state === "retrying" || state === "failed" ? "destructive" : undefined,
+      });
+    },
+    onError: (err: any) => toast({ title: "Could not sync to Notion", description: parseApiErrorMessage(err), variant: "destructive" }),
   });
 
   // Shift handoff — Pause (current owner/admin steps away) and Claim (anyone with write access
@@ -1984,9 +2158,9 @@ export default function LoadOperation() {
     }
   }
 
-  async function handleItemBarcode(rawBarcode: string, chosen?: ProformaItem) {
+  async function handleItemBarcode(rawBarcode: string, forcedItem?: ProformaItem) {
     const barcode = rawBarcode.trim();
-    if (!barcode || !slip || locked || scanLockRef.current || pending || (!chosen && chooseItem)) return;
+    if (!barcode || !slip || locked || scanLockRef.current || pending || (multiMatch && !forcedItem)) return;
 
     // Shift handoff — the server rejects this too (checkLoadOwnership in /scan), but catching it
     // here avoids opening a confirm dialog for a scan that's just going to bounce anyway.
@@ -2012,7 +2186,7 @@ export default function LoadOperation() {
     // is discarded before anything else (no beep, no dialog): see SAME_BARCODE_COOLDOWN_MS above.
     const nb = normalize(barcode);
     const last = lastScanRef.current;
-    if (!chosen && last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) {
+    if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) {
       toast({
         title: "Same barcode scanned again — ignored",
         description: `Wait ${Math.max(1, Math.ceil((SAME_BARCODE_COOLDOWN_MS - (Date.now() - last.at)) / 1000))} s to scan the same item again.`,
@@ -2020,20 +2194,20 @@ export default function LoadOperation() {
       });
       return;
     }
-    // Two lines of this slip carry the barcode (two different products) → ALWAYS ask which one, every scan — even when only one of them
-    // still has boxes or stock. Nothing is remembered between scans.
-    if (!chosen) {
-      const lines = itemsRef.current.filter((i) => i.id > 0 && normalize(i.barcode) === nb);
-      if (new Set(lines.map((l) => (l.productId != null ? `p${l.productId}` : "x"))).size > 1) {
-        setItemBarcode("");
-        setChooseItem({ barcode, options: lines });
+    lastScanRef.current = { barcode, at: Date.now() };
+
+    const sameBarcode = itemsRef.current.filter((i) => normalize(i.barcode) === normalize(barcode));
+    // Two or more items share this barcode: the picker asks which one (unless only one still has room and stock - then it is that one).
+    if (!forcedItem && sameBarcode.length > 1) {
+      const open = sameBarcode.filter((m) => m.remaining > 0 && (m.stockAvailable ?? 0) > 0);
+      if (open.length !== 1) {
+        lastScanRef.current = null;
+        setMultiMatch({ barcode, matches: sameBarcode });
+        multiMatchAtRef.current = Date.now();
         return;
       }
     }
-    lastScanRef.current = { barcode, at: Date.now() };
-
-    const item = (chosen ? itemsRef.current.find((i) => i.id === chosen.id) ?? chosen : null)
-      ?? itemsRef.current.find((i) => normalize(i.barcode) === normalize(barcode)) ?? null;
+    const item = forcedItem ?? (sameBarcode.length > 1 ? sameBarcode.find((m) => m.remaining > 0 && (m.stockAvailable ?? 0) > 0) ?? sameBarcode[0] : (sameBarcode[0] ?? null));
 
     // A stock-zero item on THIS slip is stopped right here, before even opening the dialog,
     // since there's nothing to load.
@@ -2077,7 +2251,7 @@ export default function LoadOperation() {
       && item.expected > 0 && ipp >= 1 && item.remaining >= ipp && (item.stockAvailable ?? 0) >= ipp;
     if (canAutoScan) {
       const qty = ipp;
-      scanItemMutation.mutate({ barcode, qty, productId: item.productId }, {
+      scanItemMutation.mutate({ barcode, qty, productId: item?.productId ?? null }, {
         // Queued (offline) has no event data to show — the mutation's own onSuccess already
         // toasts "Scan saved offline" in that case, so this just skips the feedback popup.
         onSuccess: (result) => {
@@ -2143,6 +2317,8 @@ export default function LoadOperation() {
       buffer = "";
     };
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Hidden tabs stay mounted — leave scans to the tab that is on screen.
+      if (!tabActiveRef.current) return;
       const target = e.target as HTMLElement | null;
       if (target === itemInputRef.current) return;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
@@ -2399,12 +2575,18 @@ export default function LoadOperation() {
             {(row.stockAvailable ?? 0) <= 0 && <span className="ml-1.5 rounded-full bg-red-100 px-1 py-px text-[8px] font-bold text-red-700">NO STOCK</span>}
             {row.isComplete && <CheckCircle2 className="ml-1.5 inline h-3 w-3 text-emerald-600" />}
             <p className="font-mono text-[10px] leading-tight text-gray-400">
-              {row.barcode || "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+              {row.barcode || "—"}
             </p>
             {(row.itemsPerPallet ?? 0) > 0 && <p className="text-[10px] font-semibold leading-tight text-gray-500">{row.itemsPerPallet} per pallet</p>}
           </div>
         </div>
       ),
+    },
+    {
+      id: "sapCode", header: "SAP Code", align: "center", width: 92, minWidth: 70, sortable: true, totalable: false,
+      accessor: (row) => row.sapCode ?? "",
+      cellClassName: "align-top font-mono text-[11px] text-gray-600",
+      render: (row) => row.sapCode || <span className="text-gray-300">—</span>,
     },
     {
       id: "expected", header: itemColumnHeader("expected", "Expected"), align: "center", width: 58, minWidth: 55, sortable: true,
@@ -2503,15 +2685,26 @@ export default function LoadOperation() {
 
   // Same "Export" affordance Order Scan/Master View offer on their own items tables — a plain
   // client-side CSV of whatever's currently filtered/searched, not just the full unfiltered set.
-  function downloadLoadingItemsCsv() {
-    const headers = ["SKU", "Item Name", "Expected", "Loaded", "Extra", "Remaining", "Stock"];
-    const rows = filteredItems.map((it) => [it.barcode ?? "", it.itemName ?? "", it.expected, it.loaded, extraOf(it), it.remaining, it.stockAvailable ?? ""]);
-    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
-    a.download = `${slip?.orderNumber ?? "loading"}-items.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+  // CSV, Excel or PDF of the same filtered list, with the SAP code, the pallets beside the quantities and a Total row.
+  function exportLoadingItems(fmt: "CSV" | "Excel" | "PDF") {
+    const plt = (qty: number, ipp: number | null | undefined) => ((ipp ?? 0) > 0 ? qty / (ipp as number) : 0);
+    const f2 = (n: number) => n.toFixed(2);
+    const header = ["Sr", "Barcode", "Item Name", "SAP Code", "Expected", "Expected Pallets", "Loaded", "Loaded Pallets", "Extra", "Remaining", "Stock"];
+    const body = filteredItems.map((it) => [
+      it.srNo ?? "", it.barcode ?? "", it.itemName ?? "", it.sapCode ?? "", it.expected, f2(plt(it.expected, it.itemsPerPallet)),
+      it.loaded, f2(plt(it.loaded, it.itemsPerPallet)), extraOf(it), it.remaining, it.stockAvailable ?? "",
+    ]);
+    const sum = (pick: (it: (typeof filteredItems)[number]) => number) => filteredItems.reduce((x, it) => x + pick(it), 0);
+    const total = [
+      "TOTAL", "", "", "", sum((it) => it.expected), f2(sum((it) => plt(it.expected, it.itemsPerPallet))),
+      sum((it) => it.loaded), f2(sum((it) => plt(it.loaded, it.itemsPerPallet))), sum((it) => extraOf(it)), sum((it) => it.remaining), "",
+    ];
+    const rows = [header, ...body, total];
+    const base = `${slip?.orderNumber ?? "loading"}-items`;
+    const title = `Loading Items — ${slip?.orderNumber ?? ""}`;
+    if (fmt === "CSV") downloadCsv(`${base}.csv`, rows);
+    else if (fmt === "Excel") downloadExcel(`${base}.xlsx`, rows, "Loading Items");
+    else downloadPdf(`${base}.pdf`, title, rows, [slip?.partyName, slip?.plant].filter(Boolean).join(" · "));
   }
 
   // Column defs for the per-item scan history drill-down — a real DataTable (drag-to-resize,
@@ -2565,7 +2758,10 @@ export default function LoadOperation() {
   ];
 
   function renderLoadingItemHistoryPanel(item: ProformaItem) {
-    const itemEvents = (orderLoadHistoryQuery.data?.items ?? []).filter((ev) => normalize(ev.barcode) === normalize(item.barcode));
+    // Two products can share one barcode (35GM and 37GM salted peanuts), so a scan belongs to the line when the barcode AND the SAP code match;
+    // an entry with no stored SAP code falls back to the barcode alone.
+    const itemEvents = (orderLoadHistoryQuery.data?.items ?? []).filter((ev) =>
+      normalize(ev.barcode) === normalize(item.barcode) && (!ev.sapCode || !item.sapCode || normalize(ev.sapCode) === normalize(item.sapCode)));
     return (
       <div className="border-b border-gray-200 bg-gray-50 p-3">
         {orderLoadHistoryQuery.isLoading ? (
@@ -2604,24 +2800,24 @@ export default function LoadOperation() {
   // own wrapper is a container-fluid, which is a no-op here) — kept inside this page's scroll
   // container so the app shell still scrolls it the same way.
   return (
-    <div className={`flex-1 px-2 pt-1 pb-4 ${view === "create" ? "overflow-hidden" : "overflow-y-auto"}`}>
+    <div className={`flex-1 pt-1 pb-4 ${view === "create" ? "overflow-hidden" : "overflow-y-auto"}`}>
       <div className={`w-full ${view === "create" ? "h-full" : "space-y-6"}`}>
         {/* ── Landing view — mirrors Load Operations' layout exactly: full-width search, a
              filter row (date + plant + status counters), status tabs, then a desktop table with
              a mobile card list below it. Same kiosk-rotate treatment the scan view has, so a
              wall-mounted station can rotate the landing list too, not just an open order. ──── */}
         {view === "list" && (
-          <div className={`space-y-3 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : ""}`}>
+          <div className={`space-y-3 ${kioskRotateClass} ${rotated ? "bg-[#f4f5f7] p-4" : "px-2"}`}>
             {/* Page header only on the list — nothing there competes with it for room. The
                 create/scan view (an open order, often with many items to scroll through) skips
                 it entirely instead; that view's only collapsible header now is the global
                 "Welcome" bar (Layout.tsx's HEADER_HIDEABLE_PATHS), not this one. */}
             {/* Same name and icon as this page's sidebar entry ("Load Operations", the factory).
                 Sticky: the header stays at the top while the list scrolls underneath it. */}
-            <div className="-mx-2 bg-white px-2 pt-1 [&>div]:!mb-1">
+            <div className="bg-white pt-1 [&>div]:!mb-1">
             <PageHeader
               icon={Factory}
-              iconClassName="h-5 w-5 fill-[#4d7eff]"
+              iconClassName="h-7 w-7 fill-[#4d7eff]"
               title="Load Operations"
               description="Scan or search a proforma slip, then link a vehicle and scan its items onto it."
               actions={
@@ -2977,32 +3173,49 @@ export default function LoadOperation() {
                   setSortOrder(direction);
                 }}
               >
-                <SelectTrigger className="h-9 w-[140px] shrink-0 text-xs" aria-label="Sort loading slips">
-                  <SelectValue />
+                {/* Short label in the trigger (the full wording stays in the list) so it never gets cut off. */}
+                <SelectTrigger className="h-9 w-auto shrink-0 gap-1.5 rounded-full px-3 text-xs font-medium text-[#001d6e]" aria-label="Sort loading slips">
+                  <ArrowUpDown className="h-3.5 w-3.5 shrink-0" />
+                  <span className="whitespace-nowrap">
+                    {{
+                      "orderNumber:asc": "Order No. 1–9", "orderNumber:desc": "Order No. 9–1",
+                      "creationDate:desc": "Newest first", "creationDate:asc": "Oldest first",
+                      "completedAt:desc": "Recently completed", "completedAt:asc": "Earliest completed",
+                    }[`${sortBy}:${sortOrder}`]}
+                  </span>
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="orderNumber:asc">Order No. — Ascending</SelectItem>
-                  <SelectItem value="orderNumber:desc">Order No. — Descending</SelectItem>
-                  <SelectItem value="creationDate:asc">Load Date — Ascending</SelectItem>
-                  <SelectItem value="creationDate:desc">Load Date — Descending</SelectItem>
-                  <SelectItem value="completedAt:desc">Completed — Descending</SelectItem>
-                  <SelectItem value="completedAt:asc">Completed — Ascending</SelectItem>
+                  <SelectItem value="creationDate:desc">Newest loaded first</SelectItem>
+                  <SelectItem value="creationDate:asc">Oldest loaded first</SelectItem>
+                  <SelectItem value="completedAt:desc">Recently completed first</SelectItem>
+                  <SelectItem value="completedAt:asc">Earliest completed first</SelectItem>
+                  <SelectItem value="orderNumber:asc">Order No. — low to high</SelectItem>
+                  <SelectItem value="orderNumber:desc">Order No. — high to low</SelectItem>
                 </SelectContent>
               </Select>
-              <AddColumnFilterButton
-                columns={recordFilterColumns}
-                conditions={recordColumnConditions}
-                onApply={setRecordCondition}
-                onClear={clearRecordCondition}
-                className="h-9 shrink-0 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
-              />
-              <DataTableColumnToggle<LoadingRecord>
-                columns={recordToggleColumns}
-                visibleColumnIds={recordVisibleCols}
-                onToggleColumn={(id) => setRecordVisibleCols((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; })}
-                onSetAll={(visible) => setRecordVisibleCols(new Set(visible ? Object.keys(RECORD_COLUMN_LABELS) : ["actions", "orderNumber"]))}
-                buttonClassName="h-9 shrink-0"
-              />
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="hidden h-9 shrink-0 gap-1 rounded-md text-xs font-medium text-[#001d6e] xl:inline-flex" title="Show or hide columns">
+                    <Columns3 className="h-3.5 w-3.5" /> Columns
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="max-h-80 w-56 overflow-y-auto">
+                  <DropdownMenuLabel className="text-xs">Show columns</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {listColumns.map((c) => (
+                    <DropdownMenuCheckboxItem
+                      key={c.id}
+                      checked={!hiddenListCols.includes(c.id)}
+                      onCheckedChange={() => toggleListColumn(c.id)}
+                      onSelect={(e) => e.preventDefault()}
+                    >
+                      {c.label}
+                    </DropdownMenuCheckboxItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={resetListColumns} className="text-xs text-[#001d6e]">Reset to default columns and widths</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               {admin && canWrite && (
                 <Button
                   variant="outline"
@@ -3016,6 +3229,13 @@ export default function LoadOperation() {
                   Sync status
                 </Button>
               )}
+              <AddColumnFilterButton
+                columns={recordFilterColumns}
+                conditions={recordColumnConditions}
+                onApply={setRecordCondition}
+                onClear={clearRecordCondition}
+                className="h-9 shrink-0 gap-1 rounded-md border-dashed border-[#001d6e]/40 bg-white text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+              />
             </div>
 
             {recordsQuery.isLoading ? (
@@ -3056,212 +3276,87 @@ export default function LoadOperation() {
                       the shared component or any other table on the site. */}
                   <Table className="[&_th]:px-2 [&_td]:px-2 [&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-[#001d6e]">
                     <TableHeader>
-                      {/* Same navy/white uppercase header every other table on the site uses,
-                          instead of the plain shadcn default (muted-gray text on white) — makes
-                          the header read as a header rather than blending into the rows. */}
                       <TableRow className="border-b border-white/20 bg-[#001d6e] hover:bg-[#001d6e]">
-                        {showCol("orderDate") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The proforma slip's own order date">{recordColumnHeader("orderDate", "Order Date")}</TableHead>}
-                        {showCol("loadDate") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="When this load operation was started">{recordColumnHeader("loadDate", "Load Date")}</TableHead>}
-                        {showCol("orderNumber") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("orderNumber", "Order Number")}</TableHead>}
-                        {showCol("party") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("party", "Party Name")}</TableHead>}
-                        {showCol("plant") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("plant", "Plant")}</TableHead>}
-                        {showCol("vehicle") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Vehicle number (top) and RTO number (below)">{recordColumnHeader("vehicle", "Vehicle No.")}</TableHead>}
-                        {showCol("stv") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="The Dispatch Directory this load was started on — set once at Create Operation">{recordColumnHeader("stv", "Dispatch Directory")}</TableHead>}
-                        {showCol("status") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("status", "Status")}</TableHead>}
-                        {showCol("owner") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Whoever currently has the right to scan this load">{recordColumnHeader("owner", "Current Owner")}</TableHead>}
-                        {showCol("loaded") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Quantity loaded so far out of the order's total quantity">Loaded / Total</TableHead>}
-                        {showCol("volume") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Volume loaded so far out of the order's total volume">Volume</TableHead>}
-                        {showCol("timeTaken") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Time from when the vehicle was linked to when the load was marked complete">Time Taken</TableHead>}
-                        {showCol("completedBy") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white" title="Who marked this load complete — the Complete button, or the scan that finished it">{recordColumnHeader("completedBy", "Completed By")}</TableHead>}
-                        {showCol("creator") && <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-white">{recordColumnHeader("creator", "Creator")}</TableHead>}
-                        {showCol("actions") && <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>}
+                        {visibleListColumns.map((col) => (
+                          <TableHead
+                            key={col.id}
+                            className="relative text-[11px] font-semibold uppercase tracking-wide text-white"
+                            style={listColStyle(col.id)}
+                            title={col.title}
+                          >
+                            {col.filterId ? recordColumnHeader(col.filterId, col.label) : col.label}
+                            <span
+                              role="separator"
+                              onMouseDown={(e) => startListColResize(e, col.id)}
+                              onDoubleClick={() => resetListColWidth(col.id)}
+                              className="absolute right-0 top-0 h-full w-2 cursor-col-resize select-none hover:bg-white/30"
+                              title="Drag to change the width · double-click to reset"
+                            />
+                          </TableHead>
+                        ))}
+                        <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-white">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {filteredRecords.map((r) => {
-                        return (
-                          <Fragment key={r.id}>
-                            {/* A plain row: the click-to-open History / Owners panel was removed on
-                                request. The row's own action buttons are still the way in. */}
-                            <TableRow>
-                              {showCol("orderDate") && (
-                                <TableCell>
-                                  {r.orderDate
-                                    ? new Date(`${String(r.orderDate).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })
-                                    : "-"}
-                                </TableCell>
-                              )}
-                              {showCol("loadDate") && (
-                                <TableCell>
-                                  {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}
-                                </TableCell>
-                              )}
-                              {showCol("orderNumber") && (
-                                <TableCell>#{r.orderNumber}</TableCell>
-                              )}
-                              {showCol("party") && (
-                                <TableCell>{r.partyName || "-"}</TableCell>
-                              )}
-                              {showCol("plant") && (
-                                <TableCell>{r.plant ? <PlantBadge plant={r.plant} /> : "-"}</TableCell>
-                              )}
-                              {showCol("vehicle") && (
-                                <TableCell>
-                                  <div className="flex flex-col">
-                                    <span>{r.vehicleNumber || "-"}</span>
-                                    {r.rtoNumber && <span className="text-xs text-muted-foreground">RTO: {r.rtoNumber}</span>}
-                                  </div>
-                                </TableCell>
-                              )}
-                              {showCol("stv") && (
-                                <TableCell>
-                                  {r.loadingStv
-                                    ? <span className="inline-flex items-center whitespace-nowrap rounded-full border border-[#001d6e] bg-[#001d6e]/5 px-2 py-0.5 text-xs font-semibold text-[#001d6e]">{r.loadingStv}</span>
-                                    : <span className="text-muted-foreground">-</span>}
-                                </TableCell>
-                              )}
-                              {showCol("status") && (
-                                <TableCell>
-                                  <div className="flex flex-wrap items-center gap-1"><NotionStatusBadge status={recordStatus(r)} />{r.loadingPausedAt && !r.loadingCompletedAt && <span className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-amber-400 bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800"><Pause className="h-3 w-3" />PAUSED</span>}</div>
-                                </TableCell>
-                              )}
-                              {showCol("owner") && (
-                                <TableCell onClick={(e) => e.stopPropagation()}>
-                                  {r.loadingCompletedAt ? (
-                                    "-"
-                                  ) : r.loadingPausedAt ? (
-                                    <div className="flex flex-col gap-1">
-                                      <span className="text-xs text-amber-700">Paused · {r.loadingOwnerName ?? r.loadingOwnerCode ?? "—"}</span>
-                                      {canWrite && (
-                                        <Button
-                                          size="sm"
-                                          className="h-6 w-fit rounded-full bg-amber-500 px-2.5 text-[11px] text-white hover:bg-amber-600"
-                                          disabled={claimLoadMutation.isPending}
-                                          onClick={() => setClaimTarget(r.orderNumber)}
-                                        >
-                                          Claim
-                                        </Button>
-                                      )}
-                                    </div>
-                                  ) : r.loadingOwnerName || r.loadingOwnerCode ? (
-                                    <span className="text-xs text-gray-600">{r.loadingOwnerName ?? r.loadingOwnerCode}</span>
-                                  ) : (
-                                    <span className="text-xs text-gray-300">—</span>
-                                  )}
-                                </TableCell>
-                              )}
-                              {showCol("loaded") && (
-                                <TableCell className="whitespace-nowrap tabular-nums"><span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.totalQty ?? 0}</span></TableCell>
-                              )}
-                              {showCol("volume") && (
-                                <TableCell className="whitespace-nowrap tabular-nums">
-                                  {r.orderVolume != null
-                                    ? <><span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span> <span className="text-gray-400">/</span> <span className="font-semibold">{r.orderVolume.toFixed(2)}</span></>
-                                    : <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>}
-                                </TableCell>
-                              )}
-                              {showCol("timeTaken") && (
-                                <TableCell>{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</TableCell>
-                              )}
-                              {showCol("completedBy") && (
-                                <TableCell>
-                                  {r.loadingCompletedAt ? (
-                                    <div className="flex flex-col">
-                                      <span className="text-xs font-medium text-gray-700">{r.loadingCompletedByName ?? r.loadingCompletedByCode ?? "—"}</span>
-                                      <span className="text-[11px] text-gray-400">
-                                        {new Date(r.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
-                                      </span>
-                                    </div>
-                                  ) : (
-                                    <span className="text-xs text-gray-300">—</span>
-                                  )}
-                                </TableCell>
-                              )}
-                              {showCol("creator") && (
-                                <TableCell>
-                                  <div className="flex flex-col">
-                                    <span className="font-medium">{r.createdByName ?? r.createdByCode ?? "Unknown"}</span>
-                                    <span className="text-xs text-muted-foreground">
-                                      {new Date(r.createdAt).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "2-digit", year: "numeric" })}{" "}
-                                      {new Date(r.createdAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false })}
-                                    </span>
-                                  </div>
-                                </TableCell>
-                              )}
-                              {showCol("actions") && (
-                                <TableCell onClick={(e) => e.stopPropagation()}>
-                                  <div className="flex space-x-2 justify-end">
+                      {filteredRecords.map((r) => (
+                        <TableRow key={r.id}>
+                          {visibleListColumns.map((col) => (
+                            <TableCell
+                              key={col.id}
+                              className={`${col.cellClassName ?? ""} ${listColWidths[col.id] ? "overflow-hidden text-ellipsis" : ""}`}
+                              style={listColStyle(col.id)}
+                              onClick={col.stopClick ? (e) => e.stopPropagation() : undefined}
+                            >
+                              {col.render(r)}
+                            </TableCell>
+                          ))}
+                              <TableCell onClick={(e) => e.stopPropagation()}>
+                                <div className="flex space-x-2 justify-end">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9 rounded-full bg-blue-50 hover:bg-blue-100"
+                                    title="Open this loading slip"
+                                    onClick={() => openOrderFromList(r.orderNumber)}
+                                  >
+                                    <FileText className="h-5 w-5 text-[#001d6e]" />
+                                  </Button>
+                                  {/* Reopening is admin-only (server-enforced too, see
+                                      requireReopenAccess in server/routes/loading.ts) —
+                                      deliberately stricter than completing a load, since it
+                                      un-does a finished, audited state. */}
+                                  {canReopenRecord(r) && (
                                     <Button
                                       variant="ghost"
                                       size="icon"
-                                      className="h-9 w-9 rounded-full bg-blue-50 hover:bg-blue-100"
-                                      title="Open this loading slip"
-                                      onClick={() => openOrderFromList(r.orderNumber)}
+                                      className="h-9 w-9 rounded-full bg-amber-50 hover:bg-amber-100"
+                                      disabled={reopenMutation.isPending}
+                                      title="Reopen this load"
+                                      onClick={() => setReopenTarget(r.orderNumber)}
                                     >
-                                      <FileText className="h-5 w-5 text-[#001d6e]" />
+                                      <RotateCcw className="h-5 w-5 text-amber-600" />
                                     </Button>
-                                    {/* Reopening is admin-only (server-enforced too, see
-                                        requireReopenAccess in server/routes/loading.ts) —
-                                        deliberately stricter than completing a load, since it
-                                        un-does a finished, audited state. */}
-                                    {canReopenRecord(r) && (
-                                      <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-9 w-9 rounded-full bg-amber-50 hover:bg-amber-100"
-                                        disabled={reopenMutation.isPending}
-                                        title="Reopen this load"
-                                        onClick={() => setReopenTarget(r.orderNumber)}
-                                      >
-                                        <RotateCcw className="h-5 w-5 text-amber-600" />
-                                      </Button>
-                                    )}
-                                    {canResetLoad && !r.systemGenerated && (
-                                      <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
-                                        title="Delete this loading slip"
-                                        onClick={() => setResetTarget(r)}
-                                      >
-                                        <Trash2 className="h-5 w-5 text-red-500" />
-                                      </Button>
-                                    )}
-                                  </div>
-                                </TableCell>
-                              )}
-                            </TableRow>
-                          </Fragment>
-                        );
-                      })}
-                    </TableBody>
-                    {listTotals.slips > 0 && (
-                      <TableFooter className="sticky bottom-0 z-10 bg-[#001d6e] text-white [&>tr]:border-0 hover:[&>tr]:bg-[#001d6e]">
-                        <TableRow className="bg-[#001d6e] hover:bg-[#001d6e]">
-                          {/* Spans follow the visible columns, so the totals row always lines up with the table. */}
-                          <TableCell colSpan={Math.max(1, ["orderDate", "loadDate", "orderNumber"].filter(showCol).length)} className="font-semibold">Total · {listTotals.slips.toLocaleString()} slip{listTotals.slips === 1 ? "" : "s"}</TableCell>
-                          {["party", "plant", "vehicle", "stv", "status", "owner"].filter(showCol).length > 0 && (
-                            <TableCell colSpan={["party", "plant", "vehicle", "stv", "status", "owner"].filter(showCol).length} className="text-right text-xs">
-                              Needed {listTotals.qty.toLocaleString()} · Loaded {listTotals.loadedQty.toLocaleString()} · Left {totalsLeftQty.toLocaleString()}
-                            </TableCell>
-                          )}
-                          {showCol("loaded") && <TableCell className="whitespace-nowrap tabular-nums font-semibold">{listTotals.loadedQty.toLocaleString()} / {listTotals.qty.toLocaleString()}</TableCell>}
-                          {showCol("volume") && <TableCell className="whitespace-nowrap tabular-nums font-semibold" title={`${totalsLeftVolume.toFixed(2)} left to load`}>{listTotals.loadedVolume.toFixed(2)} / {listTotals.volume.toFixed(2)}</TableCell>}
-                          <TableCell colSpan={["timeTaken", "completedBy", "creator", "actions"].filter(showCol).length} />
+                                  )}
+                                  {canResetLoad && (
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-9 w-9 rounded-full bg-red-50 hover:bg-red-100"
+                                      title="Delete this loading slip"
+                                      onClick={() => setResetTarget(r)}
+                                    >
+                                      <Trash2 className="h-5 w-5 text-red-500" />
+                                    </Button>
+                                  )}
+                                </div>
+                              </TableCell>
                         </TableRow>
-                      </TableFooter>
-                    )}
+                      ))}
+                    </TableBody>
                   </Table>
                 </div>
 
                 {/* Mobile View - card list */}
-                {listTotals.slips > 0 && (
-                  <div className={`rounded-md bg-[#001d6e] px-3 py-2 text-xs text-white ${bigView ? "" : "xl:hidden"}`}>
-                    <div className="font-semibold">Total · {listTotals.slips.toLocaleString()} slip{listTotals.slips === 1 ? "" : "s"}</div>
-                    <div className="mt-0.5 tabular-nums">Qty: needed {listTotals.qty.toLocaleString()} · loaded {listTotals.loadedQty.toLocaleString()} · left {totalsLeftQty.toLocaleString()}</div>
-                    <div className="tabular-nums">Volume: {listTotals.loadedVolume.toFixed(2)} / {listTotals.volume.toFixed(2)} · left {totalsLeftVolume.toFixed(2)}</div>
-                  </div>
-                )}
                 <div className={`grid grid-cols-1 gap-2 md:grid-cols-2 2xl:grid-cols-3 ${bigView ? "" : "xl:hidden"}`}>
                   {filteredRecords.map((r) => {
                     return (
@@ -3319,7 +3414,7 @@ export default function LoadOperation() {
                                 <RotateCcw className="h-4 w-4 text-amber-600" />
                               </Button>
                             )}
-                            {canResetLoad && !r.systemGenerated && (
+                            {canResetLoad && (
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -3350,7 +3445,7 @@ export default function LoadOperation() {
                             </span>
                             <span className="whitespace-nowrap tabular-nums">Qty <span className="font-semibold text-emerald-600">{r.loadedQty ?? 0}</span> / <span className="font-semibold text-gray-700">{r.totalQty ?? 0}</span></span>
                             <span className="whitespace-nowrap tabular-nums">Vol <span className="font-semibold text-emerald-600">{(r.loadedVolume ?? 0).toFixed(2)}</span>{r.orderVolume != null && <> / <span className="font-semibold text-gray-700">{r.orderVolume.toFixed(2)}</span></>}</span>
-                            <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>
+                            {r.loadingCompletedAt && <span className="whitespace-nowrap">{formatDuration(r.createdAt, r.loadingCompletedAt) ?? "-"}</span>}
                             {r.loadingCompletedAt && (r.loadingCompletedByName || r.loadingCompletedByCode) && (
                               <span className="whitespace-nowrap text-emerald-700">Completed by {r.loadingCompletedByName ?? r.loadingCompletedByCode}</span>
                             )}
@@ -3741,11 +3836,6 @@ export default function LoadOperation() {
                           Load completed {slip.loadingCompletedAt ? new Date(slip.loadingCompletedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""}
                         </span>
                       )}
-                      {(slip as any)?.systemGenerated && (
-                        <span className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800">
-                          System generated — view only
-                        </span>
-                      )}
                     </div>
                   </div>
 
@@ -3783,14 +3873,28 @@ export default function LoadOperation() {
                         <Truck className="mr-1 h-3 w-3" /> Vehicle
                       </Button>
                     )}
+                    {/* Re-checks this load's vehicle and status in Notion and fixes what differs. */}
+                    {admin && canWrite && !!lockedStv && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 rounded-full px-2 text-[11px] sm:h-7 sm:text-xs"
+                        disabled={syncNotionMutation.isPending}
+                        title="Check this load's vehicle and status in Notion and update Notion if it is behind"
+                        onClick={() => syncNotionMutation.mutate()}
+                      >
+                        {syncNotionMutation.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RotateCcw className="mr-1 h-3 w-3" />}
+                        Sync to Notion
+                      </Button>
+                    )}
                     {admin && canWrite && !locked && slip?.reopenedFromDispatch && (
                       <Button
                         size="sm"
                         className="h-6 rounded-full bg-indigo-600 px-2 text-[11px] text-white hover:bg-indigo-700 sm:h-7 sm:px-3 sm:text-xs"
-                        disabled={completeDispatchMutation.isPending}
+                        disabled={completeReturnMutation.isPending}
                         onClick={() => setConfirmDispatchOpen(true)}
                       >
-                        {completeDispatchMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                        {completeReturnMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                         Complete & return to {returnStatusName}
                       </Button>
                     )}
@@ -4217,12 +4321,20 @@ export default function LoadOperation() {
                     </button>
                   )}
                   {items.length > 0 && (
-                    <button
-                      onClick={downloadLoadingItemsCsv}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 shadow-sm lg:px-2.5 lg:py-1.5 lg:text-xs hover:bg-gray-50"
-                    >
-                      <Download className="h-3.5 w-3.5" /> Export
-                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 shadow-sm lg:px-2.5 lg:py-1.5 lg:text-xs hover:bg-gray-50"
+                        >
+                          <Download className="h-3.5 w-3.5" /> Export <ChevronDown className="h-3 w-3 opacity-70" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-32">
+                        {(["CSV", "Excel", "PDF"] as const).map((f) => (
+                          <DropdownMenuItem key={f} onSelect={() => exportLoadingItems(f)}>{f}</DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                   <AddColumnFilterButton
                     columns={itemFilterColumns}
@@ -4565,11 +4677,15 @@ export default function LoadOperation() {
                     </span>
                   </div>
                 </div>
-                {pendingSlipAlreadyLoading && (
+                {pendingSlipAlreadyLoading && (admin ? (
+                  <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    Notion already says <b>LOADING</b> for this order. You are creating the load operation here as an admin.
+                  </div>
+                ) : (
                   <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                     Status is already Loading — not able to load.
                   </div>
-                )}
+                ))}
                 {pendingMissingSortSlip && !pendingSlipAlreadyLoading && (
                   <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                     <span className="font-semibold">This plant requires a Sort Slip before Create Operation.</span>{" "}
@@ -4758,7 +4874,7 @@ export default function LoadOperation() {
                 <Button
                   variant="default"
                   className="w-full bg-[#001d6e] hover:bg-[#001d6e]/90"
-                  disabled={startLoadMutation.isPending || pendingSlipAlreadyLoading || pendingMissingSortSlip || !pendingStv || (pendingOverCapacity && !capacityAck)}
+                  disabled={startLoadMutation.isPending || (pendingSlipAlreadyLoading && !admin) || pendingMissingSortSlip || !pendingStv || (pendingOverCapacity && !capacityAck)}
                   onClick={() => { if (pendingSlip && pendingStv) startLoadMutation.mutate({ orderNumber: pendingSlip.slip.orderNumber, stv: pendingStv }); }}
                 >
                   {startLoadMutation.isPending ? (
@@ -4783,30 +4899,37 @@ export default function LoadOperation() {
           — this one never had it, unlike every other scan-confirmation screen in the app. No id
           to look it up by here (ProformaItem carries no productId), so it goes by name, same as
           the box-image-by-name/image-by-name fallback ProductPhoto already supports. */}
-      <Dialog open={!!chooseItem} onOpenChange={(open) => { if (!open) setChooseItem(null); }}>
-        <DialogContent className="max-w-md" onOpenAutoFocus={(e) => e.preventDefault()}>
+      <Dialog open={!!multiMatch} onOpenChange={(open) => { if (!open) { setMultiMatch(null); scanLockRef.current = false; } }}>
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Which item?</DialogTitle>
+            <DialogDescription>
+              Barcode <span className="font-mono font-semibold text-gray-700">{multiMatch?.barcode}</span> is on {multiMatch?.matches.length} items of this order. Tap the one you are loading.
+            </DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">Barcode {chooseItem?.barcode} is on more than one line of this slip. Pick the one you are loading.</p>
           <div className="space-y-2">
-            {(chooseItem?.options ?? []).map((opt) => (
+            {multiMatch?.matches.map((m) => (
               <button
-                key={opt.id}
+                key={m.id}
                 type="button"
-                className="w-full rounded-md border p-3 text-left hover:bg-muted"
-                onClick={() => { const bc = chooseItem!.barcode; setChooseItem(null); void handleItemBarcode(bc, opt); }}
+                className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-white p-3 text-left hover:border-[#001d6e] hover:bg-blue-50/40"
+                onClick={() => {
+                  if (Date.now() - multiMatchAtRef.current < 450) return;
+                  const chosen = m;
+                  const barcode = multiMatch!.barcode;
+                  setMultiMatch(null);
+                  lastScanRef.current = null;
+                  void handleItemBarcode(barcode, chosen);
+                }}
               >
-                <div className="font-medium">{opt.itemName ?? opt.barcode}</div>
-                <div className="text-xs text-muted-foreground">
-                  {opt.sapCode ? `SAP ${opt.sapCode} · ` : ""}{opt.srNo ? `Sr ${opt.srNo} · ` : ""}Loaded {opt.loaded} / {opt.expected} · Remaining {opt.remaining} · Stock {opt.stockAvailable ?? 0}
-                </div>
+                <span>
+                  <span className="block font-medium text-gray-900">{m.itemName ?? m.barcode}</span>
+                  <span className="block text-xs text-gray-500">{m.sapCode ? `SAP ${m.sapCode}` : "No SAP for this plant"} · stock {m.stockAvailable ?? 0}</span>
+                </span>
+                <span className="text-sm tabular-nums text-gray-600">{m.loaded} / {m.expected}{m.remaining > 0 ? ` · ${m.remaining} left` : " · done"}</span>
               </button>
             ))}
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setChooseItem(null)}>Cancel</Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -4922,7 +5045,7 @@ export default function LoadOperation() {
                   }
                   onClick={() => {
                     if (!pending) return;
-                    scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty, productId: pending.item?.productId }, {
+                    scanItemMutation.mutate({ barcode: pending.barcode, qty: dialogQty, productId: pending.item?.productId ?? null }, {
                       onSuccess: () => setPending(null),
                     });
                   }}
@@ -5184,6 +5307,7 @@ export default function LoadOperation() {
                               className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-gray-50"
                             >
                               <ProductPhoto
+                                thumb
                                 productId={p.id}
                                 className="h-9 w-9 shrink-0 rounded border bg-white object-contain"
                               />
@@ -5286,9 +5410,9 @@ export default function LoadOperation() {
             {slip?.vehicleNumber ? ` · ${slip.vehicleNumber}` : ""}
           </p>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmDispatchOpen(false)} disabled={completeDispatchMutation.isPending}>Cancel</Button>
-            <Button className="bg-indigo-600 text-white hover:bg-indigo-700" disabled={completeDispatchMutation.isPending} onClick={() => completeDispatchMutation.mutate()}>
-              {completeDispatchMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+            <Button variant="outline" onClick={() => setConfirmDispatchOpen(false)} disabled={completeReturnMutation.isPending}>Cancel</Button>
+            <Button className="bg-indigo-600 text-white hover:bg-indigo-700" disabled={completeReturnMutation.isPending} onClick={() => completeReturnMutation.mutate()}>
+              {completeReturnMutation.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
               Complete & return to {returnStatusName}
             </Button>
           </DialogFooter>
@@ -5301,7 +5425,7 @@ export default function LoadOperation() {
           <DialogHeader>
             <DialogTitle className="text-amber-700">Reopen this load?</DialogTitle>
             <DialogDescription>
-              Order <span className="font-semibold text-gray-900">#{reopenTarget}</span> is marked complete (or dispatched).
+              Order <span className="font-semibold text-gray-900">#{reopenTarget}</span> is marked complete (or has gone out).
               Reopening puts it back to Loading so scanning can continue. A load that had gone out (Dispatched, Shortage ...) is finished again by an admin with "Complete & return", which puts it back to the status it was reopened from.
             </DialogDescription>
           </DialogHeader>

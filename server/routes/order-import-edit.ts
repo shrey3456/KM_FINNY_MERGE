@@ -1,9 +1,11 @@
 import { Router, Request, Response } from 'express';
+import { v2Purchase, v2MoveRefusal } from '../lib/stockV2';
 import { pool } from '../db';
 import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/pageAccess';
 import { broadcastOrderImportUpdate } from '../lib/importEvents';
 import { getUserPlants, getPlantStateCode, resolvePalletSizeOrQty } from './order-scan';
 import { splitPallets, resplitEventsExtraFlag } from '../lib/orderScanRemap';
+import { resolveLineProduct } from '../lib/productSap';
 
 // ============================================================================
 `// ORDER IMPORT EDIT — a focused, non-admin-gated page for fixing mistakes in a
@@ -16,7 +18,7 @@ import { splitPallets, resplitEventsExtraFlag } from '../lib/orderScanRemap';
 // Only sessions that are NOT yet completed are ever listed here — a finished,
 // reconciled CSV can't be rewritten from this page.
 //
-// Plant scoping mirrors Overall Stock / Scan History (getUserPlants, from the Users
+// Plant scoping mirrors Stock Overview / Scan History (getUserPlants, from the Users
 // page's users.plants): admin/super-admin/billing see every plant, everyone else only
 // the plant(s) assigned to them — a non-admin with none assigned sees nothing.
 //
@@ -244,62 +246,36 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
         // instead of against this item. The stock reversal/reapply below stays its own,
         // separately-guarded (`totalQty > 0`) step — nothing to reverse when nothing was scanned.
         if (barcodeChanged && oldBarcode && barcode) {
+          // Only THIS line's entries move (two products can share a barcode: the other product's scans stay where they are).
+          const { rows: lineRows } = await client.query(`SELECT product_id FROM order_scan_items WHERE order_import_item_id = $1 LIMIT 1`, [item.id]);
+          const lineProductId: number | null = lineRows[0]?.product_id ?? null;
           const { rows: scannedRows } = await client.query(
             `SELECT
                COALESCE(SUM(total_qty) FILTER (WHERE NOT is_extra), 0)::int AS "orderQty",
                COALESCE(SUM(total_qty) FILTER (WHERE is_extra), 0)::int AS "extraQty"
              FROM order_scan_events
-             WHERE session_id = $1 AND barcode IS NOT NULL AND LOWER(barcode) = LOWER($2) AND voided IS NOT TRUE`,
-            [id, oldBarcode],
+             WHERE session_id = $1 AND barcode IS NOT NULL AND LOWER(barcode) = LOWER($2) AND voided IS NOT TRUE AND ($3::int IS NULL OR product_id IS NULL OR product_id = $3)`,
+            [id, oldBarcode, lineProductId],
           );
           const orderQty = scannedRows[0]?.orderQty ?? 0;
           const extraQty = scannedRows[0]?.extraQty ?? 0;
           const totalQty = orderQty + extraQty;
 
           if (totalQty > 0) {
+            const refusal = await v2MoveRefusal(client, session.plant, oldBarcode, barcode, totalQty);
+            if (refusal) {
+              await client.query('ROLLBACK');
+              return res.status(409).json({ message: refusal });
+            }
+          }
+
+          if (totalQty > 0) {
             const reason = `Barcode correction (order-import edit): ${oldBarcode} -> ${barcode}`;
 
-            // Reverse stock credited to the old barcode
-            await client.query(
-              `UPDATE products SET in_stock = GREATEST(0, COALESCE(in_stock, 0) - $1) WHERE LOWER(barcode) = LOWER($2)`,
-              [totalQty, oldBarcode],
-            );
-            const { rows: oldPps } = await client.query(
-              `UPDATE product_plant_stock
-               SET in_stock = GREATEST(0, in_stock - $1), extra_qty = GREATEST(0, extra_qty - $2), updated_at = NOW()
-               WHERE LOWER(barcode) = LOWER($3) AND LOWER(plant) = LOWER($4)
-               RETURNING product_id`,
-              [totalQty, extraQty, oldBarcode, session.plant],
-            );
-            await client.query(
-              `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-               VALUES ($1, $2, $3, $4, $5, 'adjust', $6, $7, NOW())`,
-              [oldBarcode, oldPps[0]?.product_id ?? null, session.plant, -totalQty, -extraQty, reason, id],
-            );
+            // Reverse stock credited to the old barcode, then apply it to the corrected one (both on Stock Overview).
+            await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode: oldBarcode, qty: -totalQty, extraQty: -extraQty, productId: lineProductId });
 
-            // Apply the same quantity to the corrected barcode. RETURNING id so the corrected
-            // barcode's own product row (which may differ from the old barcode's) links up
-            // correctly rather than inheriting whatever the old barcode happened to resolve to.
-            const { rows: newProductRows } = await client.query(
-              `UPDATE products SET in_stock = COALESCE(in_stock, 0) + $1 WHERE LOWER(barcode) = LOWER($2) RETURNING id`,
-              [totalQty, barcode],
-            );
-            const newProductId = newProductRows[0]?.id ?? null;
-            await client.query(
-              `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
-               VALUES ($1, $2, $3, $4, $5, NOW())
-               ON CONFLICT (barcode, plant) DO UPDATE
-                 SET in_stock  = product_plant_stock.in_stock  + EXCLUDED.in_stock,
-                     extra_qty = product_plant_stock.extra_qty + EXCLUDED.extra_qty,
-                     product_id = COALESCE(product_plant_stock.product_id, EXCLUDED.product_id),
-                     updated_at = NOW()`,
-              [barcode, newProductId, session.plant, totalQty, extraQty],
-            );
-            await client.query(
-              `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-               VALUES ($1, $2, $3, $4, $5, 'adjust', $6, $7, NOW())`,
-              [barcode, newProductId, session.plant, totalQty, extraQty, reason, id],
-            );
+            await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode, qty: totalQty, extraQty });
           }
 
           // Relink the scan rows so scan history/status follow the corrected barcode.
@@ -310,8 +286,8 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
             [barcode, item.id, id, oldBarcode],
           );
           await client.query(
-            `UPDATE order_scan_events SET barcode = $1 WHERE session_id = $2 AND LOWER(barcode) = LOWER($3)`,
-            [barcode, id, oldBarcode],
+            `UPDATE order_scan_events SET barcode = $1 WHERE session_id = $2 AND LOWER(barcode) = LOWER($3) AND ($4::int IS NULL OR product_id IS NULL OR product_id = $4)`,
+            [barcode, id, oldBarcode, lineProductId],
           );
         }
 
@@ -365,17 +341,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
               // "how much of it was over-order" subset, needs correcting here.
               const extraDelta = newExtraQty - oldExtraQty;
               if (extraDelta !== 0 && barcode) {
-                const { rows: pps } = await client.query(
-                  `UPDATE product_plant_stock SET extra_qty = GREATEST(0, extra_qty + $1), updated_at = NOW()
-                   WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
-                   RETURNING product_id`,
-                  [extraDelta, barcode, session.plant],
-                );
-                await client.query(
-                  `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-                   VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
-                  [barcode, pps[0]?.product_id ?? null, session.plant, extraDelta, `Quantity correction (order-import edit): ${existing.quantity} -> ${quantity}`, id],
-                );
+                await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode, qty: 0, extraQty: extraDelta });
               }
             }
           }
@@ -396,17 +362,16 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
         // recognize it at all.
         if (barcode) {
           const state = await getPlantStateCode(client, session.plant);
-          const { rows: prodRows } = await client.query(
-            `SELECT gj_plt AS "gjPlt", mp_plt AS "mpPlt" FROM products WHERE LOWER(TRIM(barcode)) = LOWER(TRIM($1))`,
-            [barcode],
-          );
-          const itemsPerPallet = resolvePalletSizeOrQty(prodRows[0] ?? null, state, quantity);
+          // The line's own product (two products can share a barcode): found from its barcode + SAP, same as at CSV import. Its SAP is the
+          // plant state's SAP only (blank when it has none), and the pallet size is that product's.
+          const lp = await resolveLineProduct(client, barcode, sapCode, state);
+          const itemsPerPallet = resolvePalletSizeOrQty(lp.row ? { gjPlt: lp.row.gj_plt, mpPlt: lp.row.mp_plt } : null, state, quantity);
 
           const { rows: newScanItemRows } = await client.query(
-            `INSERT INTO order_scan_items (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `INSERT INTO order_scan_items (session_id, order_import_item_id, barcode, item_name, sap_code, expected_qty, items_per_pallet, product_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              RETURNING id`,
-            [id, newItemId, barcode, itemName, sapCode, quantity, itemsPerPallet],
+            [id, newItemId, barcode, itemName, lp.productId ? lp.sap : sapCode, quantity, itemsPerPallet, lp.productId],
           );
           const newScanItemId = newScanItemRows[0].id;
 
@@ -456,17 +421,7 @@ router.put('/order-import-edit/sessions/:id', requirePageWrite('order-import'), 
             // as the quantity-changed branch below).
             const extraDelta = newExtraQty - oldExtraQty;
             if (extraDelta !== 0) {
-              const { rows: pps } = await client.query(
-                `UPDATE product_plant_stock SET extra_qty = GREATEST(0, extra_qty + $1), updated_at = NOW()
-                 WHERE LOWER(barcode) = LOWER($2) AND LOWER(plant) = LOWER($3)
-                 RETURNING product_id`,
-                [extraDelta, barcode, session.plant],
-              );
-              await client.query(
-                `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_at)
-                 VALUES ($1, $2, $3, 0, $4, 'adjust', $5, $6, NOW())`,
-                [barcode, pps[0]?.product_id ?? null, session.plant, extraDelta, `New item added to CSV (order-import edit): extra ${oldExtraQty} -> ${newExtraQty}`, id],
-              );
+              await v2Purchase(client, { source: 'order', sessionId: id, plant: session.plant, barcode, qty: 0, extraQty: extraDelta });
             }
           }
         }

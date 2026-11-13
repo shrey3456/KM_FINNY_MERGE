@@ -3,7 +3,6 @@
  * Initializes all state preservation utilities for the application
  */
 
-import { initializeAddItemToSlip } from "./addItemUtils";
 import { initializeMobileDialogFix } from "./mobileDialogFix";
 import { cleanupTableCache } from "./tableStatePreservation";
 
@@ -12,9 +11,6 @@ import { cleanupTableCache } from "./tableStatePreservation";
  * Call this at the root of the application
  */
 export function initializeStatePreservation() {
-  // Initialize enhanced addItemToSlip
-  initializeAddItemToSlip();
-  
   // Initialize mobile dialog fix
   initializeMobileDialogFix();
   

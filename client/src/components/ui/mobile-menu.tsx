@@ -44,7 +44,7 @@ const MobileMenu: React.FC<MobileMenuProps> = ({ currentPath }) => {
             <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center text-white font-bold">
               KM
             </div>
-            <h1 className="text-xl font-bold">KM-Tribe</h1>
+            <h1 className="text-xl font-bold">Team Finny</h1>
           </div>
         </div>
         

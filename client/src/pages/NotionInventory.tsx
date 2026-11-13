@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import Papa from "papaparse";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { drawPdfHeader, drawPdfFooter, setPdfProperties } from "@/lib/pdfBranding";
 import {
   AlertTriangle,
   ArrowDown,
@@ -582,19 +583,20 @@ export default function NotionInventory() {
   }
 
   function exportPdf() {
-    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a3" });
-    doc.setFontSize(14);
-    doc.text("Product Master", 40, 32);
-    doc.setFontSize(9);
-    doc.text(`Exported ${new Date().toLocaleString()} · ${filteredProducts.length} products`, 40, 48);
+    const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a3" });
+    const subtitle = `${filteredProducts.length} products`;
+    setPdfProperties(doc, "Product Master", subtitle);
+    const startY = drawPdfHeader(doc, { title: "Product Master", subtitle, margin: 14 });
     autoTable(doc, {
       head: [productColumns.map((c) => c.label)],
       body: filteredProducts.map((p) => productColumns.map((col) => cellValue(p, col.key))),
-      startY: 58,
-      styles: { fontSize: 6.5, cellPadding: 2 },
+      startY,
+      margin: { left: 14, right: 14 },
+      styles: { fontSize: 6.5, cellPadding: 0.8 },
       headStyles: { fillColor: [0, 29, 110], textColor: 255, fontStyle: "bold" },
       alternateRowStyles: { fillColor: [248, 250, 252] },
     });
+    drawPdfFooter(doc, 14);
     doc.save(`products-${new Date().toISOString().slice(0, 10)}.pdf`);
   }
 
@@ -612,7 +614,7 @@ export default function NotionInventory() {
   const hiddenCount = ALL_KEYS.size - visibleColumnKeys.size;
 
   return (
-    <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
+    <div className="w-full px-3 sm:px-4 py-4 sm:py-6 pb-24">
       <PageHeader
         icon={Database}
         title="Product Master"
@@ -952,7 +954,7 @@ export default function NotionInventory() {
             </div>
             <div className="mb-1 text-base font-semibold text-[#001d6e]">Notion not connected</div>
             <div className="mb-4 max-w-xs text-sm text-muted-foreground">
-              Set the <code className="rounded bg-gray-100 px-1 text-xs">NOTION_INVENTORY_DATABASE_ID</code> environment variable to connect your Notion database.
+              Set the <code className="rounded bg-gray-100 px-1 text-xs">NOTION_PRODUCTS_MASTER_DATABASE_ID</code> environment variable to connect your Notion database.
             </div>
           </div>
         )}
@@ -1083,6 +1085,7 @@ export default function NotionInventory() {
                               {(col.key === "productImage" || col.key === "boxImage") && !isEmpty ? (
                                 <ZoomableImg
                                   src={`/api/products/${col.key === "boxImage" ? "box-image-by-id" : "image-by-id"}?id=${product.id}`}
+                                  thumb
                                   alt={product.name}
                                   title={product.name}
                                   className="h-8 w-8 rounded border border-gray-200 bg-gray-50 object-contain"

@@ -29,8 +29,8 @@ const PageHeader: React.FC<PageHeaderProps> = ({
           in it to overflow a phone, while every existing caller (title + optional inline children)
           keeps the exact single-line behaviour it had. */}
       <div className={`flex items-center gap-3 mb-1 ${actions ? "flex-wrap" : ""}`}>
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#001d6e] text-white">
-          <Icon className={iconClassName || "h-5 w-5"} />
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center text-[#001d6e]">
+          <Icon className={iconClassName || "h-7 w-7"} />
         </div>
         <h2 className="text-2xl font-bold text-[#001d6e]">{title}</h2>
         {children && <div className="inline-flex ml-2">{children}</div>}

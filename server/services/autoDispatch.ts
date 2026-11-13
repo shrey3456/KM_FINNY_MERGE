@@ -7,7 +7,6 @@ import { NOTION_LOADING_COMPLETE_STATUS, syncOrderToNotion } from './notionOrder
 // app is always right), then Notion is told through the usual push-and-retry path.
 //
 // Only slips flagged auto_dispatch (set at Create Operation) are touched: every load that existed before stays as it was.
-// Slips made from the Sales Orders file are never touched (they are not written to Notion at all).
 // The job reads the database every few minutes instead of holding a timer per slip, so a server restart never loses a dispatch,
 // and running it twice does nothing the second time (the slip is no longer Ready for Dispatch).
 
@@ -69,7 +68,6 @@ export async function runAutoDispatch(): Promise<{ dispatched: number }> {
       `UPDATE proforma_slips
           SET notion_status = $1, dispatched_at = NOW() AT TIME ZONE 'UTC'
         WHERE auto_dispatch = true
-          AND system_generated = false
           AND dispatched_at IS NULL
           AND loading_completed_at IS NOT NULL
           AND loading_completed_at <= (NOW() AT TIME ZONE 'UTC') - make_interval(mins => $2::int)

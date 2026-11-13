@@ -55,7 +55,7 @@ const MobileNavigation: React.FC<MobileNavigationProps> = ({ onLogout }) => {
   };
 
   return (
-    <nav className="lg:hidden bg-white border-t border-gray-100 fixed bottom-0 left-0 right-0 z-50">
+    <nav className="md:hidden glass rounded-full fixed bottom-3 left-3 right-3 z-50 max-w-md mx-auto">
       <div className="flex justify-around items-center px-4 py-2 max-w-md mx-auto">
         {/* Home */}
         <Link 
@@ -107,7 +107,7 @@ const MobileNavigation: React.FC<MobileNavigationProps> = ({ onLogout }) => {
             ) : (
               <div className="w-8 h-8 rounded-full bg-[#001d6e] flex items-center justify-center text-white text-xs font-semibold">
                 {currentUser?.username ? 
-                  currentUser.username.replace('@km-tribe', '').charAt(0).toUpperCase() : 
+                  currentUser.username.replace('@team-finny', '').charAt(0).toUpperCase() : 
                   <User className="h-4 w-4" />}
               </div>
             )}

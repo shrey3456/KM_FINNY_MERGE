@@ -3,7 +3,9 @@ import { z } from "zod";
 import { storage } from "../storage";
 import { pool } from "../db";
 import { insertUserSchema } from "@shared/schema";
+import { pinProblem } from "@shared/pinRules";
 import { requirePageWrite } from "../lib/pageAccess";
+import { assertUserCodeFree, renameUserCode, UserCodeError } from "../lib/userCodeRename";
 
 const router = Router();
 
@@ -79,6 +81,8 @@ router.post("/users/:userCode/force-logout", requirePageWrite("user-management")
 router.post("/users", requirePageWrite("user-management"), async (req: Request, res: Response) => {
   try {
     const userData = insertUserSchema.parse(req.body);
+    const badPin = pinProblem(String(userData.pin ?? ""));
+    if (badPin) return res.status(400).json({ message: badPin, type: "pin_rule_error" });
 
     console.log("Creating user with data:", {
       ...userData,
@@ -129,7 +133,19 @@ router.put("/users/:userCode", requirePageWrite("user-management"), async (req: 
     }
 
     const userData = insertUserSchema.partial().parse(req.body);
-    const updatedUser = await storage.updateUser(userCode, userData);
+    if (userData.pin !== undefined) {
+      const badPin = pinProblem(String(userData.pin));
+      if (badPin) return res.status(400).json({ message: badPin, type: "pin_rule_error" });
+    }
+    // A changed User Code is checked first (not empty, not used), the other fields are saved, and then the code is renamed everywhere (every table that names the
+    // user, and their sign-in) in one transaction.
+    const newCode = userData.userCode !== undefined ? await assertUserCodeFree(userData.userCode, userCode) : userCode;
+    delete userData.userCode;
+    let updatedUser = await storage.updateUser(userCode, userData);
+    if (updatedUser && newCode !== userCode) {
+      await renameUserCode(userCode, newCode);
+      updatedUser = (await storage.getUser(newCode)) ?? updatedUser;
+    }
 
     if (!updatedUser) {
       return res.status(404).json({ message: "User could not be updated" });
@@ -138,6 +154,10 @@ router.put("/users/:userCode", requirePageWrite("user-management"), async (req: 
     const { pin, ...userWithoutPin } = updatedUser;
     res.json(userWithoutPin);
   } catch (err) {
+    if (err instanceof UserCodeError) {
+      return res.status(err.status).json({ message: err.message });
+    }
+
     if (err instanceof z.ZodError) {
       return res.status(400).json({
         message: "Invalid user data",
@@ -154,6 +174,11 @@ router.put("/users/:userCode", requirePageWrite("user-management"), async (req: 
         message: err.message,
         type: "pin_duplicate_error",
       });
+    }
+
+    // Safety net: a database "still referenced" error says so plainly instead of a bare 500.
+    if ((err as any)?.code === "23503") {
+      return res.status(409).json({ message: "This user cannot be changed this way because other records (activity, scans, loads) are linked to their User Code." });
     }
 
     console.error("Failed to update user:", err);

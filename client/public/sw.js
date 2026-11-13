@@ -1,11 +1,11 @@
-// Service Worker for KM Finny - Enhanced for Android Compatibility
+// Service Worker for Team Finny - Enhanced for Android Compatibility
 //
 // IMPORTANT: this file's own URL (/sw.js) must never be renamed — same rule as manifest.json.
 // Bump CACHE_NAME (etc.) on any deploy that should force old clients to drop their cached shell;
 // that's the only thing that needs to change here from one deploy to the next.
-const CACHE_NAME = 'km-finny-v8'; // Update cache version with every significant change
-const DATA_CACHE_NAME = 'km-finny-data-v8'; // Separate cache for API data
-const APP_SHELL_CACHE_NAME = 'km-finny-shell-v8'; // Cache for application shell
+const CACHE_NAME = 'team-finny-v8'; // Update cache version with every significant change
+const DATA_CACHE_NAME = 'team-finny-data-v8'; // Separate cache for API data
+const APP_SHELL_CACHE_NAME = 'team-finny-shell-v8'; // Cache for application shell
 
 // Core application shell files to cache for offline functionality
 const APP_SHELL_FILES = [
@@ -47,8 +47,6 @@ const SPA_ROUTES = [
   '/scan-history',
   '/profile',
   '/messages',
-  '/inout',
-  '/checkinout-admin',
   '/order-management',
 ];
 
@@ -231,7 +229,7 @@ self.addEventListener('activate', event => {
       caches.keys().then(cacheNames => {
         return Promise.all(
           cacheNames.filter(cacheName => {
-            return cacheName.startsWith('km-finny-') && 
+            return cacheName.startsWith('team-finny-') && 
                   ![CACHE_NAME, DATA_CACHE_NAME, APP_SHELL_CACHE_NAME].includes(cacheName);
           }).map(cacheName => {
             console.log('[Service Worker] Deleting old cache:', cacheName);

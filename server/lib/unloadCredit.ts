@@ -35,7 +35,7 @@ export async function reconcileUnloadCredits(
   if (laterParts.length === 0) return;
 
   const { rows: extraEvents } = await client.query(
-    `SELECT id, barcode, item_name, sap_code, total_qty, credited_qty
+    `SELECT id, barcode, product_id, item_name, sap_code, total_qty, credited_qty
      FROM unload_scan_events
      WHERE session_id = $1 AND is_extra = true AND voided IS NOT TRUE
        AND total_qty > COALESCE(credited_qty, 0)
@@ -53,8 +53,9 @@ export async function reconcileUnloadCredits(
       if (remaining <= 0) break;
 
       const { rows: itemRows } = await client.query(
-        `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2`,
-        [part.id, ev.barcode],
+        // The SAME PRODUCT on the later part (two products can share a barcode: an extra of the 65 g never covers a shortfall of the 60 g).
+        `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2 AND ($3::int IS NULL OR product_id IS NULL OR product_id = $3)`,
+        [part.id, ev.barcode, ev.product_id ?? null],
       );
       const expected = itemRows[0]?.expected ?? 0;
       if (expected <= 0) continue; // this later part doesn't expect this barcode at all
@@ -66,8 +67,8 @@ export async function reconcileUnloadCredits(
       // against, same residual risk as any other live-summed read in this app.
       const { rows: scannedRows } = await client.query(
         `SELECT COALESCE(SUM(total_qty), 0)::int AS scanned FROM unload_scan_events
-         WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE`,
-        [part.id, ev.barcode],
+         WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE AND ($3::int IS NULL OR product_id IS NULL OR product_id = $3)`,
+        [part.id, ev.barcode, ev.product_id ?? null],
       );
       const shortfall = Math.max(0, expected - (scannedRows[0]?.scanned ?? 0));
       if (shortfall <= 0) continue;
@@ -76,10 +77,10 @@ export async function reconcileUnloadCredits(
 
       await client.query(
         `INSERT INTO unload_scan_events
-           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, vehicle_number, scanned_by_name, is_credit, credit_source_event_id)
-         SELECT $1, $2, $3, $4, 0, $5, $5, false, plant, vehicle_number, $6, true, $7
+           (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, plant, vehicle_number, scanned_by_name, is_credit, credit_source_event_id, product_id)
+         SELECT $1, $2, $3, $4, 0, $5, $5, false, plant, vehicle_number, $6, true, $7, $8
          FROM unload_import_sessions WHERE id = $1`,
-        [part.id, ev.barcode, ev.item_name, ev.sap_code, take, `System (credited from Part ${completedPart.partIndex})`, ev.id],
+        [part.id, ev.barcode, ev.item_name, ev.sap_code, take, `System (credited from Part ${completedPart.partIndex})`, ev.id, ev.product_id ?? null],
       );
 
       await client.query(

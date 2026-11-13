@@ -27,6 +27,8 @@ import type { PortalRotation } from "@/lib/portalRotation";
 export const SidebarContext = createContext<{
   openMobileMenu: () => void;
   openSidebar: () => void;
+  // The app's logout handler — used by the Welcome header on the Home page.
+  logout?: () => void;
   setKioskRotateClass: (cls: string) => void;
   setPortalRotation: (rotation: PortalRotation) => void;
 }>({

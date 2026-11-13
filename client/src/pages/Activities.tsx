@@ -92,7 +92,7 @@ export default function Activities() {
     refetch, 
     isRefetching, 
     dataUpdatedAt
-  } = useQuery({
+  } = useQuery<ActivityData[]>({
     queryKey: ["activities", limit, offset],
     queryFn: async () => {
       try {
@@ -444,7 +444,7 @@ export default function Activities() {
   };
 
   // Format JSON details for display
-  const formatDetails = (details: string | null, activityType: string, entityType: string) => {
+  const formatDetails = (details: string | null, activityType: string, entityType: string, pageName?: string | null) => {
     if (!details) return "—";
     
     // Special handling for encoded JSON strings that might appear as plain text
@@ -506,8 +506,8 @@ export default function Activities() {
       if (entityType?.toLowerCase() === "loadoperation" || 
           entityType?.toLowerCase() === "loadoperations" ||
           entityType?.toLowerCase() === "loadingoperation" || 
-          activity.pageName?.toLowerCase() === "loadoperations" || 
-          activity.pageName?.toLowerCase() === "gjoperations") {
+          pageName?.toLowerCase() === "loadoperations" || 
+          pageName?.toLowerCase() === "gjoperations") {
         
         // Extract essential information for load operations
         const referenceNumber = parsed.referenceNumber || "";
@@ -516,7 +516,7 @@ export default function Activities() {
         const status = parsed.status || "";
         
         if (referenceNumber) {
-          let statusInfo = "";
+          let statusInfo: React.ReactNode = "";
           // For status changes, highlight the status change
           if (parsed.oldStatus && parsed.newStatus) {
             statusInfo = (
@@ -745,8 +745,6 @@ export default function Activities() {
                 <SelectItem value="generated">Generated</SelectItem>
                 <SelectItem value="update">Updated</SelectItem>
                 <SelectItem value="delete">Deleted</SelectItem>
-                {/* Debug for action types */}
-                {console.log("Action types from data:", actionTypes)}
               </SelectContent>
             </Select>
           </div>
@@ -869,7 +867,7 @@ export default function Activities() {
                         </TableCell>
                         <TableCell className="max-w-xs">
                           <div className="flex flex-col gap-1">
-                            <div className="break-words text-sm">{formatDetails(activity.details, activity.action, activity.entityType)}</div>
+                            <div className="break-words text-sm">{formatDetails(activity.details, activity.action, activity.entityType, activity.pageName)}</div>
                           </div>
                         </TableCell>
                       </TableRow>
@@ -924,7 +922,7 @@ export default function Activities() {
                       </CardHeader>
                       <CardContent className="pt-0 pb-3">
                         <div className="text-sm">
-                          {formatDetails(activity.details, activity.action, activity.entityType)}
+                          {formatDetails(activity.details, activity.action, activity.entityType, activity.pageName)}
                         </div>
                       </CardContent>
                     </Card>

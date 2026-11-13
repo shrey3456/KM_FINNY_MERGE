@@ -1,5 +1,5 @@
+import { drawPdfHeader, drawPdfFooter, greenTotalRow, setPdfProperties } from "@/lib/pdfBranding";
 import { PlantBadge } from "@/components/PlantBadge";
-import { PageScrollButtons } from "@/components/PageScrollButtons";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
@@ -11,12 +11,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { TableCard } from "@/components/ui/table-card";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   Download, FileBarChart, Truck, Clock, Loader2, ChevronDown,
-  Package, ListChecks, CalendarClock, FileSpreadsheet, Eye,
+  Package, ListChecks, CalendarClock, FileSpreadsheet, Eye, RotateCw,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -41,9 +42,11 @@ type ReportRow = {
   label: string;
   partyName?: string | null;
   plant: string | null;
+  stockPlant?: string | null;   // unloading: where the stock lands, when it differs from the purchase plant
   orderCount: number;
   expectedQty: number;
   actualQty: number;
+  extraQty?: number;
   eventCount: number;
   startTime: string | null;
   endTime: string | null;
@@ -52,15 +55,17 @@ type ReportRow = {
   extraPallets?: number;
 };
 // `pallets` = pallets actually received (scanned); `expectedPallets` = expected qty / pallet size.
-type ItemTotal = { barcode: string; itemName: string | null; srNo?: string | null; expectedQty: number; expectedPallets?: number; actualQty: number; extraQty: number; pallets: number };
+type ItemTotal = { barcode: string; itemName: string | null; sapCode?: string | null; srNo?: string | null; expectedQty: number; expectedPallets?: number; actualQty: number; extraQty: number; pallets: number };
 type Activity = {
-  barcode: string; itemName: string | null; qty: number; pallets?: number; stv?: string | null;
+  barcode: string; itemName: string | null; sapCode?: string | null; qty: number; pallets?: number; stv?: string | null;
   isExtra: boolean; scannedByName: string | null; scannedAt: string;
   groupKey?: string | null; groupLabel?: string | null;
   // A voided scan stays in the activity list, clearly marked, so the report says the entry
   // happened and was cancelled; totals/item-wise figures already exclude it server-side. An
   // entry someone REMOVED from Scan History is dropped by the server and never arrives here.
   voided?: boolean; voidReason?: string | null; voidedAt?: string | null;
+  // A quantity correction (Adjust), saved as its own entry; adjustedAt = when the correction was made.
+  isAdjust?: boolean; adjustedAt?: string | null;
 };
 type ReportData = {
   date: string;
@@ -73,7 +78,7 @@ type ReportData = {
   activities?: Activity[];
 };
 type VehicleDetail = {
-  date: string; vehicle: string; plant: string | null;
+  date: string; vehicle: string; plant: string | null; stockPlant?: string | null;
   startTime: string | null; endTime: string | null;
   itemTotals: ItemTotal[]; activities: Activity[];
 };
@@ -87,6 +92,18 @@ type CsvDetail = {
   startTime: string | null; endTime: string | null;
   itemTotals: ItemTotal[]; activities: Activity[];
 };
+
+// Purchase plant, and - when the stock lands at a different plant - "RAJKOT -> VALSAD" (purchase -> stock).
+function PlantRoute({ plant, stockPlant, className }: { plant: string | null; stockPlant?: string | null; className?: string }) {
+  if (!plant) return null;
+  const differs = !!stockPlant && stockPlant.toUpperCase() !== plant.toUpperCase();
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <PlantBadge plant={plant} className={className} />
+      {differs && (<><span className="text-gray-400">→</span><PlantBadge plant={stockPlant} className={className} /></>)}
+    </span>
+  );
+}
 
 // "Today" in IST, not the browser's own local date — matching the app-wide Asia/Kolkata
 // convention, so the default date shown here agrees with every other page.
@@ -126,6 +143,73 @@ function fmtTotalTime(start: string | null, end: string | null): string {
   return `${m}m ${String(sec).padStart(2, "0")}s`;
 }
 
+// Hourly report: rolling 1-hour windows anchored to when scanning actually started (e.g. a 03:28 start gives
+// 03:28 – 04:28, 04:28 – 05:28 ...), not clock-hour boundaries - the same windows the per-order Reports dialog uses.
+// Voided entries are left out, matching every total on this page. Hours with no scans stay in the list so gaps show.
+type HourWindow = { idx: number; label: string; events: Activity[]; qty: number; pallets: number };
+const HOUR_MS = 3_600_000;
+
+const fmtClock = (ms: number) => new Date(ms).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: true });
+
+function istHourOfDay(dt: string): number | null {
+  const d = new Date(dt);
+  if (isNaN(d.getTime())) return null;
+  return Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", hourCycle: "h23" }).format(d));
+}
+
+// Keeps only the entries scanned within [from, to] o'clock (IST, both hours inclusive: 9 to 17 = 09:00 up to 17:59).
+function withinHours(activities: Activity[], from: number, to: number): Activity[] {
+  if (from <= 0 && to >= 23) return activities;
+  return activities.filter((a) => {
+    const h = istHourOfDay(a.scannedAt);
+    return h !== null && h >= from && h <= to;
+  });
+}
+const hourOptionLabel = (h: number) => `${String(h).padStart(2, "0")}:00`;
+
+function buildHourWindows(activities: Activity[], startIso: string | null): HourWindow[] {
+  const real = activities.filter((a) => !a.voided && !isNaN(new Date(a.scannedAt).getTime()));
+  if (real.length === 0) return [];
+  const times = real.map((a) => new Date(a.scannedAt).getTime());
+  const startMs = startIso ? new Date(startIso).getTime() : NaN;
+  const anchor = Math.min(...times, ...(isNaN(startMs) ? [] : [startMs]));
+  const byIdx = new Map<number, Activity[]>();
+  let maxIdx = 0;
+  real.forEach((a, i) => {
+    const idx = Math.floor((times[i] - anchor) / HOUR_MS);
+    maxIdx = Math.max(maxIdx, idx);
+    byIdx.set(idx, [...(byIdx.get(idx) ?? []), a]);
+  });
+  const out: HourWindow[] = [];
+  for (let idx = 0; idx <= maxIdx; idx++) {
+    const events = (byIdx.get(idx) ?? []).slice().sort((x, y) => new Date(x.scannedAt).getTime() - new Date(y.scannedAt).getTime());
+    out.push({
+      idx, events,
+      label: `${fmtClock(anchor + idx * HOUR_MS)} – ${fmtClock(anchor + (idx + 1) * HOUR_MS)}`,
+      qty: events.reduce((n, e) => n + e.qty, 0),
+      pallets: events.reduce((n, e) => n + (e.pallets ?? 0), 0),
+    });
+  }
+  return out;
+}
+
+const hourlySourceHeader = (tab: Tab) => (tab === "scan" ? "CSV File" : tab === "loading" ? "Order / Slip" : "Vehicle");
+
+// Flat rows for a download: each window's scans, then its Subtotal, then one grand TOTAL.
+function hourlyExportRows(tab: Tab, windows: HourWindow[], meta: ExportRow): ExportRow[] {
+  const rows: ExportRow[] = [
+    meta, [],
+    ["Hour (IST)", "Time", hourlySourceHeader(tab), "Barcode", "Item Name", "SAP Code", "Type", "Scanned By", "Pallets", "Qty"],
+  ];
+  for (const w of windows) {
+    if (w.events.length === 0) { rows.push([w.label, "", "", "", "— no scans this hour —", "", "", "", 0, 0], []); continue; }
+    for (const e of w.events) rows.push([w.label, fmtIST(e.scannedAt), e.groupLabel ?? "", barcodeCell(e.barcode), e.itemName ?? "", e.sapCode ?? "", entryKind(e), e.scannedByName ?? "", (e.pallets ?? 0).toFixed(2), e.qty]);
+    rows.push(["", "", "", "", "Subtotal", "", "", "", w.pallets.toFixed(2), w.qty], []);
+  }
+  rows.push(["TOTAL", "", "", "", "", "", "", "", windows.reduce((n, w) => n + w.pallets, 0).toFixed(2), windows.reduce((n, w) => n + w.qty, 0)]);
+  return rows;
+}
+
 // An item's physical received quantity includes both its regular receipt and any extra receipt.
 // Extra stays visible in its own column, so the operator can still see that split.
 const receivedIncludingExtra = (item: ItemTotal): number => item.actualQty + item.extraQty;
@@ -140,6 +224,43 @@ function dailyReportPlantsFromUser(): string[] | null {
   } catch {
     return [];
   }
+}
+
+// What an activity entry IS: a regular scan, an Extra, or an Adjust (a quantity correction); and whether it was voided afterwards. A voided Extra stays an Extra
+// (and Voided), so it is never mistaken for an ordinary received entry.
+const entryKind = (a: { isExtra?: boolean; isAdjust?: boolean }): string => (a.isExtra ? "Extra" : a.isAdjust ? "Adjust" : "Regular");
+const entryTypeText = (a: { isExtra?: boolean; isAdjust?: boolean; voided?: boolean }): string => (a.voided ? `Voided (${entryKind(a)})` : entryKind(a));
+function EntryTypeBadges({ a }: { a: Activity }) {
+  const kind = a.isExtra ? "Extra" : a.isAdjust ? "Adjust" : null;
+  if (!kind && !a.voided) return null;
+  const tone = kind === "Extra" ? (a.voided ? "bg-amber-50 text-amber-400" : "bg-amber-100 text-amber-700") : (a.voided ? "bg-sky-50 text-sky-400" : "bg-sky-100 text-sky-700");
+  return (
+    <span className="ml-1.5 inline-flex flex-wrap items-center gap-1 align-middle">
+      {kind && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${tone}`}>{kind}</span>}
+      {a.voided && (
+        <span title={a.voidReason ?? undefined} className="rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">Voided</span>
+      )}
+    </span>
+  );
+}
+
+// The Activities rows of every download (main report, vehicle and CSV popups): the Type of each entry, and for a voided one its void reason and time. A voided
+// entry stays in the file with its original quantity, marked "Voided (...)", and is left out of the Total row, so the file's total matches the screen.
+// `stvHeader` = the Dispatch Directory column's heading (null = the file has no such column).
+function activityExportRows(list: Activity[], stvHeader: string | null): ExportRow[] {
+  const header: ExportRow = ["Time", "Barcode", "Item Name", "Type", "SAP Code", "Qty", "Pallets", ...(stvHeader ? [stvHeader] : []), "Extra Qty", "Scanned By", "Void Reason", "Voided At"];
+  const body: ExportRow[] = list.map((a) => [
+    fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", entryTypeText(a), a.sapCode ?? "", a.qty, a.pallets?.toFixed(2) ?? "",
+    ...(stvHeader ? [a.stv ?? ""] : []),
+    a.isExtra ? a.qty : 0, a.scannedByName ?? "", a.voided ? (a.voidReason ?? "") : "", a.voided && a.voidedAt ? fmtIST(a.voidedAt) : "",
+  ]);
+  const counted = list.filter((a) => !a.voided);
+  const total: ExportRow = [
+    "Total", "", "", "", "", counted.reduce((s, a) => s + a.qty, 0), counted.reduce((s, a) => s + (a.pallets ?? 0), 0).toFixed(2),
+    ...(stvHeader ? [""] : []),
+    counted.reduce((s, a) => s + (a.isExtra ? a.qty : 0), 0), "", "", "",
+  ];
+  return [header, ...body, total];
 }
 
 // Same CSV/Excel/PDF export mechanism the existing per-order Reports dialog uses
@@ -172,8 +293,6 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: ExportRow[]
   } else {
     const plain = rows.map((r) => r.map((c) => (c !== null && typeof c === "object" ? c.text : c)));
     const doc = new jsPDF({ orientation: "landscape" });
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const pageHeight = doc.internal.pageSize.getHeight();
     const margin = 14;
     const separatorIndex = plain.findIndex((row) => row.length === 0);
     const headerIndex = separatorIndex >= 0 ? separatorIndex + 1 : 0;
@@ -181,24 +300,14 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: ExportRow[]
     const header = plain[headerIndex] ?? [];
     const body = plain.slice(headerIndex + 1);
 
-    doc.setFillColor(226, 232, 244);
-    doc.rect(0, 0, pageWidth, 24, "F");
-    doc.setTextColor(0, 29, 110);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(15);
-    doc.text(title, margin, 14);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
     const scope = metadata
       .map((row) => row.reduce<string[]>((parts, cell, index) => {
         if (index % 2 === 0 && row[index + 1] !== undefined) parts.push(`${String(cell)}: ${String(row[index + 1])}`);
         return parts;
       }, []).join("  |  "))
       .join("  |  ");
-    if (scope) doc.text(scope, margin, 20);
-    doc.setFontSize(8);
-    doc.text(`Generated ${fmtIST(new Date().toISOString())}`, pageWidth - margin, 17, { align: "right" });
-    doc.setTextColor(0, 0, 0);
+    setPdfProperties(doc, title, scope);
+    const startY = drawPdfHeader(doc, { title, subtitle: scope, margin, generated: fmtIST(new Date().toISOString()) });
 
     const columnStyles: Record<number, { halign: "right" }> = {};
     header.forEach((cell, index) => {
@@ -207,22 +316,16 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: ExportRow[]
     autoTable(doc, {
       head: [header as string[]],
       body: body as string[][],
-      startY: 30,
+      startY,
       theme: "grid",
       styles: { fontSize: 7, cellPadding: 2.2, lineColor: [210, 210, 210], lineWidth: 0.15 },
       headStyles: { fillColor: [226, 232, 244], textColor: [0, 29, 110], fontStyle: "bold", halign: "left" },
       alternateRowStyles: { fillColor: [248, 250, 252] },
       columnStyles,
       margin: { left: margin, right: margin },
+      didParseCell: greenTotalRow,
     });
-    const pageCount = doc.getNumberOfPages();
-    for (let page = 1; page <= pageCount; page++) {
-      doc.setPage(page);
-      doc.setFontSize(8);
-      doc.setTextColor(150, 150, 150);
-      doc.text("KM Finny - Confidential", margin, pageHeight - 8);
-      doc.text(`Page ${page} of ${pageCount}`, pageWidth - margin, pageHeight - 8, { align: "right" });
-    }
+    drawPdfFooter(doc, margin);
     doc.save(`${baseName}.pdf`);
   }
 }
@@ -268,6 +371,14 @@ const TABS: { key: Tab; label: string; breakdownLabel: string }[] = [
 // its own hook file, shared with AdjustExchange.tsx.
 const TABLE_MIN_PAGE_WIDTH = 900;
 
+// A quantity with its pallets written underneath it (2 decimals, small grey type). Nothing under a 0 or a missing figure.
+const qtyWithPallets = (qty: number, pallets: number | null | undefined, tone = "") => (
+  <div className="flex flex-col items-end leading-tight">
+    <span className={tone}>{qty}</span>
+    {qty && pallets != null ? <span className="text-[10px] font-medium text-[#001d6e]">{pallets.toFixed(2)} plt</span> : null}
+  </div>
+);
+
 export default function DailyReports() {
   const [rootRef, pageWidth] = usePageWidth();
   // Until measured (first paint) fall back to the old viewport rule so nothing flashes.
@@ -278,10 +389,10 @@ export default function DailyReports() {
   // (sessionStorage, same convention as every other page's filter/view state) rather than
   // always resetting to Loading/Total Summary.
   const [tab, setTab] = usePersistentFilter<Tab>("dailyReports:tab", "loading");
-  const [reportTab, setReportTab] = usePersistentFilter<"summary" | "activities" | "breakdown">("dailyReports:reportTab", "summary");
-  // The date always defaults to today (IST) on a fresh visit — it is not remembered, since
-  // "today" changing every day is exactly the point of that default.
-  const [date, setDate] = useState(todayIST());
+  const [reportTab, setReportTab] = usePersistentFilter<"summary" | "activities" | "breakdown" | "hourly">("dailyReports:reportTab", "summary");
+  // The date you picked is kept while the browser stays open (leave the page and come back to the same day); a fresh
+  // visit — a new browser session — starts on today (IST) again.
+  const [date, setDate] = usePersistentFilter<string>("dailyReports:date", todayIST());
   const [selectedPlant, setSelectedPlant] = usePersistentFilter("dailyReports:plant", "");
   const activeTab = TABS.find((t) => t.key === tab)!;
   // Every tab (Loading, Unloading, Scan) has the Total Summary + Activities Summary pair.
@@ -313,11 +424,11 @@ export default function DailyReports() {
   const [openDetailTab, setOpenDetailTab] = useState<"items" | "activities">("items");
   const effectiveReportTab = tab === "scan"
     ? reportTab
-    : reportTab === "activities" ? "activities" : "summary";
+    : reportTab === "activities" || reportTab === "hourly" ? reportTab : "summary";
 
   const selectTab = (next: Tab) => {
     setTab(next);
-    if (next !== "scan") setReportTab("summary");
+    if (next !== "scan" && reportTab === "breakdown") setReportTab("summary");
   };
 
   const reportQuery = useQuery({
@@ -331,37 +442,58 @@ export default function DailyReports() {
       }
       return res.json() as Promise<ReportData>;
     },
+    // A void or an Adjust made after Complete must show here: re-read on open, every 30 seconds, and before a download.
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const data = reportQuery.data;
 
-  const handleExportSummaryReport = (fmt: Fmt) => {
-    if (!data?.itemTotals) return;
-    const totals = data.itemTotals.reduce(
+  const handleExportSummaryReport = async (fmt: Fmt) => {
+    // Re-read first, so the file always has the latest voids and adjustments.
+    const fresh = (await reportQuery.refetch()).data ?? data;
+    if (!fresh?.itemTotals) return;
+    const totals = fresh.itemTotals.reduce(
       (acc, i) => ({ expectedQty: acc.expectedQty + i.expectedQty, actualQty: acc.actualQty + receivedIncludingExtra(i), extraQty: acc.extraQty + i.extraQty, expectedPallets: acc.expectedPallets + (i.expectedPallets ?? 0), pallets: acc.pallets + i.pallets }),
       { expectedQty: 0, actualQty: 0, extraQty: 0, expectedPallets: 0, pallets: 0 },
     );
     const rows: ExportRow[] = [
-      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime), "Total Time", fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)],
+      ["Start", fmtIST(fresh.activitySummary.startTime), "End", fmtIST(fresh.activitySummary.endTime), "Total Time", fmtTotalTime(fresh.activitySummary.startTime, fresh.activitySummary.endTime)],
       [],
-      ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Expected Pallets", "Received Pallets"],
-      ...data.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, (i.expectedPallets ?? 0).toFixed(2), i.pallets.toFixed(2)]),
-      ["TOTAL", "", totals.expectedQty, totals.actualQty, totals.extraQty, totals.expectedPallets.toFixed(2), totals.pallets.toFixed(2)],
+      ["Barcode", "Item Name", "SAP Code", "Expected Qty", "Expected Pallets", "Received Qty", "Extra Qty", "Received Pallets"],
+      ...fresh.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.sapCode ?? "", i.expectedQty, (i.expectedPallets ?? 0).toFixed(2), receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
+      ["TOTAL", "", "", totals.expectedQty, totals.expectedPallets.toFixed(2), totals.actualQty, totals.extraQty, totals.pallets.toFixed(2)],
     ];
-    exportRows(fmt, `${tab}-summary-report-${data.date}`, `${activeTab.label} — Total Summary Report — ${data.date}`, rows);
+    exportRows(fmt, `${tab}-summary-report-${fresh.date}`, `${activeTab.label} — Total Summary Report — ${fresh.date}`, rows);
   };
 
-  const handleExportActivitiesReport = (fmt: Fmt) => {
-    if (!data?.activities) return;
+  const handleExportActivitiesReport = async (fmt: Fmt) => {
+    // Re-read first, so the file always has the latest voids and adjustments.
+    const fresh = (await reportQuery.refetch()).data ?? data;
+    if (!fresh?.activities) return;
     const rows: ExportRow[] = [
-      ["Start", fmtIST(data.activitySummary.startTime), "End", fmtIST(data.activitySummary.endTime), "Total Time", fmtTotalTime(data.activitySummary.startTime, data.activitySummary.endTime)],
+      ["Start", fmtIST(fresh.activitySummary.startTime), "End", fmtIST(fresh.activitySummary.endTime), "Total Time", fmtTotalTime(fresh.activitySummary.startTime, fresh.activitySummary.endTime)],
       [],
-      ["Time", "Barcode", "Item Name", "Qty", "Pallets", "Dispatch Directory", "Extra?", "Scanned By", "Voided"],
-      ...data.activities.map((a) => [
-        fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
-        a.isExtra ? "Yes" : "No", a.scannedByName ?? "", voidedCell(a),
-      ]),
+      ...activityExportRows(fresh.activities, "Dispatch Directory"),
     ];
-    exportRows(fmt, `${tab}-activities-report-${data.date}`, `${activeTab.label} — Activities Report — ${data.date}`, rows);
+    exportRows(fmt, `${tab}-activities-report-${fresh.date}`, `${activeTab.label} — Activities Report — ${fresh.date}`, rows);
+  };
+
+  const [hourFrom, setHourFrom] = usePersistentFilter<number>("dailyReports:hourFrom", 0);
+  const [hourTo, setHourTo] = usePersistentFilter<number>("dailyReports:hourTo", 23);
+  const hourSpanLabel = `${hourOptionLabel(hourFrom)} – ${String(hourTo).padStart(2, "0")}:59`;
+  const hourWindowsFor = (d: ReportData) => {
+    const inSpan = withinHours(d.activities ?? [], hourFrom, hourTo);
+    // The anchor is the real start of scanning; with a span chosen it is the first scan inside the span instead.
+    return buildHourWindows(inSpan, hourFrom <= 0 && hourTo >= 23 ? d.activitySummary.startTime : null);
+  };
+  const hourWindows = data ? hourWindowsFor(data) : [];
+  const hourTotals = hourWindows.reduce((acc, w) => ({ scans: acc.scans + w.events.length, qty: acc.qty + w.qty, pallets: acc.pallets + w.pallets }), { scans: 0, qty: 0, pallets: 0 });
+
+  const handleExportHourlyReport = async (fmt: Fmt) => {
+    // Re-read first, so the file always has the latest voids and adjustments.
+    const fresh = (await reportQuery.refetch()).data ?? data;
+    if (!fresh?.activities) return;
+    const meta: ExportRow = ["Date", fresh.date, "Plant", selectedPlant || "All plants", "Hours", hourSpanLabel];
+    exportRows(fmt, `${tab}-hourly-report-${fresh.date}`, `${activeTab.label} — Hourly Report — ${fresh.date}`, hourlyExportRows(tab, hourWindowsFor(fresh), meta));
   };
 
   const summaryTotals = data?.itemTotals?.reduce(
@@ -369,7 +501,7 @@ export default function DailyReports() {
     { expectedQty: 0, actualQty: 0, extraQty: 0, expectedPallets: 0, pallets: 0 },
   );
 
-  // Same shared DataTable/TableCard the rest of the app's tables use (Overall Stock, Scan
+  // Same shared DataTable/TableCard the rest of the app's tables use (Stock Overview, Scan
   // History) — sortable/resizable/hideable columns, zebra stripes, a totals row — instead of
   // this page's own hand-built <table>s.
   const summaryColumns: DataTableColumn<ItemTotal>[] = [
@@ -381,14 +513,18 @@ export default function DailyReports() {
       id: "itemName", header: "Item Name", accessor: (r) => r.itemName, totalable: false,
       cellClassName: "text-gray-900", render: (r) => r.itemName || "—",
     },
+    {
+      id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false,
+      cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—",
+    },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
+    { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.expectedPallets ?? 0), 0).toFixed(2) },
     { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "pallets", header: "Received Pallets", align: "right", accessor: (r) => r.pallets, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets.toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + r.pallets, 0).toFixed(2) },
     {
       id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty,
       render: (r) => <span className={r.extraQty > 0 ? "font-medium text-amber-600" : "text-gray-400"}>{r.extraQty}</span>,
     },
-    { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-gray-700", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0).toFixed(2) },
-    { id: "pallets", header: "Received Pallets", align: "right", accessor: (r) => r.pallets, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets.toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + r.pallets, 0).toFixed(2) },
   ];
 
   const activitiesColumns: DataTableColumn<Activity>[] = [
@@ -398,13 +534,11 @@ export default function DailyReports() {
       id: "itemName", header: "Item Name", accessor: (r) => r.itemName, totalable: false,
       cellClassName: "text-gray-900",
       render: (r) => (
-        <>
-          {r.itemName || "—"}
-          {r.isExtra && !r.voided && <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">Extra</span>}
-          <VoidedBadge a={r} />
-        </>
+        <>{r.itemName || "—"}</>
       ),
     },
+    { id: "entryType", header: "Type", width: 150, accessor: (r) => entryTypeText(r), totalable: false, render: (r) => <EntryTypeBadges a={r} /> },
+    { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
     { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, cellClassName: "tabular-nums font-medium text-emerald-600", render: qtyCellFor },
     { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? null, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => r.pallets?.toFixed(2) ?? "—" },
     { id: "stv", header: "Dispatch Directory", width: 100, accessor: (r) => r.stv, totalable: false, cellClassName: "text-gray-500", render: (r) => r.stv || "—" },
@@ -430,10 +564,16 @@ export default function DailyReports() {
     ...(tab === "loading"
       ? [{ id: "partyName", header: "Party Name", width: 220, accessor: (r: ReportRow) => r.partyName ?? "", totalable: false, cellClassName: "text-gray-800", render: (r: ReportRow) => r.partyName || "—" } as DataTableColumn<ReportRow>]
       : []),
-    { id: "plant", header: "Plant", width: 120, accessor: (r) => r.plant, totalable: false, render: (r) => (r.plant ? <PlantBadge plant={r.plant} /> : "—") },
+    { id: "plant", header: "Plant", width: 210, accessor: (r) => (r.stockPlant && r.stockPlant !== r.plant ? `${r.plant} → ${r.stockPlant}` : r.plant), totalable: false, render: (r) => (r.plant ? <PlantRoute plant={r.plant} stockPlant={r.stockPlant} /> : "—") },
     { id: "orderCount", header: "Orders", align: "right", accessor: (r) => r.orderCount, cellClassName: "tabular-nums" },
     { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty, cellClassName: "tabular-nums text-gray-700" },
+    { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.expectedPallets ?? 0), 0).toFixed(2) },
     { id: "actualQty", header: "Received", align: "right", accessor: (r) => r.actualQty, cellClassName: "tabular-nums font-medium text-emerald-600" },
+    { id: "receivedPallets", header: "Received Pallets", align: "right", accessor: (r) => r.receivedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.receivedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.receivedPallets ?? 0), 0).toFixed(2) },
+    {
+      id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty ?? 0,
+      render: (r) => <span className={(r.extraQty ?? 0) > 0 ? "tabular-nums font-medium text-amber-600" : "text-gray-400"}>{r.extraQty ?? 0}</span>,
+    },
     { id: "eventCount", header: "Events", align: "right", accessor: (r) => r.eventCount, cellClassName: "tabular-nums" },
     { id: "startTime", header: "Start", width: 140, accessor: (r) => r.startTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.startTime) },
     { id: "endTime", header: "End", width: 140, accessor: (r) => r.endTime, totalable: false, cellClassName: "whitespace-nowrap text-xs text-gray-500", render: (r) => fmtIST(r.endTime) },
@@ -451,7 +591,6 @@ export default function DailyReports() {
 
   return (
     <div ref={rootRef} className="container-fluid max-w-full space-y-5 overflow-x-hidden px-3 py-6 sm:px-4 md:px-6">
-      <PageScrollButtons />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="flex items-center text-2xl font-bold tracking-tight">
           <FileBarChart className="mr-2 h-6 w-6 text-[#001d6e]" />
@@ -468,6 +607,9 @@ export default function DailyReports() {
             </SelectContent>
           </Select>
           <DateInput value={date} onChange={setDate} clearable={false} />
+          <Button type="button" variant="outline" size="icon" className="h-9 w-9" title="Refresh the report" aria-label="Refresh the report" onClick={() => reportQuery.refetch()} disabled={reportQuery.isFetching}>
+            <RotateCw className={`h-4 w-4 ${reportQuery.isFetching ? "animate-spin" : ""}`} />
+          </Button>
         </div>
       </div>
 
@@ -570,6 +712,17 @@ export default function DailyReports() {
             >
               Activities Report
             </button>
+            <button
+              type="button"
+              onClick={() => setReportTab("hourly")}
+              className={
+                effectiveReportTab === "hourly"
+                  ? "rounded-full bg-[#001d6e] px-4 py-1.5 text-sm font-semibold text-white ring-2 ring-[#001d6e]/30"
+                  : "rounded-full border border-gray-200 bg-white px-4 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
+              }
+            >
+              Hourly Report
+            </button>
             {tab === "scan" && <button
               type="button"
               onClick={() => setReportTab("breakdown")}
@@ -583,8 +736,98 @@ export default function DailyReports() {
             </button>}
           </div>
 
-          {effectiveReportTab === "summary" && (tab === "loading" || tab === "unloading") ? (
+          {effectiveReportTab === "hourly" ? (
             <TableCard
+              key={`rpt-hourly-${tab}`}
+              icon={Clock}
+              title="Hourly Report"
+              subtitle={`${hourWindows.length} hour window${hourWindows.length === 1 ? "" : "s"} · ${hourTotals.scans} scan${hourTotals.scans === 1 ? "" : "s"} · ${hourTotals.qty} item(s) · ${hourTotals.pallets.toFixed(2)} plt for ${data.date}`}
+              className="rounded-xl border-gray-300 shadow-none"
+              headerActions={<DownloadMenu onExport={handleExportHourlyReport} />}
+            >
+              <div className="flex flex-wrap items-center justify-end gap-1.5 border-b border-gray-200 px-3 py-2 text-xs text-gray-500">
+                Hours
+                <Select value={String(hourFrom)} onValueChange={(v) => { const n = Number(v); setHourFrom(n); if (n > hourTo) setHourTo(n); }}>
+                  <SelectTrigger className="h-8 w-[5.5rem] text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>{Array.from({ length: 24 }, (_, h) => <SelectItem key={h} value={String(h)}>{hourOptionLabel(h)}</SelectItem>)}</SelectContent>
+                </Select>
+                to
+                <Select value={String(hourTo)} onValueChange={(v) => { const n = Number(v); setHourTo(n); if (n < hourFrom) setHourFrom(n); }}>
+                  <SelectTrigger className="h-8 w-[5.5rem] text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>{Array.from({ length: 24 }, (_, h) => <SelectItem key={h} value={String(h)}>{`${String(h).padStart(2, "0")}:59`}</SelectItem>)}</SelectContent>
+                </Select>
+                {(hourFrom !== 0 || hourTo !== 23) && (
+                  <button type="button" className="text-[#001d6e] underline" onClick={() => { setHourFrom(0); setHourTo(23); }}>All day</button>
+                )}
+              </div>
+              {hourWindows.length === 0 ? (
+                <p className="p-4 text-sm text-gray-400">No scans recorded</p>
+              ) : (
+                <div className="max-h-[560px] overflow-auto px-2">
+                  <Accordion type="multiple">
+                    {hourWindows.map((w) => (
+                      <AccordionItem key={w.idx} value={String(w.idx)}>
+                        <AccordionTrigger className="py-2.5 text-sm hover:no-underline">
+                          <span className="font-medium">{w.label}</span>
+                          <span className="mr-2 text-xs font-normal text-gray-500">
+                            {w.events.length === 0
+                              ? "no scans"
+                              : `${w.events.length} scan${w.events.length === 1 ? "" : "s"} · ${w.qty} item(s) · ${w.pallets.toFixed(2)} plt`}
+                          </span>
+                        </AccordionTrigger>
+                        <AccordionContent className="pb-3">
+                          {w.events.length === 0 ? (
+                            <p className="text-xs text-gray-400">No scans in this hour.</p>
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <div className="mb-2 flex justify-end">
+                                <DownloadMenu onExport={(fmt) => exportRows(
+                                  fmt,
+                                  `${tab}-hourly-${w.label.replace(/[^\w]+/g, "_")}-${data.date}`,
+                                  `${activeTab.label} — ${w.label} — ${data.date}`,
+                                  hourlyExportRows(tab, [w], ["Date", data.date, "Plant", selectedPlant || "All plants"]),
+                                )} />
+                              </div>
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="text-left text-gray-400">
+                                    <th className="py-1 pr-3 font-medium">Time</th>
+                                    <th className="py-1 pr-3 font-medium">{hourlySourceHeader(tab)}</th>
+                                    <th className="py-1 pr-3 font-medium">Barcode</th>
+                                    <th className="py-1 pr-3 font-medium">Item Name</th>
+                                    <th className="py-1 pr-3 font-medium">SAP Code</th>
+                                    <th className="py-1 pr-3 font-medium">Scanned By</th>
+                                    <th className="py-1 pr-3 text-right font-medium">Pallets</th>
+                                    <th className="py-1 pr-3 text-right font-medium">Qty</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {w.events.map((e, i) => (
+                                    <tr key={i} className="border-t border-gray-100">
+                                      <td className="whitespace-nowrap py-1 pr-3 text-gray-500">{fmtIST(e.scannedAt)}</td>
+                                      <td className="py-1 pr-3">{e.groupLabel || "—"}</td>
+                                      <td className="py-1 pr-3 font-mono">{e.barcode || "—"}</td>
+                                      <td className="py-1 pr-3">{e.itemName || "—"}<EntryTypeBadges a={e} /></td>
+                                      <td className="py-1 pr-3 font-mono">{e.sapCode || "—"}</td>
+                                      <td className="py-1 pr-3">{e.scannedByName || "—"}</td>
+                                      <td className="py-1 pr-3 text-right">{(e.pallets ?? 0).toFixed(2)}</td>
+                                      <td className="py-1 pr-3 text-right">{e.qty}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </AccordionContent>
+                      </AccordionItem>
+                    ))}
+                  </Accordion>
+                </div>
+              )}
+            </TableCard>
+          ) : effectiveReportTab === "summary" && (tab === "loading" || tab === "unloading") ? (
+            <TableCard
+              key={`rpt-summary-rows-${tab}`}
               icon={tab === "unloading" ? Truck : FileSpreadsheet}
               title={tab === "unloading" ? "Vehicle Summary" : "Loading Slip Summary"}
               subtitle={
@@ -619,6 +862,7 @@ export default function DailyReports() {
             </TableCard>
           ) : effectiveReportTab === "summary" && tab === "scan" ? (
             <TableCard
+              key={`rpt-scan-summary-${tab}`}
               icon={FileSpreadsheet}
               title="Total Summary Report"
               subtitle={`${data.itemTotals?.length ?? 0} merged item${(data.itemTotals?.length ?? 0) === 1 ? "" : "s"} across all CSVs for ${data.date}`}
@@ -645,8 +889,8 @@ export default function DailyReports() {
                 />
               </div>
               <div className={`space-y-2 p-3 ${cardBoxClass}`}>
-                {(data.itemTotals ?? []).map((item) => (
-                  <div key={item.barcode} className="rounded-lg border border-gray-200 p-3">
+                {(data.itemTotals ?? []).map((item, idx) => (
+                  <div key={`${item.barcode}|${item.sapCode ?? ""}|${idx}`} className="rounded-lg border border-gray-200 p-3">
                     <p className="text-base font-semibold text-gray-900">{item.itemName || "—"}</p>
                     <p className="mt-1 break-all font-mono text-sm text-gray-500">{item.barcode}</p>
                     <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm text-gray-600">
@@ -662,6 +906,7 @@ export default function DailyReports() {
             </TableCard>
           ) : effectiveReportTab === "activities" && tab === "scan" ? (
             <TableCard
+              key={`rpt-scan-activities-${tab}`}
               icon={ListChecks}
               title="Activities Report"
               subtitle={`${data.activities?.length ?? 0} merged events across all CSVs for ${data.date}`}
@@ -689,7 +934,7 @@ export default function DailyReports() {
                 {(data.activities ?? []).map((activity, index) => (
                   <div key={`${activity.barcode}-${index}`} className={`rounded-lg border p-3 text-sm ${activity.voided ? "border-red-200 bg-red-50/60 text-gray-400" : "border-gray-200"}`}>
                     <div className="flex justify-between gap-3">
-                      <span className={activity.voided ? "text-base font-semibold text-gray-400" : "text-base font-semibold text-gray-900"}>{activity.itemName || "—"}<VoidedBadge a={activity} /></span>
+                      <span className={activity.voided ? "text-base font-semibold text-gray-400" : "text-base font-semibold text-gray-900"}>{activity.itemName || "—"}<EntryTypeBadges a={activity} /></span>
                       <span className={activity.voided ? "text-lg font-bold text-gray-400 line-through" : "text-lg font-bold text-emerald-600"}>{activity.qty}</span>
                     </div>
                     <p className="mt-1 break-all font-mono text-gray-500">{activity.barcode}</p>
@@ -700,6 +945,7 @@ export default function DailyReports() {
             </TableCard>
           ) : effectiveReportTab === "activities" ? (
             <TableCard
+              key={`rpt-rows-activities-${tab}`}
               icon={ListChecks}
               title="Activities Report"
               subtitle={`${data.breakdown.length} ${tab === "unloading" ? "vehicle" : tab === "loading" ? "slip" : "CSV"}${data.breakdown.length === 1 ? "" : "s"}`}
@@ -725,6 +971,7 @@ export default function DailyReports() {
             </TableCard>
           ) : (
             <TableCard
+              key={`rpt-breakdown-${tab}`}
               icon={Truck}
               title={`${activeTab.breakdownLabel} Breakdown`}
               subtitle={`${data.breakdown.length} row${data.breakdown.length === 1 ? "" : "s"}`}
@@ -770,8 +1017,8 @@ function DetailLists({ detailTab, itemTotals, activities, maxHeight }: { detailT
       if (itemTotals.length === 0) return <p className="py-6 text-center text-sm text-gray-400">No items</p>;
       return (
         <div className="space-y-2">
-          {itemTotals.map((item) => (
-            <div key={item.barcode} className="rounded-lg border border-gray-200 px-3 py-2">
+          {itemTotals.map((item, idx) => (
+            <div key={`${item.barcode}|${item.sapCode ?? ""}|${idx}`} className="rounded-lg border border-gray-200 px-3 py-2">
               <p className="text-sm font-semibold leading-snug text-gray-900">
                 {item.srNo && <span className="mr-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-xs font-bold text-gray-600">{item.srNo}</span>}
                 {item.itemName || "—"}
@@ -795,7 +1042,7 @@ function DetailLists({ detailTab, itemTotals, activities, maxHeight }: { detailT
         {activities.map((a, index) => (
           <div key={`${a.barcode}-${index}`} className={`rounded-lg border px-3 py-2 text-xs ${a.voided ? "border-red-200 bg-red-50/60 text-gray-400" : "border-gray-200"}`}>
             <div className="flex justify-between gap-3">
-              <span className={`text-sm font-semibold leading-snug ${a.voided ? "text-gray-400" : "text-gray-900"}`}>{a.itemName || "—"}<VoidedBadge a={a} /></span>
+              <span className={`text-sm font-semibold leading-snug ${a.voided ? "text-gray-400" : "text-gray-900"}`}>{a.itemName || "—"}<EntryTypeBadges a={a} /></span>
               <span className={`text-base font-bold ${a.voided ? "text-gray-400 line-through" : "text-emerald-600"}`}>{a.qty}</span>
             </div>
             <p className="break-all font-mono text-gray-500">{a.barcode}</p>
@@ -856,6 +1103,7 @@ function LoadingSlipDetailDialog({ date, order, initialTab, onClose }: { date: s
       }
       return res.json() as Promise<LoadingSlipDetail>;
     },
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const detail = detailQuery.data;
 
@@ -909,31 +1157,25 @@ const summaryColumnsForDetail: DataTableColumn<ItemTotal>[] = [
   { id: "srNo", header: "Sr", width: 60, fixedWidth: true, sortable: true, totalable: false, accessor: (r) => r.srNo ?? "", cellClassName: "text-xs font-semibold text-gray-600", render: (r) => r.srNo || "—" },
   { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
   { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => r.itemName || "—" },
+  { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
   { id: "expectedQty", header: "Expected", align: "right", accessor: (r) => r.expectedQty },
+  { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, cellClassName: "tabular-nums text-[#001d6e]", render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((x, r) => x + (r.expectedPallets ?? 0), 0).toFixed(2) },
   { id: "actualQty", header: "Received", align: "right", accessor: receivedIncludingExtra },
-  { id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty },
-  { id: "expectedPallets", header: "Expected Pallets", align: "right", accessor: (r) => r.expectedPallets ?? 0, render: (r) => (r.expectedPallets ?? 0).toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + (r.expectedPallets ?? 0), 0).toFixed(2) },
   { id: "pallets", header: "Received Pallets", align: "right", accessor: (r) => r.pallets, render: (r) => r.pallets.toFixed(2), total: (rows) => rows.reduce((sum, r) => sum + r.pallets, 0).toFixed(2) },
+  { id: "extraQty", header: "Extra", align: "right", accessor: (r) => r.extraQty },
 ];
 
 // Voided scans stay listed (so the report shows the entry existed and was cancelled) but are
-// greyed out with a badge; the server already leaves them out of every total.
+// greyed out with a Voided badge (see EntryTypeBadges); the server already leaves them out of every total.
 const voidedRowClass = (r: Activity) => (r.voided ? "bg-red-50/60 text-gray-400" : undefined);
-const voidedCell = (a: Activity) => (a.voided ? `Voided${a.voidReason ? ` — ${a.voidReason}` : ""}` : "");
-function VoidedBadge({ a }: { a: Activity }) {
-  if (!a.voided) return null;
-  return (
-    <span title={a.voidReason ?? undefined} className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">
-      Voided
-    </span>
-  );
-}
 const qtyCellFor = (r: Activity) => (r.voided ? <span className="text-gray-400 line-through">{r.qty}</span> : r.qty);
 
 const activitiesColumnsForDetail: DataTableColumn<Activity>[] = [
   { id: "scannedAt", header: "Time", width: 150, accessor: (r) => r.scannedAt, totalable: false, render: (r) => fmtIST(r.scannedAt) },
   { id: "barcode", header: "Barcode", width: 150, accessor: (r) => r.barcode, totalable: false, cellClassName: "font-mono text-xs text-gray-500" },
-  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => <>{r.itemName || "—"}<VoidedBadge a={r} /></> },
+  { id: "itemName", header: "Item", accessor: (r) => r.itemName, totalable: false, render: (r) => <>{r.itemName || "—"}</> },
+  { id: "entryType", header: "Type", width: 150, accessor: (r) => entryTypeText(r), totalable: false, render: (r) => <EntryTypeBadges a={r} /> },
+  { id: "sapCode", header: "SAP Code", width: 110, accessor: (r) => r.sapCode ?? "", totalable: false, cellClassName: "font-mono text-xs text-gray-600", render: (r) => r.sapCode || "—" },
   { id: "qty", header: "Qty", align: "right", accessor: (r) => r.qty, render: qtyCellFor },
   { id: "pallets", header: "Pallets", align: "right", accessor: (r) => r.pallets ?? 0, render: (r) => r.pallets?.toFixed(2) ?? "—" },
   { id: "scannedByName", header: "By", accessor: (r) => r.scannedByName, totalable: false, render: (r) => r.scannedByName || "—" },
@@ -957,6 +1199,7 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
       }
       return res.json() as Promise<VehicleDetail>;
     },
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const detail = detailQuery.data;
 
@@ -964,18 +1207,17 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
   // both combined — matches the tab you're actually looking at, not an "everything" file.
   const handleExport = (fmt: Fmt) => {
     if (!detail) return;
-    const header: ExportRow = ["Vehicle", detail.vehicle, "Plant", detail.plant ?? ""];
+    const header: ExportRow = ["Vehicle", detail.vehicle, "Plant", detail.stockPlant && detail.stockPlant !== detail.plant ? `${detail.plant} → ${detail.stockPlant}` : detail.plant ?? ""];
     const timing: ExportRow = ["Start", fmtIST(detail.startTime), "End", fmtIST(detail.endTime), "Total Time", fmtTotalTime(detail.startTime, detail.endTime)];
     const rows: ExportRow[] = detailTab === "items"
       ? [
           header, timing, [],
-          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Expected Pallets", "Received Pallets"],
-          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, (i.expectedPallets ?? 0).toFixed(2), i.pallets.toFixed(2)]),
+          ["Barcode", "Item Name", "SAP Code", "Expected Qty", "Expected Pallets", "Received Qty", "Extra Qty", "Received Pallets"],
+          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.sapCode ?? "", i.expectedQty, (i.expectedPallets ?? 0).toFixed(2), receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "Extra?", "Scanned By", "Voided"],
-          ...detail.activities.map((a) => [fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.isExtra ? "Yes" : "No", a.scannedByName ?? "", voidedCell(a)]),
+          ...activityExportRows(detail.activities, null),
         ];
     const suffix = detailTab === "items" ? "items" : "activities";
     exportRows(fmt, `unloading-${detail.vehicle}-${suffix}-${detail.date}`, `Unloading — ${detail.vehicle} — ${detailTab === "items" ? "Item-wise Total" : "Activity Report"} — ${detail.date}`, rows);
@@ -988,7 +1230,7 @@ function VehicleDetailDialog({ date, plant, vehicle, initialTab, onClose }: { da
           <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
             <Truck className="h-5 w-5" /> {vehicle}
           </DialogTitle>
-          <DialogDescription>{detail?.plant ? <PlantBadge plant={detail.plant} className="px-2 py-0 text-[11px]" /> : ""} · {date}</DialogDescription>
+          <DialogDescription>{detail?.plant ? <PlantRoute plant={detail.plant} stockPlant={detail.stockPlant} className="px-2 py-0 text-[11px]" /> : ""} · {date}</DialogDescription>
         </DialogHeader>
 
         {detailQuery.isLoading ? (
@@ -1076,6 +1318,7 @@ function CsvDetailDialog({ date, plant, csv, initialTab, onClose }: { date: stri
       }
       return res.json() as Promise<CsvDetail>;
     },
+    staleTime: 0, refetchOnMount: "always", refetchInterval: 30000,
   });
   const detail = detailQuery.data;
 
@@ -1088,16 +1331,12 @@ function CsvDetailDialog({ date, plant, csv, initialTab, onClose }: { date: stri
     const rows: ExportRow[] = detailTab === "items"
       ? [
           header, timing, [],
-          ["Barcode", "Item Name", "Expected Qty", "Received Qty", "Extra Qty", "Expected Pallets", "Received Pallets"],
-          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.expectedQty, receivedIncludingExtra(i), i.extraQty, (i.expectedPallets ?? 0).toFixed(2), i.pallets.toFixed(2)]),
+          ["Barcode", "Item Name", "SAP Code", "Expected Qty", "Expected Pallets", "Received Qty", "Extra Qty", "Received Pallets"],
+          ...detail.itemTotals.map((i) => [barcodeCell(i.barcode), i.itemName ?? "", i.sapCode ?? "", i.expectedQty, (i.expectedPallets ?? 0).toFixed(2), receivedIncludingExtra(i), i.extraQty, i.pallets.toFixed(2)]),
         ]
       : [
           header, timing, [],
-          ["Time", "Barcode", "Item Name", "Qty", "Pallets", "STV", "Extra?", "Scanned By"],
-          ...detail.activities.map((a) => [
-            fmtIST(a.scannedAt), barcodeCell(a.barcode), a.itemName ?? "", a.qty, a.pallets?.toFixed(2) ?? "", a.stv ?? "",
-            a.isExtra ? "Yes" : "No", a.scannedByName ?? "", voidedCell(a),
-          ]),
+          ...activityExportRows(detail.activities, "STV"),
         ];
     const suffix = detailTab === "items" ? "items" : "activities";
     exportRows(fmt, `scan-${detail.csv}-${suffix}-${detail.date}`, `Scan Operations — ${detail.csv} — ${detailTab === "items" ? "Item-wise Total" : "Activity Report"} — ${detail.date}`, rows);
@@ -1203,7 +1442,7 @@ function ReportRowCards({ rows, tab, onOpen }: { rows: ReportRow[]; tab: Tab; on
             )}
           </div>
           <div className="mt-1.5 grid grid-cols-3 items-center gap-x-2 gap-y-1 text-xs text-gray-600">
-            <span className="flex items-center">{row.plant ? <PlantBadge plant={row.plant} className="px-1.5 py-0 text-[11px]" /> : <strong className="text-gray-900">—</strong>}</span>
+            <span className={`flex items-center ${row.stockPlant && row.stockPlant !== row.plant ? "col-span-3" : ""}`}>{row.plant ? <PlantRoute plant={row.plant} stockPlant={row.stockPlant} className="px-1.5 py-0 text-[11px]" /> : <strong className="text-gray-900">—</strong>}</span>
             <span>Orders: <strong className="text-sm text-gray-900">{row.orderCount}</strong></span>
             <span>Events: <strong className="text-sm text-gray-900">{row.eventCount}</strong></span>
             <span>Expected: <strong className="text-sm text-gray-900">{row.expectedQty.toLocaleString()}</strong></span>

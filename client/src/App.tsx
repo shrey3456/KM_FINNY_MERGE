@@ -5,32 +5,7 @@ import { Loader2 as Loader2Icon, CloudOff as CloudOffIcon, Cloud as CloudIcon } 
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import NotFound from "./pages/not-found";
-import Home from "@/pages/Dashboard";
-import ScanOrder from "@/pages/Scanning/Scan";
-import ScanViewer from "@/pages/ScanViewer";
-import SortSlips from "@/pages/SortSlip/SortSlips";
-import DailyReports from "@/pages/DailyReports";
-import AdjustExchange from "@/pages/AdjustExchange";
-import LoadingOverview from "@/pages/LoadingOverview";
-import NotionInventory from "@/pages/NotionInventory";
-import ScanHistory from "@/pages/Scanning/ScanHistory.tsx";
-import Users from "@/pages/Users";
-import Settings from "@/pages/Settings";
-import Purchases from "@/pages/Purchases";
-import PrintOperations from "./pages/PrintOperationsFinal12";
 import Login from "./pages/Login";
-import ProformaSlips from "./pages/ProformaSlips";
-import LoadCsvUpload from "./pages/LoadCsvUpload";
-import Activities from "./pages/Activities";
-import Dispatch from "./pages/Dispatch";
-import ExpenseVoucher from "./pages/ExpenseVoucher";
-import TollVoucher from "./pages/TollVoucher";
-import StockSheets from "./pages/StockSheets";
-import OrderManagement from "./pages/OrderManagement";
-import OrderImport from "./pages/OrderImport";
-import MessagesPage from "./pages/MessagesPage";
-import CheckInOutPage from "./pages/CheckInOutPage";
-import Profile from "./pages/Profile";
 import { useState, useEffect, useCallback, Suspense, lazy } from "react";
 import { PageSkeleton } from "@/components/ui/loading-skeletons";
 import Layout from "@/components/Layout";
@@ -38,12 +13,40 @@ import { useToast } from "@/hooks/use-toast";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { initializeStatePreservation } from "./utils/statePreservationInit.tsx";
 import { useAuth, AuthProvider } from "@/hooks/use-auth";
-import PlantSettings from "./pages/PlantSettings";
-import OverallStock from "./pages/OverallStock";
-import VehicleMaster from "./pages/VehicleMaster";
-import VehiclePlanning from "./pages/VehiclePlanning";
-import LoadOperation from "./pages/Loading/LoadOperation";
-import Unloading from "./pages/Unloading/Unloading";
+import { TABS_STORAGE_KEY } from "@/lib/appTabs";
+
+const Home = lazy(() => import("@/pages/Dashboard"));
+const ScanOrder = lazy(() => import("@/pages/Scanning/Scan"));
+const ScanViewer = lazy(() => import("@/pages/ScanViewer"));
+const SortSlips = lazy(() => import("@/pages/SortSlip/SortSlips"));
+const DailyReports = lazy(() => import("@/pages/DailyReports"));
+const AdjustExchange = lazy(() => import("@/pages/AdjustExchange"));
+const LoadingOverview = lazy(() => import("@/pages/LoadingOverview"));
+const LoadMasterSlip = lazy(() => import("@/pages/LoadMasterSlip"));
+const NotionInventory = lazy(() => import("@/pages/NotionInventory"));
+const ScanHistory = lazy(() => import("@/pages/Scanning/ScanHistory.tsx"));
+const Users = lazy(() => import("@/pages/Users"));
+const Settings = lazy(() => import("@/pages/Settings"));
+const Purchases = lazy(() => import("@/pages/Purchases"));
+const PrintOperations = lazy(() => import("./pages/PrintOperationsFinal12"));
+const ProformaSlips = lazy(() => import("./pages/ProformaSlips"));
+const LoadCsvUpload = lazy(() => import("./pages/LoadCsvUpload"));
+const Activities = lazy(() => import("./pages/Activities"));
+const Dispatch = lazy(() => import("./pages/Dispatch"));
+const ExpenseVoucher = lazy(() => import("./pages/ExpenseVoucher"));
+const TollVoucher = lazy(() => import("./pages/TollVoucher"));
+const StockSheets = lazy(() => import("./pages/StockSheets"));
+const OrderManagement = lazy(() => import("./pages/OrderManagement"));
+const OrderImport = lazy(() => import("./pages/OrderImport"));
+const MessagesPage = lazy(() => import("./pages/MessagesPage"));
+const Profile = lazy(() => import("./pages/Profile"));
+const PlantSettings = lazy(() => import("./pages/PlantSettings"));
+const StockOverview = lazy(() => import("./pages/StockOverview"));
+const VehicleMaster = lazy(() => import("./pages/VehicleMaster"));
+import DriverMaster from "./pages/DriverMaster";
+const VehiclePlanning = lazy(() => import("./pages/VehiclePlanning"));
+const LoadOperation = lazy(() => import("./pages/Loading/LoadOperation"));
+const Unloading = lazy(() => import("./pages/Unloading/Unloading"));
 
 // Shown while a page's code is still loading — the same skeleton as every other page load,
 // instead of a spinning ring.
@@ -63,6 +66,11 @@ function Router() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isStandalone, setIsStandalone] = useState(false);
+  // "Not now" is remembered for 7 days, so people are not asked at every login.
+  const INSTALL_SNOOZE_KEY = 'installPromptDismissedAt';
+  const [installSnoozed, setInstallSnoozed] = useState(() => {
+    try { const at = Number(localStorage.getItem(INSTALL_SNOOZE_KEY) ?? 0); return !!at && Date.now() - at < 7 * 24 * 3600 * 1000; } catch { return false; }
+  });
   const [, navigate] = useLocation();
   const { toast } = useToast();
 
@@ -91,46 +99,20 @@ function Router() {
 
     setIsStandalone(isInStandaloneMode());
 
-    // The install offer is the BROWSER's own dialog now — nothing is drawn inside the app.
-    // The browser fires this event when it decides the app is installable (on a fresh load, so
-    // on a hard refresh and after logging in); taking it over with preventDefault() and calling
-    // prompt() right away is what makes that native "Install KM Finny?" window appear by itself
-    // instead of only a small icon in the address bar.
-    //
-    // Some browsers refuse prompt() unless the person has just interacted with the page. When
-    // that happens the event is kept and fired on their very next click or key press, so the
-    // dialog still comes up instead of being lost.
-    let promptEvent: any = null;
-    const openInstallDialog = async () => {
-      if (!promptEvent) return;
-      const e = promptEvent;
-      promptEvent = null;
-      try {
-        await e.prompt();
-        await e.userChoice;
-        setDeferredPrompt(null);
-      } catch {
-        // Needs a gesture (or was already used) — retry on the next interaction.
-        promptEvent = e;
-        window.addEventListener('pointerdown', onFirstInteraction, { once: true });
-        window.addEventListener('keydown', onFirstInteraction, { once: true });
-      }
-    };
-    const onFirstInteraction = () => { void openInstallDialog(); };
-
+    // The install offer is the bar at the bottom of the app (InstallPromptBanner below), not an automatic dialog: the browser tells us when the app can be
+    // installed, we keep that event, and the browser's own "Install" box opens only when the person presses Install on the bar.
     const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();          // we show it ourselves, immediately, via the browser's dialog
-      promptEvent = e;
-      setDeferredPrompt(e);        // kept so an in-app Install button could still trigger it
-      void openInstallDialog();
+      e.preventDefault();          // no automatic mini-bar / dialog; the bar below is the offer
+      setDeferredPrompt(e);
     };
+    const handleInstalled = () => { setDeferredPrompt(null); setIsStandalone(true); };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleInstalled);
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('pointerdown', onFirstInteraction);
-      window.removeEventListener('keydown', onFirstInteraction);
+      window.removeEventListener('appinstalled', handleInstalled);
     };
   }, []);
 
@@ -185,6 +167,8 @@ function Router() {
     localStorage.removeItem('km-user');
     localStorage.removeItem('userCode');
     localStorage.removeItem('userId');
+    // Open tabs belong to this user's session — the next person to log in starts on Home.
+    localStorage.removeItem(TABS_STORAGE_KEY);
     
     setIsAuthenticated(false);
     // Toast is handled in use-auth onSuccess
@@ -255,7 +239,7 @@ function Router() {
     if (choiceResult.outcome === 'accepted') {
       toast({
         title: "Installation started",
-        description: "KM Finny is being installed on your device",
+        description: "Team Finny is being installed on your device",
       });
     }
 
@@ -263,12 +247,28 @@ function Router() {
     setDeferredPrompt(null);
   };
 
+  const dismissInstall = () => {
+    try { localStorage.setItem(INSTALL_SNOOZE_KEY, String(Date.now())); } catch { /* storage unavailable */ }
+    setInstallSnoozed(true);
+  };
+
   return (
-    <Layout onLogout={handleLogout}>
+    <Layout
+      onLogout={handleLogout}
+      bottomBar={
+        <InstallPromptBanner
+          deferredPrompt={installSnoozed ? null : deferredPrompt}
+          isStandalone={isStandalone}
+          onInstallClick={handleInstallClick}
+          onDismiss={dismissInstall}
+        />
+      }
+    >
       <Switch>
         <Route path="/" component={Home} />
         <ProtectedRoute path="/notion-inventory" component={NotionInventory} requiredPage="notion-inventory" />
         <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
+        <ProtectedRoute path="/driver-master" component={DriverMaster} requiredPage="driver-master" />
         <ProtectedRoute path="/vehicle-planning" component={VehiclePlanning} requiredPage="vehicle-planning" />
         <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
         <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
@@ -280,11 +280,14 @@ function Router() {
         <Route path="/stock-sheets" component={StockSheets} />
         <ProtectedRoute path="/scan-history" component={ScanHistory} requiredPage="scan-history" />
         <ProtectedRoute path="/adjust-exchange" component={AdjustExchange} requiredPage="adjust-exchange" />
+        <ProtectedRoute path="/load-master/slip/:orderNumber" component={LoadMasterSlip} requiredPage="loading-overview" />
+        <ProtectedRoute path="/load-master" component={LoadingOverview} requiredPage="loading-overview" />
         <ProtectedRoute path="/loading-overview" component={LoadingOverview} requiredPage="loading-overview" />
         {/* /reports was the old path for this page — kept as a redirect so any existing
             bookmark/browser history still lands somewhere instead of 404ing. */}
         <Route path="/reports"><Redirect to="/scan-history" /></Route>
-        <ProtectedRoute path="/overall-stock" component={OverallStock} requiredPage="overall-stock" />
+        <ProtectedRoute path="/overall-stock" component={StockOverview} requiredPage="overall-stock" />
+        <Route path="/stock-v2"><Redirect to="/overall-stock" /></Route>
         <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
         <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
         <ProtectedRoute path="/unloading" component={Unloading} requiredPage="unloading" />
@@ -298,8 +301,6 @@ function Router() {
         <ProtectedRoute path="/order-management" component={OrderManagement} requiredPage="order-management" />
         <ProtectedRoute path="/order-import" component={OrderImport} requiredPage="order-import" />
         <Route path="/messages" component={MessagesPage} />
-        <Route path="/inout" component={CheckInOutPage} />
-        <ProtectedRoute path="/checkinout-admin" component={CheckInOutPage} requireAdmin={true} />
         <Route path="/profile" component={Profile} />
         <Route path="/logout">
           {() => {
@@ -310,9 +311,35 @@ function Router() {
         {/* Fallback to 404 */}
         <Route component={NotFound} />
       </Switch>
+      </Suspense>
     </Layout>
   );
 }
+
+// Install bar at the bottom of the app (a small rounded box, only as wide as its content): shown only when the browser says the app can be installed and it is not installed yet. Install opens the browser's own
+// confirmation box; the X hides the bar for 7 days.
+const InstallPromptBanner = ({
+  deferredPrompt, isStandalone, onInstallClick, onDismiss,
+}: {
+  deferredPrompt: any; isStandalone: boolean; onInstallClick: () => void; onDismiss: () => void;
+}) => {
+  if (isStandalone || !deferredPrompt) return null;
+  return (
+    <div className="flex shrink-0 justify-center px-3 pb-3 pt-1">
+      <div className="flex w-fit max-w-full items-center gap-3 rounded-xl bg-[#001d6e] px-3 py-2 text-white shadow-lg">
+        <img src="/icons/icon-192-v2.png" alt="" className="h-9 w-9 shrink-0 rounded-lg bg-white p-0.5" />
+        <div className="min-w-0">
+          <p className="text-sm font-semibold leading-tight">Install KM Finny</p>
+          <p className="truncate text-xs text-white/75">Add it to your device for quick access</p>
+        </div>
+        <button type="button" onClick={onInstallClick} className="shrink-0 rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-[#001d6e] hover:bg-gray-100">Install</button>
+        <button type="button" onClick={onDismiss} aria-label="Not now" title="Not now" className="shrink-0 rounded p-1 text-white/70 hover:bg-white/10 hover:text-white">
+          <span aria-hidden className="block px-1 text-lg leading-none">×</span>
+        </button>
+      </div>
+    </div>
+  );
+};
 
 // Offline banner component to indicate when the app is offline
 const OfflineBanner = ({ isOnline }: { isOnline: boolean }) => {

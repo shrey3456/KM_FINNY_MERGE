@@ -73,10 +73,7 @@ const vehicleColumns: VehicleColumn[] = [
   { key: "vehiclePercent", label: "Vehicle %" },
   { key: "gps", label: "GPS" },
   { key: "forGps", label: "For GPS" },
-  { key: "driver", label: "Driver" },
-  { key: "recordDriver", label: "Driver Records" },
   { key: "plant", label: "Plant" },
-  { key: "status", label: "Status" },
   { key: "remark", label: "Remark" },
   { key: "acTruckUrl", label: "AC Track" },
   { key: "lastEditedByName", label: "Updated By", colWidth: 110 },
@@ -116,10 +113,7 @@ const EDITABLE_FIELDS: { key: keyof VehicleInfo; label: string }[] = [
   { key: "vehiclePercent", label: "Vehicle %" },
   { key: "gps", label: "GPS" },
   { key: "forGps", label: "For GPS" },
-  { key: "driver", label: "Driver" },
-  { key: "recordDriver", label: "Driver Records" },
   { key: "plant", label: "Plant" },
-  { key: "status", label: "Status" },
   { key: "remark", label: "Remark" },
   { key: "acTruckUrl", label: "AC Track (link)" },
 ];
@@ -282,7 +276,7 @@ export default function VehicleMaster() {
   const filteredVehicles = useMemo(() => {
     const q = search.trim().toLowerCase();
     const searched = !q ? vehicles : vehicles.filter((v) =>
-      [v.vehicleNumber, v.rtoNumber, v.company, v.manufacturer, v.driver, v.plant]
+      [v.vehicleNumber, v.rtoNumber, v.company, v.manufacturer, v.plant]
         .some((f) => (f ?? "").toLowerCase().includes(q)));
     const columnFiltered = searched.filter((v) => matchAllConditions(v, vehicleConditionList, vehicleFilterColumns));
     const sortCol = vehicleColumns.find((c) => String(c.key) === sort.key) ?? vehicleColumns[0];
@@ -320,11 +314,11 @@ export default function VehicleMaster() {
   const pendingReport = pendingQuery.data?.report ?? null;
 
   return (
-    <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
+    <div className="w-full px-3 sm:px-4 py-4 sm:py-6 pb-24">
       <PageHeader
         icon={Truck}
         title="Vehicle Master"
-        description="Company vehicle registry — RTO number, driver, plant, GPS and status per truck, synced from Notion."
+        description="Company vehicle registry — RTO number, plant and GPS per truck, synced from Notion."
       />
 
       {/* Popup instead of an inline banner — stays open for as long as syncInProgress is true

@@ -120,7 +120,7 @@ async function writeTableCsv(table: string, filePath: string): Promise<{ rows: n
 // Exports every base table in the public schema (onlyTables omitted) — nothing is left out, so
 // the folder is a complete copy that scripts/restore-database-csv.ps1 can load into an empty
 // database. Pass onlyTables to back up just that list instead (e.g. the operational tables
-// without stock_movements/product_plant_stock) — the restore script doesn't care how many CSVs
+// without the stock_v2_* stock tables) — the restore script doesn't care how many CSVs
 // are in the folder, it just loads whatever's there, so a scoped backup restores the exact same
 // way as a full one.
 export async function runCsvBackup(onlyTables?: string[]): Promise<CsvBackupResult> {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PlantRoute } from "@/components/PlantRoute";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
@@ -10,7 +11,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  FileBarChart,
   FileUp,
   History,
   Loader2,
@@ -27,10 +27,10 @@ import {
   X,
 } from "lucide-react";
 import EditCsvDialog from "@/components/modals/EditCsvDialog";
-import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import { PlantBadge } from "@/components/PlantBadge";
 import { useAuth } from "@/hooks/use-auth";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
+import { SingleDateFilter } from "@/components/SingleDateFilter";
 import { Button } from "@/components/ui/button";
 import { buildPageList } from "@/components/ui/data-table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -71,6 +71,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { matchNoSapConfirm } from "@/lib/apiError";
 import type { OrderImportSession, OrderImportItem } from "@shared/schema";
 import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
@@ -279,6 +280,18 @@ function formatDuration(startIso: string | null | undefined, endIso: string | nu
   return `${minutes}m`;
 }
 
+// Plant name as its Plant Master colour capsule, for plant dropdown items.
+function PlantCapsule({ plant }: { plant: { name: string; bgColor?: string | null; textColor?: string | null; borderColor?: string | null } }) {
+  return (
+    <span
+      className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold"
+      style={{ backgroundColor: plant.bgColor ?? undefined, color: plant.textColor ?? undefined, borderColor: plant.borderColor ?? undefined }}
+    >
+      {plant.name}
+    </span>
+  );
+}
+
 function getLocalISODate(date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -344,6 +357,9 @@ export default function OrderImport() {
   // dialog — but keeping them independent avoids one flow's state leaking into the other's UI). ──
   const [pageMode, setPageMode] = usePersistentFilter<"order-import" | "unloading">("orderImport:pageMode", "order-import");
   const [unloadImportPlant, setUnloadImportPlant] = useState("");
+  // The plant the PURCHASE belongs to, when it is not the plant the stock is added to ("" = the same
+  // plant, as before). Chosen for the whole CSV, once, here — and locked after the first scan.
+  const [unloadPurchasePlant, setUnloadPurchasePlant] = useState("");
   const [unloadImportDate, setUnloadImportDate] = useState("");
   const [unloadImportFile, setUnloadImportFile] = useState<File | null>(null);
   const unloadFileRef = useRef<HTMLInputElement>(null);
@@ -378,17 +394,6 @@ export default function OrderImport() {
   // Session id whose "Edit CSV" dialog is open — set from the Edit button on an Available/
   // Active row, cleared when the dialog closes.
   const [editSessionId, setEditSessionId] = useState<number | null>(null);
-  // Reports live entirely inside Order Management now — no separate /order-reports page.
-  // Opens the Reports dialog right here so an operator mid-upload/scan-review never leaves
-  // this page just to check a report.
-  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
-  const openReports = (s: { id: number; csvFileName: string; plant: string; receivingSessionId?: number | null; partIndex?: number | null }) => {
-    setReportsSession({
-      id: s.id, csvFileName: s.csvFileName, plant: s.plant,
-      receivingSessionId: s.receivingSessionId, partIndex: s.partIndex,
-    });
-  };
-
   // Server-side pagination + date filter (default empty = show all, avoids UTC/IST mismatch)
   const todayStr = getLocalISODate();
   // A brand-new order's date can be up to 5 days in the past (the last 5 days)
@@ -631,8 +636,14 @@ export default function OrderImport() {
     qc.invalidateQueries({ queryKey: ["/api/order-import/master-view"] });
   };
 
+  // A product with no SAP for the plant's state would show a BLANK SAP: the server asks BEFORE importing (409 NO_SAP_CONFIRM) and this dialog
+  // lists those items; "Import anyway" sends the same file again with the confirmation.
+  const [noSapConfirm, setNoSapConfirm] = useState<{ warnings: string[]; proceed: () => void; cancel?: () => void } | null>(null);
+  // Set when "Import anyway" is pressed, so closing the dialog after it is not also treated as a cancel.
+  const noSapProceedRef = useRef(false);
+
   const importMutation = useMutation({
-    mutationFn: async (payload: { plant: string; csvFileName: string; items: object[] }) =>
+    mutationFn: async (payload: { plant: string; csvFileName: string; items: object[]; confirmNoSap?: boolean }) =>
       (await apiRequest("POST", "/api/order-import/sessions", payload)).json(),
     onSuccess: (data) => {
       setShowMappingDialog(false);
@@ -682,8 +693,11 @@ export default function OrderImport() {
 
       toast({ title: "Import complete", description: `${data.rowCount} rows imported.`, className: "bg-green-50 border-green-200 text-green-900" });
     },
-    onError: (err: any) =>
-      toast({ title: "Import failed", description: err.message, variant: "destructive" }),
+    onError: (err: any, variables) => {
+      const noSap = matchNoSapConfirm(err);
+      if (noSap) { setNoSapConfirm({ warnings: noSap, proceed: () => importMutation.mutate({ ...variables, confirmNoSap: true }) }); return; }
+      toast({ title: "Import failed", description: err.message, variant: "destructive" });
+    },
     onSettled: () => refetchAllSessionQueries(),
   });
 
@@ -1100,11 +1114,11 @@ export default function OrderImport() {
 
   // Imports the current queued file (with the shared plant + Order Date, so the server
   // auto-groups it), then either opens the next file's mapping dialog or finishes the batch.
-  async function importQueuedFile(csvFileName: string, items: object[]) {
+  async function importQueuedFile(csvFileName: string, items: object[], confirmNoSap = false) {
     setIsBatchImporting(true);
     const c = uploadCollectedRef.current;
     try {
-      const resp = await apiRequest("POST", "/api/order-import/sessions", { plant, csvFileName, items, orderDate });
+      const resp = await apiRequest("POST", "/api/order-import/sessions", { plant, csvFileName, items, orderDate, ...(confirmNoSap ? { confirmNoSap: true } : {}) });
       const data = await resp.json();
       if (data?.session?.id) {
         if (c.groupId == null) c.groupId = data.session.receivingSessionId ?? data.session.id;
@@ -1114,10 +1128,26 @@ export default function OrderImport() {
       } else {
         c.failed.push(csvFileName);
       }
-    } catch {
+    } catch (err) {
+      // The server asks BEFORE importing when products have no SAP for this plant's state: show the list; "Import anyway" sends this same file again
+      // with the confirmation, Cancel leaves it out and carries on with the queue.
+      const noSap = matchNoSapConfirm(err);
+      if (noSap) {
+        setIsBatchImporting(false);
+        setNoSapConfirm({
+          warnings: noSap,
+          proceed: () => { void importQueuedFile(csvFileName, items, true); },
+          cancel: () => { c.failed.push(`${csvFileName} (cancelled)`); void advanceImportQueue(); },
+        });
+        return;
+      }
       c.failed.push(csvFileName);
     }
+    await advanceImportQueue();
+  }
 
+  // Next file's mapping dialog, or finish the batch.
+  async function advanceImportQueue() {
     const nextIdx = uploadIdxRef.current + 1;
     const queue = uploadQueueRef.current;
     if (nextIdx < queue.length) {
@@ -1146,10 +1176,12 @@ export default function OrderImport() {
     refetchAllSessionQueries();
 
     const n = c.sessionIds.length;
+    // A file the person chose not to import (the "No SAP for this plant" question answered Cancel) is not a failure.
+    const cancelledOnly = c.failed.length > 0 && c.failed.every((f) => f.endsWith("(cancelled)"));
     toast({
-      title: c.failed.length === 0 ? "Import complete" : n === 0 ? "Import failed" : "Import finished with errors",
-      description: `${n} file(s) imported · ${c.totalRows} rows${c.failed.length ? ` · failed: ${c.failed.join(", ")}` : ""}. Same plant + order date auto-group; Part 1 loads now, the rest auto-load as each completes. View reports on the Order Reports page.`,
-      variant: n === 0 ? "destructive" : undefined,
+      title: c.failed.length === 0 ? "Import complete" : n === 0 ? (cancelledOnly ? "Import cancelled" : "Import failed") : "Import finished with errors",
+      description: `${n} file(s) imported · ${c.totalRows} rows${c.failed.length ? ` · ${cancelledOnly ? "not imported" : "failed"}: ${c.failed.join(", ")}` : ""}. Same plant + order date auto-group; Part 1 loads now, the rest auto-load as each completes. View reports on the Order Reports page.`,
+      variant: n === 0 && !cancelledOnly ? "destructive" : undefined,
       className: c.failed.length === 0 ? "bg-green-50 border-green-200 text-green-900" : undefined,
     });
   }
@@ -1199,6 +1231,8 @@ export default function OrderImport() {
     // The ordered QUANTITY across this upload's rows — totalRows is only how many lines the file
     // has, which says nothing about how big the delivery is.
     totalQty: number;
+    // The purchase plant when the batch was unloaded for one plant and stocked into another.
+    purchasePlant?: string | null;
     vehicleNumbers: string[]; sessionIds: number[]; vehicles: { vehicleNumber: string; sessionId: number }[];
   };
   const [unloadHistoryOffset, setUnloadHistoryOffset] = useState(0);
@@ -1270,6 +1304,7 @@ export default function OrderImport() {
       setUnloadDeletePreview(null);
       if (mode === "replace" && target) {
         setUnloadImportPlant(target.plant);
+        setUnloadPurchasePlant(target.purchasePlant ?? "");
         setUnloadImportDate(target.orderDate);
         toast({ title: "Pick the corrected CSV", description: "Plant and Order Date are filled in — choose the file to continue." });
         unloadFileRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1280,7 +1315,7 @@ export default function OrderImport() {
   });
 
   function resetUnloadImportForm() {
-    setUnloadImportPlant(""); setUnloadImportDate(""); setUnloadImportFile(null);
+    setUnloadImportPlant(""); setUnloadPurchasePlant(""); setUnloadImportDate(""); setUnloadImportFile(null);
     if (unloadFileRef.current) unloadFileRef.current.value = "";
   }
 
@@ -1299,7 +1334,7 @@ export default function OrderImport() {
     handleUnloadFileChosen(unloadImportFile);
   }
 
-  async function handleConfirmUnloadImport() {
+  async function handleConfirmUnloadImport(confirmNoSap = false) {
     if (!unloadCsvData) return;
     const get = (row: Record<string, string>, key: UnloadTargetKey) => {
       const col = unloadMapping[key];
@@ -1320,7 +1355,8 @@ export default function OrderImport() {
     setIsUnloadImporting(true);
     try {
       const data = await apiRequest("POST", "/api/unloading/import", {
-        plant: unloadImportPlant, orderDate: unloadImportDate, csvFileName: unloadCsvData.name, items,
+        plant: unloadImportPlant, purchasePlant: unloadPurchasePlant || null,
+        orderDate: unloadImportDate, csvFileName: unloadCsvData.name, items, ...(confirmNoSap ? { confirmNoSap: true } : {}),
       }, false, true);
 
       toast({
@@ -1332,6 +1368,8 @@ export default function OrderImport() {
       setUnloadCsvData(null);
       resetUnloadImportForm();
     } catch (error: any) {
+      const noSap = matchNoSapConfirm(error);
+      if (noSap) { setNoSapConfirm({ warnings: noSap, proceed: () => { void handleConfirmUnloadImport(true); } }); return; }
       toast({ title: "Import failed", description: error?.message || "Could not import CSV", variant: "destructive" });
     } finally {
       setIsUnloadImporting(false);
@@ -1447,14 +1485,14 @@ export default function OrderImport() {
   };
 
   return (
-    <main className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50">
-      <div className="mx-auto w-full max-w-[1800px] px-4 py-6 space-y-6">
+    <main className="flex-1 overflow-y-auto overflow-x-hidden bg-white">
+      <div className="w-full py-6 space-y-6">
 
         {/* ── Page Header ── */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-[#001d6e] text-white shadow-sm">
-              <FileUp className="h-6 w-6" />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center text-[#001d6e]">
+              <FileUp className="h-8 w-8" />
             </div>
             <div>
               <h1 className="text-2xl font-bold text-[#001d6e]">Order Management</h1>
@@ -1507,7 +1545,7 @@ export default function OrderImport() {
         {pageMode === "order-import" && (<>
 
         {/* ── Upload Card ── */}
-        <div className="border border-gray-200 bg-white shadow-sm">
+        <div className="rounded-xl border border-gray-200 bg-white">
           <div className="flex items-center gap-2 border-b border-gray-100 px-6 py-4">
             <Upload className="h-5 w-5 text-[#001d6e]" />
             <h2 className="text-base font-semibold text-gray-900">Upload CSV</h2>
@@ -1517,14 +1555,14 @@ export default function OrderImport() {
                 so the fields always line up the same way regardless of content length. */}
             <div className="hidden sm:grid sm:grid-cols-12 sm:items-end sm:gap-4">
               {/* Plant */}
-              <div className="col-span-3 grid gap-1.5">
+              <div className="col-span-3 xl:col-span-2 grid gap-1.5">
                 <Label className="text-xs font-medium text-gray-600">Plant</Label>
                 {plantOptions.length > 0 ? (
                   <Select value={plant || "_none_"} onValueChange={(v) => setPlant(v === "_none_" ? "" : v)}>
                     <SelectTrigger className="h-10 text-sm rounded-full"><SelectValue placeholder="Select…" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="_none_">— Select —</SelectItem>
-                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                      {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}><PlantCapsule plant={p} /></SelectItem>)}
                     </SelectContent>
                   </Select>
                 ) : (
@@ -1532,7 +1570,7 @@ export default function OrderImport() {
                 )}
               </div>
               {/* Date */}
-              <div className="col-span-2 grid gap-1.5">
+              <div className="col-span-4 xl:col-span-3 grid min-w-0 gap-1.5">
                 <Label className="text-xs font-medium text-gray-600">Order Date</Label>
                 {/* min=today: a normal upload here is always a new file for today (or later).
                     The one legitimate past-date case — replacing a deleted CSV for an order
@@ -1540,13 +1578,13 @@ export default function OrderImport() {
                     sets orderDate via state and so isn't affected by this min. The
                     pastDateCheckQuery/isPastDateBlocked warning below stays as a second line of
                     defense against a manually typed-in past date slipping past the picker. */}
-                <Input type="date" min={earliestOrderDateStr} className={`h-10 text-sm w-full rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                <SingleDateFilter pageKey="orderImport-upload" className="w-full min-w-0" buttonClassName="h-10 shrink-0 rounded-full text-sm" dateButtonClassName="min-w-0 flex-1 shrink overflow-hidden" selectedDate={orderDate ? new Date(`${orderDate}T00:00:00`) : null} onDateChange={(d: Date | null) => setOrderDate(d ? getLocalISODate(d) : "")} />
                 {isPastDateBlocked && (
                   <p className="text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick a date within the last 5 days.</p>
                 )}
               </div>
               {/* File */}
-              <div className="col-span-4 grid gap-1.5">
+              <div className="col-span-5 xl:col-span-4 grid gap-1.5">
                 <Label className="text-xs font-medium text-gray-600 truncate">
                   CSV File{selectedFiles.length === 1 && <span className="text-green-600 font-medium"> · {selectedFiles[0].name}</span>}
                   {selectedFiles.length > 1 && <span className="text-green-600 font-medium"> · {selectedFiles.length} files selected</span>}
@@ -1554,8 +1592,8 @@ export default function OrderImport() {
                 <Input ref={fileRef} type="file" accept=".csv" multiple className="h-10 text-sm rounded-full"
                   onChange={handleFileChange} disabled={importMutation.isPending || isBatchImporting} />
               </div>
-              {/* Actions */}
-              <div className="col-span-3 flex gap-2">
+              {/* Actions — own full-width row below xl, so "Map & Import" never gets squeezed. */}
+              <div className="col-span-12 xl:col-span-3 flex gap-2">
                 <Button variant="outline" className="h-10 shrink-0 rounded-full" onClick={clearForm}
                   disabled={selectedFiles.length === 0 || importMutation.isPending || isBatchImporting}>
                   <X className="h-4 w-4" />
@@ -1591,7 +1629,7 @@ export default function OrderImport() {
                       <SelectTrigger className="h-11 text-sm rounded-full"><SelectValue placeholder="Select…" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="_none_">— Select —</SelectItem>
-                        {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                        {plantOptions.map((p) => <SelectItem key={p.name} value={p.name}><PlantCapsule plant={p} /></SelectItem>)}
                       </SelectContent>
                     </Select>
                   ) : (
@@ -1600,7 +1638,7 @@ export default function OrderImport() {
                 </div>
                 <div className="grid gap-1.5">
                   <Label className="text-xs font-medium text-gray-600">Order Date</Label>
-                  <Input type="date" min={earliestOrderDateStr} className={`h-11 w-full text-sm px-2 rounded-full ${isPastDateBlocked ? "border-red-400" : ""}`} value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+                  <SingleDateFilter pageKey="orderImport-upload-m" className="w-full min-w-0" buttonClassName="h-11 shrink-0 rounded-full text-sm" dateButtonClassName="min-w-0 flex-1 shrink overflow-hidden" selectedDate={orderDate ? new Date(`${orderDate}T00:00:00`) : null} onDateChange={(d: Date | null) => setOrderDate(d ? getLocalISODate(d) : "")} />
                 </div>
                 {isPastDateBlocked && (
                   <p className="col-span-2 text-[11px] leading-snug text-red-600">No existing order for this plant/date — pick a date within the last 5 days.</p>
@@ -1637,7 +1675,7 @@ export default function OrderImport() {
         </div>
 
         {/* ── Session Manager Tabs ── */}
-        <div className="border border-gray-200 bg-white shadow-sm">
+        <div className="rounded-xl border border-gray-200 bg-white">
           {/* Tab pills header */}
           <div className="border-b border-gray-100 px-5 py-4">
             <div className="flex gap-1 flex-wrap">
@@ -1696,7 +1734,7 @@ export default function OrderImport() {
                       key={name}
                       onClick={() => selectPlantTab(name)}
                       // Each pill keeps its Plant Management colour whether selected or not; the
-                      // selected one gets a navy ring (same treatment as Overall Stock / Proforma
+                      // selected one gets a navy ring (same treatment as Stock Overview / Proforma
                       // Slips) instead of turning solid navy and losing its colour.
                       style={c?.bgColor ? { backgroundColor: c.bgColor, color: c.textColor, borderColor: c.borderColor } : undefined}
                       className={`rounded-full px-3.5 py-1.5 text-xs font-semibold ${
@@ -1716,20 +1754,11 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                <Input type="date" value={scanDate} onChange={(e) => { setScanDate(e.target.value); setScanExpandedId(null); }}
-                  className="h-8 w-[140px] text-xs rounded-full" />
-                {scanDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-full"
-                    onClick={() => { setScanDate(todayStr); setScanExpandedId(null); }}>
-                    Today
-                  </Button>
-                )}
-                {scanDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-full"
-                    onClick={() => { setScanDate(""); setScanExpandedId(null); }}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
+                <SingleDateFilter
+                  pageKey="orderImport-available"
+                  selectedDate={scanDate ? new Date(`${scanDate}T00:00:00`) : null}
+                  onDateChange={(d: Date | null) => { setScanDate(d ? getLocalISODate(d) : ""); setScanExpandedId(null); }}
+                />
                 <Button size="sm" variant="outline" className="h-8 w-8 p-0 ml-auto rounded-full"
                   onClick={() => scanSessionsQuery.refetch()} disabled={scanSessionsQuery.isFetching}>
                   <RefreshCw className={`h-3.5 w-3.5 ${scanSessionsQuery.isFetching ? "animate-spin" : ""}`} />
@@ -1999,9 +2028,6 @@ export default function OrderImport() {
                                   <Pencil className="mr-2 h-3.5 w-3.5 text-gray-500" /> Edit CSV
                                 </DropdownMenuItem>
                               )}
-                              <DropdownMenuItem onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
-                                <FileBarChart className="mr-2 h-3.5 w-3.5 text-gray-500" /> Reports
-                              </DropdownMenuItem>
                               {canWriteOrderImport && (
                                 <DropdownMenuItem
                                   disabled={deactivateMutation.isPending}
@@ -2082,10 +2108,6 @@ export default function OrderImport() {
                           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700">
                             <CheckCircle2 className="h-3 w-3" /> Done
                           </span>
-                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-full"
-                            onClick={() => openReports({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.receivingSessionId, partIndex: s.partIndex })}>
-                            <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
-                          </Button>
                           {/* Admin-only: correct the expected quantities of a completed CSV. Scans that
                               no longer fit become Extra, and Extras that now fit become regular. */}
                           {isAdminOrSuper && (
@@ -2124,20 +2146,11 @@ export default function OrderImport() {
             <div>
               {/* Filters */}
               <div className="flex flex-wrap items-center gap-2 px-5 py-3 border-b border-gray-50">
-                <Input type="date" value={filterDate} onChange={(e) => { setFilterDate(e.target.value); setCurrentPage(1); }}
-                  className="h-8 w-[140px] text-xs rounded-full" />
-                {filterDate !== todayStr && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-gray-500 hover:text-[#001d6e] rounded-full"
-                    onClick={() => { setFilterDate(todayStr); setCurrentPage(1); }}>
-                    Today
-                  </Button>
-                )}
-                {filterDate && (
-                  <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500 rounded-full"
-                    onClick={() => { setFilterDate(""); setCurrentPage(1); }}>
-                    <X className="h-3.5 w-3.5" />
-                  </Button>
-                )}
+                <SingleDateFilter
+                  pageKey="orderImport-history"
+                  selectedDate={filterDate ? new Date(`${filterDate}T00:00:00`) : null}
+                  onDateChange={(d: Date | null) => { setFilterDate(d ? getLocalISODate(d) : ""); setCurrentPage(1); }}
+                />
                 <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setCurrentPage(1); }}>
                   <SelectTrigger className="h-8 w-[65px] text-xs rounded-full">
                     <SelectValue />
@@ -2255,18 +2268,6 @@ export default function OrderImport() {
                                   <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 whitespace-nowrap">
                                     Ready
                                   </span>
-                                )}
-                                {((session as any).scanStatus === "completed" || (session as any).scanStatus === "active") && (
-                                  <Button size="sm" variant="outline" className="h-7 px-2 text-xs text-gray-600 border-gray-200 hover:bg-gray-50 rounded-full"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openReports({
-                                        id: session.id, csvFileName: session.csvFileName, plant: session.plant,
-                                        receivingSessionId: (session as any).receivingSessionId, partIndex: (session as any).partIndex,
-                                      });
-                                    }}>
-                                    <FileBarChart className="h-3.5 w-3.5 sm:mr-1" /> <span className="hidden sm:inline">Reports</span>
-                                  </Button>
                                 )}
                               </div>
                             </div>
@@ -2436,39 +2437,51 @@ export default function OrderImport() {
             {/* ── Upload Card — same layout/style as Order Import's own above, wired to
                 Unloading's vehicle-wise CSV import instead (one CSV can span multiple
                 vehicles; Map & Import still goes through a column-mapping step). ── */}
-            <div className="border border-gray-200 bg-white shadow-sm">
+            <div className="rounded-xl border border-gray-200 bg-white">
               <div className="flex items-center gap-2 border-b border-gray-100 px-6 py-4">
                 <Upload className="h-5 w-5 text-[#001d6e]" />
                 <h2 className="text-base font-semibold text-gray-900">Upload Unloading CSV</h2>
               </div>
               <div className="p-6 space-y-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-12 sm:items-end sm:gap-4">
-                  <div className="sm:col-span-3 grid gap-1.5">
-                    <Label className="text-xs font-medium text-gray-600">Plant</Label>
+                  <div className="sm:col-span-3 xl:col-span-2 grid gap-1.5">
+                    <Label className="text-xs font-medium text-gray-600" title="The plant the purchase belongs to. Leave on 'Same plant' when the stock stays where it was bought.">Purchase plant</Label>
+                    <Select value={unloadPurchasePlant || "_same_"} onValueChange={(v) => setUnloadPurchasePlant(v === "_same_" ? "" : v)}>
+                      <SelectTrigger className="h-10 text-sm rounded-full"><SelectValue placeholder="Same plant" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="_same_">Same plant</SelectItem>
+                        {unloadImportablePlants
+                          .filter((p) => p.name.toLowerCase() !== unloadImportPlant.trim().toLowerCase())
+                          .map((p) => <SelectItem key={p.name} value={p.name}><PlantCapsule plant={p} /></SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="sm:col-span-3 xl:col-span-2 grid gap-1.5">
+                    <Label className="text-xs font-medium text-gray-600" title="The plant the boxes are added to and later loaded from.">Sale Plant</Label>
                     {unloadImportablePlants.length > 0 ? (
-                      <Select value={unloadImportPlant || "_none_"} onValueChange={(v) => setUnloadImportPlant(v === "_none_" ? "" : v)}>
+                      <Select value={unloadImportPlant || "_none_"} onValueChange={(v) => { const next = v === "_none_" ? "" : v; setUnloadImportPlant(next); if (next && next.toLowerCase() === unloadPurchasePlant.toLowerCase()) setUnloadPurchasePlant(""); }}>
                         <SelectTrigger className="h-10 text-sm rounded-full"><SelectValue placeholder="Select…" /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="_none_">— Select —</SelectItem>
-                          {unloadImportablePlants.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                          {unloadImportablePlants.map((p) => <SelectItem key={p.name} value={p.name}><PlantCapsule plant={p} /></SelectItem>)}
                         </SelectContent>
                       </Select>
                     ) : (
                       <Input className="h-10 text-sm rounded-full" value={unloadImportPlant} onChange={(e) => setUnloadImportPlant(e.target.value)} placeholder="Plant…" />
                     )}
                   </div>
-                  <div className="sm:col-span-2 grid gap-1.5">
+                  <div className="sm:col-span-3 xl:col-span-3 grid min-w-0 gap-1.5">
                     <Label className="text-xs font-medium text-gray-600">Order Date</Label>
-                    <Input type="date" className="h-10 text-sm w-full rounded-full" value={unloadImportDate} onChange={(e) => setUnloadImportDate(e.target.value)} />
+                    <SingleDateFilter pageKey="orderImport-unloadUpload" className="w-full min-w-0" buttonClassName="h-10 shrink-0 rounded-full text-sm" dateButtonClassName="min-w-0 flex-1 shrink overflow-hidden" selectedDate={unloadImportDate ? new Date(`${unloadImportDate}T00:00:00`) : null} onDateChange={(d: Date | null) => setUnloadImportDate(d ? getLocalISODate(d) : "")} />
                   </div>
-                  <div className="sm:col-span-4 grid gap-1.5">
+                  <div className="sm:col-span-3 xl:col-span-2 grid gap-1.5">
                     <Label className="text-xs font-medium text-gray-600 truncate">
                       CSV File{unloadImportFile && <span className="text-green-600 font-medium"> · {unloadImportFile.name}</span>}
                     </Label>
                     <Input ref={unloadFileRef} type="file" accept=".csv" className="h-10 text-sm rounded-full"
                       onChange={(e) => setUnloadImportFile(e.target.files?.[0] ?? null)} disabled={isUnloadImporting} />
                   </div>
-                  <div className="sm:col-span-3 flex gap-2">
+                  <div className="sm:col-span-12 xl:col-span-3 flex gap-2">
                     <Button variant="outline" className="h-10 shrink-0 rounded-full" onClick={resetUnloadImportForm} disabled={!unloadImportFile && !unloadImportPlant && !unloadImportDate}>
                       <X className="h-4 w-4" />
                     </Button>
@@ -2480,37 +2493,33 @@ export default function OrderImport() {
                   </div>
                 </div>
                 <p className="text-xs text-gray-400">One CSV can contain multiple vehicles — every row must have a Vehicle Number column.</p>
+                {unloadPurchasePlant && unloadImportPlant && (
+                  <p className="rounded-md border border-[#001d6e]/20 bg-[#001d6e]/5 px-3 py-2 text-xs text-[#001d6e]">
+                    Bought for <b>{unloadPurchasePlant}</b>, stock goes to <b>{unloadImportPlant}</b>. The purchase is booked at {unloadPurchasePlant} and moved to {unloadImportPlant} (shown as a Transfer on the Stock page). Both plants are locked once scanning starts.
+                  </p>
+                )}
               </div>
             </div>
 
             {/* ── CSV History — moved here from the Unloading page's own "CSV History" tab. ── */}
-            <div className="border border-gray-200 bg-white shadow-sm">
+            <div className="rounded-xl border border-gray-200 bg-white">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 px-6 py-4">
                 <div className="flex items-center gap-2">
                   <History className="h-5 w-5 text-[#001d6e]" />
                   <h2 className="text-base font-semibold text-gray-900">CSV History</h2>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    type="date"
-                    value={unloadHistoryDateFilter}
-                    onChange={(e) => { setUnloadHistoryDateFilter(e.target.value); setUnloadHistoryOffset(0); }}
-                    className="h-9 w-auto text-sm"
-                  />
-                  {unloadHistoryDateFilter && (
-                    <Button
-                      size="sm" variant="ghost" className="h-9 w-9 p-0 text-gray-400 hover:text-red-500"
-                      onClick={() => { setUnloadHistoryDateFilter(""); setUnloadHistoryOffset(0); }}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
+                  <SingleDateFilter
+                  pageKey="orderImport-unloadHistory"
+                  selectedDate={unloadHistoryDateFilter ? new Date(`${unloadHistoryDateFilter}T00:00:00`) : null}
+                  onDateChange={(d: Date | null) => { setUnloadHistoryDateFilter(d ? getLocalISODate(d) : ""); setUnloadHistoryOffset(0); }}
+                />
                   {unloadImportablePlants.length > 1 && (
                     <Select value={unloadHistoryPlantFilter || "all"} onValueChange={(v) => { setUnloadHistoryPlantFilter(v === "all" ? "" : v); setUnloadHistoryOffset(0); }}>
-                      <SelectTrigger className="h-9 w-[160px]"><SelectValue placeholder="All Plants" /></SelectTrigger>
+                      <SelectTrigger className="h-9 w-auto min-w-[140px] gap-1.5"><SelectValue placeholder="All Plants" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem value="all">All Plants</SelectItem>
-                        {unloadImportablePlants.map((p) => <SelectItem key={p.name} value={p.name}>{p.name}</SelectItem>)}
+                        {unloadImportablePlants.map((p) => <SelectItem key={p.name} value={p.name}><PlantCapsule plant={p} /></SelectItem>)}
                       </SelectContent>
                     </Select>
                   )}
@@ -2546,14 +2555,14 @@ export default function OrderImport() {
                           was enough to clip the fixed-width Action column into the scrollbar. */}
                       <colgroup>
                         <col className="w-8" />
-                        <col className="w-[19%]" />
-                        <col className="w-[10%]" />
+                        <col className="w-[17%]" />
+                        <col className="w-[15%]" />
                         <col className="w-[9%]" />
                         <col className="w-[7%]" />
                         <col className="w-[8%]" />
-                        <col className="w-[9%]" />
-                        <col className="w-[11%]" />
-                        <col className="w-[11%]" />
+                        <col className="w-[8%]" />
+                        <col className="w-[10%]" />
+                        <col className="w-[10%]" />
                         <col className="w-16" />
                       </colgroup>
                       <thead>
@@ -2588,7 +2597,9 @@ export default function OrderImport() {
                                   <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${isExpanded ? "rotate-180 text-[#001d6e]" : ""}`} />
                                 </td>
                                 <td className="truncate border-r border-b border-gray-200 px-3 py-2 font-semibold text-[#001d6e]" title={u.csvFileName}>{u.csvFileName}</td>
-                                <td className="border-r border-b border-gray-200 px-3 py-2"><PlantBadge plant={u.plant} /></td>
+                                <td className="border-r border-b border-gray-200 px-3 py-2">
+                                  <PlantRoute plant={u.plant} purchasePlant={u.purchasePlant} />
+                                </td>
                                 <td className="truncate border-r border-b border-gray-200 px-3 py-2 text-gray-700">{u.orderDate}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.vehicleCount}</td>
                                 <td className="border-r border-b border-gray-200 px-3 py-2 text-gray-700 tabular-nums">{u.totalRows.toLocaleString()}</td>
@@ -2924,7 +2935,7 @@ export default function OrderImport() {
               disabled={isUnloadImporting}>
               Cancel
             </Button>
-            <Button onClick={handleConfirmUnloadImport} disabled={isUnloadImporting || !unloadCsvData} className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl">
+            <Button onClick={() => handleConfirmUnloadImport()} disabled={isUnloadImporting || !unloadCsvData} className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl">
               {isUnloadImporting ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Importing…</>) : (<><Upload className="mr-1.5 h-4 w-4" />Import {unloadCsvData?.rows.length ?? 0} rows</>)}
             </Button>
           </DialogFooter>
@@ -2993,6 +3004,28 @@ export default function OrderImport() {
               onClick={() => deactivateTarget !== null && deactivateMutation.mutate(deactivateTarget)}
               disabled={deactivateMutation.isPending || !canWriteOrderImport}>
               {deactivateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Deactivate"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* ── No SAP for this plant — asked BEFORE the CSV is imported ── */}
+      <AlertDialog open={noSapConfirm !== null} onOpenChange={(open) => { if (!open) { const cancel = noSapConfirm?.cancel; setNoSapConfirm(null); if (!noSapProceedRef.current) cancel?.(); noSapProceedRef.current = false; } }}>
+        <AlertDialogContent className="rounded-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>No SAP for this plant ({noSapConfirm?.warnings.length ?? 0} item{(noSapConfirm?.warnings.length ?? 0) === 1 ? "" : "s"})</AlertDialogTitle>
+            <AlertDialogDescription>
+              These items have no SAP for this plant's state in the Product Master, so they will show a blank SAP. Import the file anyway?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+            {noSapConfirm?.warnings.map((w, i) => <li key={i}>{w.replace(/^No SAP for this plant:\s*/, "")}</li>)}
+          </ul>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-[#001d6e] text-white hover:bg-[#001552]"
+              onClick={() => { const p = noSapConfirm?.proceed; noSapProceedRef.current = true; setNoSapConfirm(null); p?.(); }}>
+              Import anyway
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -3105,7 +3138,6 @@ export default function OrderImport() {
 
       <EditCsvDialog sessionId={editSessionId} onClose={() => setEditSessionId(null)} />
       <EditCsvDialog sessionId={unloadEditSessionId} onClose={() => setUnloadEditSessionId(null)} basePath="unloading" />
-      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} />
     </main>
   );
 }

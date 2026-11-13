@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import finnyLogo from "@assets/finny-logo.png";
+const finnyLogo = "/finny-logo.png"; // served from client/public
 import { Delete } from "lucide-react";
 
 interface LoginProps {
@@ -9,6 +9,15 @@ interface LoginProps {
 }
 
 const Login = ({ onLogin }: LoginProps) => {
+  // Welcome photo is the "Welcome Screen" row of the Notion attachment database (server/services/homeSlidesSync)
+  const [welcomeSrc, setWelcomeSrc] = useState<string | null>(null);
+  useEffect(() => {
+    fetch('/api/home-slides')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.welcome) setWelcomeSrc(d.welcome); })
+      .catch(() => { /* no photo — the panel stays blank */ });
+  }, []);
+
   const [pin, setPin] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isIOSPWA, setIsIOSPWA] = useState(false);
@@ -186,9 +195,33 @@ const Login = ({ onLogin }: LoginProps) => {
   // lose the logo, just on a different set of screens each time a size changed). overflow-hidden
   // is safe here only because nothing is ever allowed to exceed the viewport in the first place.
   return (
-    <div className={`h-screen w-full overflow-hidden flex flex-col items-center justify-center bg-white px-4 ${
+    <div className={`relative h-screen w-full overflow-hidden flex bg-white ${
       isIOSPWA ? 'ios-pwa-login-container' : ''
     }`}>
+      {/* Dotted band fading in along the bottom of the whole page (desktop only), so it shows
+          through the photo's transparent arc as well as under the login column */}
+      <div
+        className="hidden lg:block absolute inset-x-0 bottom-0 h-[18vh] pointer-events-none"
+        style={{
+          backgroundImage: "radial-gradient(hsl(var(--primary) / 0.18) 1.5px, transparent 1.5px)",
+          backgroundSize: "18px 18px",
+          maskImage: "linear-gradient(to bottom, transparent, black)",
+          WebkitMaskImage: "linear-gradient(to bottom, transparent, black)",
+        }}
+      />
+
+      {/* Desktop-only welcome photo — fills the whole screen behind the login column.
+          object-top keeps the Namaste arc in view when the photo is cropped to fit */}
+      {welcomeSrc && (
+        <img
+          src={welcomeSrc}
+          alt="Namaste — Krupa Marketing office"
+          className="hidden md:block absolute inset-0 h-full w-full object-cover object-top"
+        />
+      )}
+
+
+      <div className={`relative flex-1 h-full flex flex-col items-center justify-center px-4 ${welcomeSrc ? 'md:ml-auto md:flex-none md:w-1/2 lg:w-[38%]' : ''}`}>
       {/* iOS specific styling */}
       {isIOSPWA && (
         <style dangerouslySetInnerHTML={{
@@ -217,12 +250,12 @@ const Login = ({ onLogin }: LoginProps) => {
         }} />
       )}
 
-      <div className="w-full max-w-md flex flex-col items-center">
+      <div className={`relative w-full max-w-md flex flex-col items-center`}>
         {/* Logo */}
         <div className="w-[clamp(3.6rem,15vh,12rem)] h-[clamp(3.6rem,15vh,12rem)] mb-[clamp(0.45rem,2.5vh,2.5rem)]">
           <img
             src={finnyLogo}
-            alt="KM Finny Logo"
+            alt="Team Finny Logo"
             className="w-full h-full object-contain"
           />
         </div>
@@ -243,7 +276,7 @@ const Login = ({ onLogin }: LoginProps) => {
                 className={`w-[clamp(2.4rem,7vh,4.5rem)] h-[clamp(2.4rem,7vh,4.5rem)] rounded-full flex items-center justify-center border-2 transition-all duration-200 ${
                   index < pin.length
                     ? 'border-primary bg-primary/10 shadow-inner scale-105'
-                    : 'border-gray-300'
+                    : 'border-white/60 bg-white/25 backdrop-blur-xl shadow-lg shadow-black/10'
                 }`}
               >
                 {index < pin.length && (
@@ -273,7 +306,7 @@ const Login = ({ onLogin }: LoginProps) => {
                 type="button"
                 variant="outline"
                 className="w-[clamp(2.6rem,9vh,5.5rem)] h-[clamp(2.6rem,9vh,5.5rem)] p-0 text-[clamp(1rem,3vh,2.25rem)] leading-none font-medium rounded-full shadow-sm
-                border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95
+                border border-white/60 bg-white/25 backdrop-blur-xl shadow-lg shadow-black/10 hover:bg-white/45 hover:text-primary active:scale-95
                 transition-all duration-150 touch-manipulation select-none"
                 onClick={() => handleDigitClick(num.toString())}
                 disabled={isLoading || pin.length >= 4}
@@ -286,7 +319,7 @@ const Login = ({ onLogin }: LoginProps) => {
               type="button"
               variant="outline"
               className="w-[clamp(2.6rem,9vh,5.5rem)] h-[clamp(2.6rem,9vh,5.5rem)] p-0 text-[clamp(1rem,3vh,2.25rem)] leading-none font-medium rounded-full shadow-sm
-              border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95
+              border border-white/60 bg-white/25 backdrop-blur-xl shadow-lg shadow-black/10 hover:bg-white/45 hover:text-primary active:scale-95
               transition-all duration-150 touch-manipulation select-none"
               onClick={() => handleDigitClick("0")}
               disabled={isLoading || pin.length >= 4}
@@ -297,11 +330,11 @@ const Login = ({ onLogin }: LoginProps) => {
               type="button"
               variant="outline"
               className="w-[clamp(2.6rem,9vh,5.5rem)] h-[clamp(2.6rem,9vh,5.5rem)] p-0 flex items-center justify-center rounded-full
-              border-2 border-primary hover:bg-primary/10 hover:text-primary active:scale-95 transition-all duration-150 touch-manipulation select-none"
+              border border-white/60 bg-white/25 backdrop-blur-xl shadow-lg shadow-black/10 hover:bg-white/45 hover:text-primary active:scale-95 transition-all duration-150 touch-manipulation select-none"
               onClick={handleBackspace}
               disabled={isLoading || pin.length === 0}
             >
-              <Delete className="w-[clamp(0.95rem,3vh,2rem)] h-[clamp(0.95rem,3vh,2rem)]" />
+              <Delete className="!w-[clamp(1.6rem,5vh,3.25rem)] !h-[clamp(1.6rem,5vh,3.25rem)]" />
             </Button>
           </div>
 
@@ -321,6 +354,7 @@ const Login = ({ onLogin }: LoginProps) => {
             Vrraj Patel
           </p>
         </div>
+      </div>
       </div>
     </div>
   );

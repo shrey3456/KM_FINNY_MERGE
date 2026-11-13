@@ -1,3 +1,5 @@
+import { useLocation } from 'wouter';
+import MobileMenu from '@/components/ui/mobile-menu';
 import { 
   Card, 
   CardContent, 
@@ -33,10 +35,6 @@ import * as XLSX from 'xlsx';
 import { apiRequest } from '@/lib/queryClient';
 import { SyncProgressDialog, type SyncProgress } from '@/components/SyncProgressDialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import LoadingFromSalesCard from '@/components/settings/LoadingFromSalesCard';
-import StockResetCard from '@/components/settings/StockResetCard';
-import DailyNotionSyncCard from '@/components/settings/DailyNotionSyncCard';
-import OpeningStockEditorCard from '@/components/settings/OpeningStockEditorCard';
 import { hasPageWriteAccess } from '@/lib/permissions';
 import {
   AlertDialog,
@@ -63,6 +61,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import DailyNotionSyncCard from '@/components/settings/DailyNotionSyncCard';
+import ProformaAutoSyncCard from '@/components/settings/ProformaAutoSyncCard';
 
 // ─── Opening Stock CSV column auto-detection + manual mapping — same two-step pattern Order
 // Import uses (client/src/pages/OrderImport.tsx: cleanHeader/parseCsvRaw/autoMatch/the mapping
@@ -80,7 +80,8 @@ function osTodayLocalDateStr(): string {
 }
 
 const osNormHeader = (h: string) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-const OS_COLUMN_CANDIDATES: Record<"barcode" | "itemName" | "quantity", string[]> = {
+const OS_COLUMN_CANDIDATES: Record<"barcode" | "sapCode" | "itemName" | "quantity", string[]> = {
+  sapCode: ["sapcode", "sap", "sapno", "sapitemcode"],
   barcode: ["barcode", "itemcode", "sku", "ean", "productbarcode", "code"],
   itemName: ["itemname", "description", "productname", "item", "name", "material"],
   quantity: ["quantity", "qty", "openingstock", "openingqty", "stock", "instock"],
@@ -99,15 +100,17 @@ function osMatchColumn(headers: string[], key: keyof typeof OS_COLUMN_CANDIDATES
 }
 
 const OS_SKIP = "__skip__";
-const OS_TARGET_FIELDS: { key: "barcode" | "itemName" | "quantity"; label: string }[] = [
+const OS_TARGET_FIELDS: { key: "barcode" | "sapCode" | "itemName" | "quantity"; label: string }[] = [
   { key: "barcode", label: "Barcode / SKU" },
+  { key: "sapCode", label: "SAP Code" },
   { key: "itemName", label: "Item Name" },
   { key: "quantity", label: "Quantity" },
 ];
-type OsMapping = Record<"barcode" | "itemName" | "quantity", string>;
+type OsMapping = Record<"barcode" | "sapCode" | "itemName" | "quantity", string>;
 function osAutoMatch(headers: string[]): OsMapping {
   return {
     barcode: osMatchColumn(headers, "barcode") ?? OS_SKIP,
+    sapCode: osMatchColumn(headers, "sapCode") ?? OS_SKIP,
     itemName: osMatchColumn(headers, "itemName") ?? OS_SKIP,
     quantity: osMatchColumn(headers, "quantity") ?? OS_SKIP,
   };
@@ -144,11 +147,12 @@ function cleanOsBarcodeCell(raw: string): { value: string; rejected: "scientific
 function buildOsRowsFromMapping(
   csvData: { headers: string[]; rows: Record<string, string>[] },
   mapping: OsMapping,
-): { rows: { barcode: string; itemName: string | null; quantity: number }[]; skipped: { raw: string; reason: string }[] } {
+): { rows: { barcode: string; sapCode: string | null; itemName: string | null; quantity: number }[]; skipped: { raw: string; reason: string }[] } {
   const barcodeCol = mapping.barcode;
+  const sapCol = mapping.sapCode;
   const itemNameCol = mapping.itemName;
   const qtyCol = mapping.quantity;
-  const rows: { barcode: string; itemName: string | null; quantity: number }[] = [];
+  const rows: { barcode: string; sapCode: string | null; itemName: string | null; quantity: number }[] = [];
   const skipped: { raw: string; reason: string }[] = [];
   for (const row of csvData.rows) {
     const rawBarcode = barcodeCol && barcodeCol !== OS_SKIP ? (row[barcodeCol] ?? "") : "";
@@ -164,6 +168,7 @@ function buildOsRowsFromMapping(
     }
     rows.push({
       barcode,
+      sapCode: sapCol && sapCol !== OS_SKIP ? (row[sapCol] ?? "").trim() || null : null,
       itemName: itemNameCol && itemNameCol !== OS_SKIP ? (row[itemNameCol] ?? "").trim() || null : null,
       quantity: qtyCol && qtyCol !== OS_SKIP ? osParseQty(row[qtyCol] ?? "0") : 0,
     });
@@ -235,6 +240,7 @@ async function parseOsCsvRaw(file: File): Promise<{ name: string; headers: strin
 }
 
 const Settings = () => {
+  const [location] = useLocation();
   const form = useForm();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -454,9 +460,8 @@ const Settings = () => {
     orderSessions: number; orderItems: number; orderScanItems: number; orderScanEvents: number;
     unloadSessions: number; unloadItems: number; unloadScanEvents: number;
     loadingRecords: number; loadingScanEvents: number; loadingHandoffs: number;
-    loadOperations: number; loadOperationItems: number;
     stockRows: number; stockMovements: number;
-    scanHistory: number; legacyScanSessions: number;
+    legacyScanSessions: number;
     slipsLoadingReset: number; activities: number;
   };
   const [showResetDialog, setShowResetDialog] = useState(false);
@@ -469,179 +474,13 @@ const Settings = () => {
   const [rdOrderDateUpTo, setRdOrderDateUpTo] = useState('');
   const [resetError, setResetError] = useState<string | null>(null);
 
-  // Recalculate Stock — Check (read-only) shows every stored stock total that doesn't match the
-  // history; Apply corrects them. See server/lib/stockRecalc.ts.
-  type RecalcPlantRow = {
-    barcode: string; plant: string; itemName: string | null;
-    storedStock: number; storedExtra: number; correctStock: number; correctExtra: number; storedRows: number;
-  };
-  type RecalcProductRow = { productId: number; barcode: string; itemName: string | null; storedTotal: number; correctTotal: number };
-  type RecalcPreview = { plantCount: number; productCount: number; plantRows: RecalcPlantRow[]; productRows: RecalcProductRow[] };
-  const [recalcOpen, setRecalcOpen] = useState(false);
-  const [recalcPreview, setRecalcPreview] = useState<RecalcPreview | null>(null);
-  const [recalcChecking, setRecalcChecking] = useState(false);
-  const [recalcApplying, setRecalcApplying] = useState(false);
-  const [recalcConfirm, setRecalcConfirm] = useState('');
-  const runStockCheck = async () => {
-    setRecalcChecking(true);
-    try {
-      const data = await apiRequest('GET', '/api/settings/recalculate-stock/preview', undefined, false, true);
-      setRecalcPreview(data as RecalcPreview);
-      setRecalcConfirm('');
-      setRecalcOpen(true);
-    } catch (error: any) {
-      toast({ title: 'Check failed', description: error?.message || 'Could not check stock', variant: 'destructive' });
-    } finally {
-      setRecalcChecking(false);
-    }
-  };
-  const applyStockRecalc = async () => {
-    setRecalcApplying(true);
-    try {
-      const result: any = await apiRequest('POST', '/api/settings/recalculate-stock', {}, false, true);
-      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
-      toast({
-        title: 'Stock recalculated',
-        description: `${result.plantRowsFixed} item total(s) and ${result.productTotalsFixed} product total(s) corrected.`,
-      });
-      setRecalcOpen(false);
-      setRecalcPreview(null);
-    } catch (error: any) {
-      toast({ title: 'Recalculate failed', description: error?.message || 'Could not recalculate stock', variant: 'destructive' });
-    } finally {
-      setRecalcApplying(false);
-    }
-  };
-
-  // Recalculate from events only — a stricter sibling: purely Order Scan + Unloading − Loading,
-  // straight from their own raw event tables, bypassing stock_movements entirely (no Adjust,
-  // Exchange, Clear Stock or Opening Stock counted). Same Check/Apply shape as above.
-  const [recalcEventsOpen, setRecalcEventsOpen] = useState(false);
-  const [recalcEventsPreview, setRecalcEventsPreview] = useState<RecalcPreview | null>(null);
-  const [recalcEventsChecking, setRecalcEventsChecking] = useState(false);
-  const [recalcEventsApplying, setRecalcEventsApplying] = useState(false);
-  const [recalcEventsConfirm, setRecalcEventsConfirm] = useState('');
-  const runStockCheckFromEvents = async () => {
-    setRecalcEventsChecking(true);
-    try {
-      const data = await apiRequest('GET', '/api/settings/recalculate-stock-events/preview', undefined, false, true);
-      setRecalcEventsPreview(data as RecalcPreview);
-      setRecalcEventsConfirm('');
-      setRecalcEventsOpen(true);
-    } catch (error: any) {
-      toast({ title: 'Check failed', description: error?.message || 'Could not check stock', variant: 'destructive' });
-    } finally {
-      setRecalcEventsChecking(false);
-    }
-  };
-  const applyStockRecalcFromEvents = async () => {
-    setRecalcEventsApplying(true);
-    try {
-      const result: any = await apiRequest('POST', '/api/settings/recalculate-stock-events', {}, false, true);
-      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
-      toast({
-        title: 'Stock recalculated from events',
-        description: `${result.plantRowsFixed} item total(s) and ${result.productTotalsFixed} product total(s) corrected`
-          + `${result.ledgerRowsBackfilled ? `, ${result.ledgerRowsBackfilled} missing ledger entr${result.ledgerRowsBackfilled === 1 ? 'y' : 'ies'} backfilled` : ''}.`,
-      });
-      setRecalcEventsOpen(false);
-      setRecalcEventsPreview(null);
-    } catch (error: any) {
-      toast({ title: 'Recalculate failed', description: error?.message || 'Could not recalculate stock', variant: 'destructive' });
-    } finally {
-      setRecalcEventsApplying(false);
-    }
-  };
-
-  // Fill Stock Ledger (from Scan + Unload + Load events) — narrower standalone sibling of
-  // Recalculate from events above: only reconciles stock_movements against Order Scan,
-  // Unloading and Loading's raw records, never touches live stock (product_plant_stock/products)
-  // at all. For fixing Overall Stock's Opening/Purchase columns when the live stock number is
-  // already right.
-  type LedgerGapRow = { barcode: string; plant: string; earliestAt: string; gap: number; productId: number | null };
-  type LedgerBackfillPreview = { scanGapCount: number; unloadGapCount: number; loadGapCount: number; totalGaps: number; totalGapQty: number; scanGaps: LedgerGapRow[]; unloadGaps: LedgerGapRow[]; loadGaps: LedgerGapRow[] };
-  const [ledgerBackfillOpen, setLedgerBackfillOpen] = useState(false);
-  const [ledgerBackfillPreview, setLedgerBackfillPreview] = useState<LedgerBackfillPreview | null>(null);
-  const [ledgerBackfillChecking, setLedgerBackfillChecking] = useState(false);
-  const [ledgerBackfillApplying, setLedgerBackfillApplying] = useState(false);
-  const [ledgerBackfillConfirm, setLedgerBackfillConfirm] = useState('');
-  const runLedgerBackfillCheck = async () => {
-    setLedgerBackfillChecking(true);
-    try {
-      const data = await apiRequest('GET', '/api/settings/backfill-stock-ledger/preview', undefined, false, true);
-      setLedgerBackfillPreview(data as LedgerBackfillPreview);
-      setLedgerBackfillConfirm('');
-      setLedgerBackfillOpen(true);
-    } catch (error: any) {
-      toast({ title: 'Check failed', description: error?.message || 'Could not check stock ledger', variant: 'destructive' });
-    } finally {
-      setLedgerBackfillChecking(false);
-    }
-  };
-  const applyLedgerBackfill = async () => {
-    setLedgerBackfillApplying(true);
-    try {
-      const result: any = await apiRequest('POST', '/api/settings/backfill-stock-ledger', {}, false, true);
-      queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
-      toast({
-        title: 'Stock ledger filled',
-        description: `${result.written} ledger entr${result.written === 1 ? 'y' : 'ies'} added from Scan/Unload/Load events.`,
-      });
-      setLedgerBackfillOpen(false);
-      setLedgerBackfillPreview(null);
-    } catch (error: any) {
-      toast({ title: 'Fill failed', description: error?.message || 'Could not fill stock ledger', variant: 'destructive' });
-    } finally {
-      setLedgerBackfillApplying(false);
-    }
-  };
-
-  // Clear Stock entry history — view + bulk-delete the ledger rows a past Clear Stock run left
-  // behind. Deleting them is ledger-only (never touches live stock) — the point is to clean up
-  // the history BEFORE running Recalculate Stock above, since Recalculate Stock otherwise tries
-  // to "undo" Clear Stock using only whatever slice of real history the ledger happens to have,
-  // which can overshoot deeply negative for any item with stock older than full ledger tracking.
-  type ClearStockEntry = { id: number; barcode: string; plant: string; qty: number; reason: string; at: string; itemName: string | null };
-  const [showClearStockEntries, setShowClearStockEntries] = useState(false);
-  const [clearStockEntries, setClearStockEntries] = useState<ClearStockEntry[] | null>(null);
-  const [clearStockEntriesLoading, setClearStockEntriesLoading] = useState(false);
-  const [deletingClearStockEntries, setDeletingClearStockEntries] = useState(false);
-  const loadClearStockEntries = async () => {
-    setClearStockEntriesLoading(true);
-    try {
-      const data = await apiRequest('GET', '/api/settings/clear-stock-entries', undefined, false, true);
-      setClearStockEntries(data.items);
-      setShowClearStockEntries(true);
-    } catch (error: any) {
-      toast({ title: 'Could not load Clear Stock entries', description: error?.message, variant: 'destructive' });
-    } finally {
-      setClearStockEntriesLoading(false);
-    }
-  };
-  const deleteAllClearStockEntries = async () => {
-    setDeletingClearStockEntries(true);
-    try {
-      const result: any = await apiRequest('DELETE', '/api/settings/clear-stock-entries', {}, false, true);
-      toast({
-        title: 'Clear Stock entries removed',
-        description: `${result.deleted} entr${result.deleted === 1 ? 'y' : 'ies'} deleted. Live stock wasn't changed — run Recalculate Stock next to rebuild it from the cleaned-up history.`,
-      });
-      setShowClearStockEntries(false);
-      setClearStockEntries(null);
-    } catch (error: any) {
-      toast({ title: 'Delete failed', description: error?.message, variant: 'destructive' });
-    } finally {
-      setDeletingClearStockEntries(false);
-    }
-  };
-
   const { data: allPlants } = useQuery<any[]>({
     queryKey: ['/api/plants'],
     queryFn: () => apiRequest('GET', '/api/plants').then((r) => r.json()),
     staleTime: 60000,
   });
 
-  // Sales tracking start date — Overall Stock's ledger's "all dates" Sale Qty sums from here
+  // Sales tracking start date — Stock Overview's ledger's "all dates" Sale Qty sums from here
   // onward (proforma data before it isn't reliable). Was a hardcoded constant; now editable here.
   const { data: salesTrackingData } = useQuery<{ salesTrackingStartDate: string }>({
     queryKey: ['/api/settings/sales-tracking-start'],
@@ -794,11 +633,9 @@ const Settings = () => {
   // planned to take effect on a future date) land in the right place instead of always being
   // "as of today".
   const [osAsOfDate, setOsAsOfDate] = useState(osTodayLocalDateStr());
-  // 'add' = put the CSV's quantities on top (the original behaviour); 'set' = make each item's opening for this date equal to the CSV's quantity.
-  const [osMode, setOsMode] = useState<'add' | 'set'>('add');
   const [osFile, setOsFile] = useState<File | null>(null);
-  const [osRows, setOsRows] = useState<{ barcode: string; itemName: string | null; quantity: number }[] | null>(null);
-  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number; mode?: 'add' | 'set'; lines?: { barcode: string; itemName: string | null; current: number; change: number; after: number; known: boolean }[] } | null>(null);
+  const [osRows, setOsRows] = useState<{ barcode: string; sapCode: string | null; itemName: string | null; quantity: number }[] | null>(null);
+  const [osPreview, setOsPreview] = useState<{ totalRows: number; distinctBarcodes: number; barcodesWithExistingStock: number; totalQtyToSet: number; needsSap?: { barcode: string; sapCode: string | null; options: { sapCode: string; name: string }[] }[] } | null>(null);
   const [osPreviewLoading, setOsPreviewLoading] = useState(false);
   const [osImporting, setOsImporting] = useState(false);
   const [osConfirmText, setOsConfirmText] = useState('');
@@ -807,12 +644,12 @@ const Settings = () => {
   // built, rather than silently accepting a guess or hard-failing when auto-match misses.
   const [showOsMappingDialog, setShowOsMappingDialog] = useState(false);
   const [osCsvData, setOsCsvData] = useState<{ name: string; headers: string[]; rows: Record<string, string>[] } | null>(null);
-  const [osMapping, setOsMapping] = useState<OsMapping>({ barcode: OS_SKIP, itemName: OS_SKIP, quantity: OS_SKIP });
+  const [osMapping, setOsMapping] = useState<OsMapping>({ barcode: OS_SKIP, sapCode: OS_SKIP, itemName: OS_SKIP, quantity: OS_SKIP });
 
   const handleOpeningStockDialogOpenChange = (open: boolean) => {
     setShowOpeningStockDialog(open);
     if (!open) {
-      setOsPlant(''); setOsMode('add'); setOsAsOfDate(osTodayLocalDateStr()); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
+      setOsPlant(''); setOsAsOfDate(osTodayLocalDateStr()); setOsFile(null); setOsRows(null); setOsPreview(null); setOsConfirmText('');
       setShowOsMappingDialog(false); setOsCsvData(null);
     }
   };
@@ -874,12 +711,12 @@ const Settings = () => {
   useEffect(() => {
     if (!osPlant || !osRows) { setOsPreview(null); return; }
     setOsPreviewLoading(true);
-    apiRequest('POST', '/api/opening-stock/preview', { plant: osPlant, items: osRows, mode: osMode, asOfDate: osAsOfDate }, false, true)
+    apiRequest('POST', '/api/opening-stock/preview', { plant: osPlant, items: osRows }, false, true)
       .then((data) => setOsPreview(data))
       .catch((err: any) => toast({ title: 'Failed to load preview', description: err?.message, variant: 'destructive' }))
       .finally(() => setOsPreviewLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [osPlant, osRows, osMode, osAsOfDate]);
+  }, [osPlant, osRows]);
 
   const osExpectedConfirmText = `ADD ${osPlant}`.toUpperCase();
 
@@ -887,8 +724,8 @@ const Settings = () => {
     if (!osPlant || !osRows) return;
     setOsImporting(true);
     try {
-      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows, asOfDate: osAsOfDate, mode: osMode }, false, true);
-      toast({ title: osMode === 'set' ? 'Opening stock set' : 'Opening stock added', description: osMode === 'set' ? `${data.rowsSet} barcode(s) now have the CSV's quantity as their Opening Stock for ${osPlant}.` : `${data.rowsSet} barcode(s) added to current stock and Opening Stock for ${osPlant}.` });
+      const data = await apiRequest('POST', '/api/opening-stock/import', { plant: osPlant, items: osRows, asOfDate: osAsOfDate }, false, true);
+      toast({ title: 'Opening stock added', description: `${data.rowsSet} barcode(s) added to current stock and Opening Stock for ${osPlant}.` });
       queryClient.invalidateQueries({ queryKey: ['/api/products'] });
       queryClient.invalidateQueries({ queryKey: ['/api/scan-sessions/reports/plant-stock'] });
       handleOpeningStockDialogOpenChange(false);
@@ -1027,6 +864,19 @@ const Settings = () => {
   
   return (
     <>
+      {/* Mobile Header */}
+      <header className="lg:hidden bg-white border-b border-gray-200 p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center text-white font-bold">
+              KM
+            </div>
+            <h1 className="text-xl font-bold">Team Finny</h1>
+          </div>
+          <MobileMenu currentPath={location} />
+        </div>
+      </header>
+      
       <div className="flex-1 overflow-y-auto p-4 lg:p-6">
         <div className="max-w-4xl mx-auto">
           <div className="mb-6">
@@ -1274,7 +1124,7 @@ const Settings = () => {
                     
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Opening Stock</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">Import a plant's opening stock from a CSV (Barcode + Quantity) — it is added on top of the stock that is there, or, in "Set" mode, each item's opening becomes the CSV's quantity. Admin only.</p>
+                      <p className="text-sm text-gray-600 mt-1 mb-3">Add a plant's opening stock from a CSV (Barcode + SAP Code + Quantity) — adds on top of current stock, admin only.</p>
                       <Button
                         variant="outline" size="sm"
                         onClick={() => setShowOpeningStockDialog(true)}
@@ -1285,19 +1135,14 @@ const Settings = () => {
                       </Button>
                     </div>
 
-                    {/* Edit Opening Stock — hidden from the UI (not removed: the card, its routes and the Opening Stock "set" mode all still exist). Re-add this line to bring it back. */}
-                    {false && <OpeningStockEditorCard isAdmin={isAdminUser} />}
-
-                    <LoadingFromSalesCard isAdmin={isAdminUser} />
-
-                    <StockResetCard isAdmin={isAdminUser} />
+                    <ProformaAutoSyncCard isAdmin={isAdminUser} />
 
                     <DailyNotionSyncCard isAdmin={isAdminUser} />
 
                     <div className="p-4 border rounded-lg bg-gray-50">
                       <h4 className="font-medium flex items-center"><CalendarDays className="h-4 w-4 mr-2" /> Stock Tracking Start</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
-                        Stock Overview counts from this date. Everything dated before it is ignored (it stays in the app's history), except the opening-stock counts, which are dated the day before the start. Set it to the day you start tracking — Reset Stock to Count can do that for you.
+                        When no date is picked on Stock Overview, its Purchase, Expected, Expected Sale and Sale columns count from this date onward. Everything before it is still included, as the Opening stock.
                       </p>
                       <div className="flex flex-wrap items-center gap-2">
                         <Input
@@ -1317,88 +1162,8 @@ const Settings = () => {
                       </div>
                     </div>
 
-                    {/* Recalculate Stock + Recalculate Stock (from events only) — hidden from the
-                        UI for everyone, including admin/super-admin, same treatment as Clear
-                        Stock/Backup above (not removed: runStockCheck/runStockCheckFromEvents,
-                        their state, and the backend routes are all still here). Fill Stock
-                        Ledger below is the one recalculation tool left reachable from here. */}
+                    {/* Notion Webhook Status — hidden from the UI for everyone (not removed: webhookStatusLinkQuery and the backend route are still here). */}
                     {false && (<>
-                    <div className="p-4 border rounded-lg bg-gray-50">
-                      <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Recalculate Stock</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">
-                        Adds up every item's stock again from its full history (every scan, unloading, loading and adjustment)
-                        and fixes any stock total that doesn't match. Check first to see what would change — nothing is changed until you apply.
-                      </p>
-                      <Button
-                        variant="outline" size="sm"
-                        onClick={runStockCheck}
-                        disabled={!isAdminUser || recalcChecking}
-                        title={!isAdminUser ? "Admin access required" : undefined}
-                      >
-                        {recalcChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check stock'}
-                      </Button>
-                    </div>
-
-                    <div className="p-4 border rounded-lg bg-gray-50">
-                      <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Recalculate Stock (from events only)</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">
-                        Stricter version of Recalculate Stock above: computes each item's live stock purely from Order Scan,
-                        Unloading and Loading's own raw scan records — a manual Adjust, Exchange, Opening Stock import or
-                        Clear Stock entry has no effect on this number at all. Apply also backfills any barcode+plant
-                        whose real scan activity never made it into the stock_movements ledger at all (so Overall Stock's
-                        Opening/Purchase/Sale show the real numbers too, not just the live stock figure).
-                      </p>
-                      <Button
-                        variant="outline" size="sm"
-                        onClick={runStockCheckFromEvents}
-                        disabled={!isAdminUser || recalcEventsChecking}
-                        title={!isAdminUser ? "Admin access required" : undefined}
-                      >
-                        {recalcEventsChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check stock (events only)'}
-                      </Button>
-                    </div>
-                    </>)}
-
-                    {/* Fill Stock Ledger, Clear Stock History and Notion Webhook Status — hidden
-                        from the UI for everyone, including admin/super-admin, same treatment as
-                        everything else above (not removed: runLedgerBackfillCheck,
-                        loadClearStockEntries, webhookStatusLinkQuery, their state, and the
-                        backend routes are all still here). */}
-                    {false && (<>
-                    <div className="p-4 border rounded-lg bg-gray-50">
-                      <h4 className="font-medium flex items-center"><RefreshCw className="h-4 w-4 mr-2" /> Fill Stock Ledger (from Scan + Unload + Load events)</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">
-                        Only fills in missing stock_movements entries from Order Scan, Unloading and Loading's own raw
-                        records — it never touches the live stock number. Use this when the Stock page already shows the
-                        right quantity but Overall Stock's Opening/Purchase columns still show 0 for it.
-                      </p>
-                      <Button
-                        variant="outline" size="sm"
-                        onClick={runLedgerBackfillCheck}
-                        disabled={!isAdminUser || ledgerBackfillChecking}
-                        title={!isAdminUser ? "Admin access required" : undefined}
-                      >
-                        {ledgerBackfillChecking ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Checking…</> : 'Check ledger'}
-                      </Button>
-                    </div>
-
-                    <div className="p-4 border rounded-lg bg-gray-50">
-                      <h4 className="font-medium flex items-center"><Trash2 className="h-4 w-4 mr-2" /> Clear Stock History</h4>
-                      <p className="text-sm text-gray-600 mt-1 mb-3">
-                        View every ledger entry a past Clear Stock run left behind, and remove them. This only cleans up the
-                        history — it never changes live stock by itself. Do this BEFORE Recalculate Stock above if Clear Stock
-                        has run recently, otherwise Recalculate Stock may push items with older stock history negative.
-                      </p>
-                      <Button
-                        variant="outline" size="sm"
-                        onClick={loadClearStockEntries}
-                        disabled={!isAdminUser || clearStockEntriesLoading}
-                        title={!isAdminUser ? "Admin access required" : undefined}
-                      >
-                        {clearStockEntriesLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Loading…</> : 'View Clear Stock entries'}
-                      </Button>
-                    </div>
-
                     {/* Notion webhook check — opens the admin-only status page in a new tab: is the token set,
                         and what did the last changes from Notion do (updated / unchanged / error). */}
                     <div className="p-4 border rounded-lg bg-gray-50">
@@ -1424,8 +1189,11 @@ const Settings = () => {
                     </div>
                     </>)}
 
-                    {/* Backup CSV + Backup Operational Data — back on for admins (take a backup before any reset). */}
-                    {isAdminUser && (<>
+                    {/* Backup CSV + Backup Operational Data — hidden from the UI for everyone,
+                        including admin/super-admin (not removed: runCsvBackup/runScopedCsvBackup,
+                        their state, and the backend routes are all still here; re-add these two
+                        Button blocks to bring them back). */}
+                    {false && (<>
                     <div className="p-4 border rounded-lg">
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Backup CSV</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
@@ -1455,7 +1223,7 @@ const Settings = () => {
                       <h4 className="font-medium flex items-center"><Database className="h-4 w-4 mr-2" /> Backup Operational Data</h4>
                       <p className="text-sm text-gray-600 mt-1 mb-3">
                         Same as Backup CSV above, but only Scan History, Unloading, Loading, Product/Plant/Vehicle Master, User
-                        Management, Proforma Slip and the Activity log — no stock_movements or product_plant_stock. Same folder,
+                        Management, Proforma Slip and the Activity log — no stock tables (Stock Overview's lines and book). Same folder,
                         same restore script.
                       </p>
                       <Button
@@ -1543,390 +1311,6 @@ const Settings = () => {
         </div>
       </div>
 
-      {/* Recalculate Stock — the Check result, and Apply. */}
-      <AlertDialog open={recalcOpen} onOpenChange={(open) => { if (!recalcApplying) setRecalcOpen(open); }}>
-        <AlertDialogContent className="max-w-3xl">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Recalculate Stock</AlertDialogTitle>
-            <AlertDialogDescription>
-              {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount === 0
-                ? 'Every stock total matches its history. Nothing to fix.'
-                : `${recalcPreview?.plantCount ?? 0} item total(s) and ${recalcPreview?.productCount ?? 0} product total(s) don't match their history. Apply sets them to the correct numbers below. History, scans, CSVs and proforma slips are not changed.`}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-
-          {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount > 0 && (
-            <div className="max-h-[55vh] space-y-4 overflow-y-auto">
-              {recalcPreview.plantRows.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-sm font-semibold">Stock at a plant</p>
-                  <div className="overflow-x-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-100 text-left">
-                        <tr>
-                          <th className="px-2 py-1.5">Item</th>
-                          <th className="px-2 py-1.5">Plant</th>
-                          <th className="px-2 py-1.5 text-right">Now</th>
-                          <th className="px-2 py-1.5 text-right">Correct</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recalcPreview.plantRows.map((r) => (
-                          <tr key={`${r.barcode}::${r.plant}`} className="border-t">
-                            <td className="px-2 py-1.5">
-                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
-                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}{r.storedRows > 1 ? ` · saved ${r.storedRows} times` : ''}</div>
-                            </td>
-                            <td className="px-2 py-1.5">{r.plant}</td>
-                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedStock}{r.storedExtra > 0 ? ` (extra ${r.storedExtra})` : ''}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctStock}{r.correctExtra > 0 ? ` (extra ${r.correctExtra})` : ''}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {recalcPreview.plantCount > recalcPreview.plantRows.length && (
-                    <p className="mt-1 text-xs text-gray-500">Showing {recalcPreview.plantRows.length} of {recalcPreview.plantCount} — Apply fixes all of them.</p>
-                  )}
-                </div>
-              )}
-
-              {recalcPreview.productRows.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-sm font-semibold">Total of all plants</p>
-                  <div className="overflow-x-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-100 text-left">
-                        <tr>
-                          <th className="px-2 py-1.5">Item</th>
-                          <th className="px-2 py-1.5 text-right">Now</th>
-                          <th className="px-2 py-1.5 text-right">Correct</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recalcPreview.productRows.map((r) => (
-                          <tr key={r.productId} className="border-t">
-                            <td className="px-2 py-1.5">
-                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
-                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}</div>
-                            </td>
-                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedTotal}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctTotal}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {recalcPreview.productCount > recalcPreview.productRows.length && (
-                    <p className="mt-1 text-xs text-gray-500">Showing {recalcPreview.productRows.length} of {recalcPreview.productCount} — Apply fixes all of them.</p>
-                  )}
-                </div>
-              )}
-
-              <div className="space-y-1.5">
-                <Label htmlFor="recalcConfirm">Type FIX to apply</Label>
-                <Input id="recalcConfirm" value={recalcConfirm} onChange={(e) => setRecalcConfirm(e.target.value)} placeholder="FIX" />
-              </div>
-            </div>
-          )}
-
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={recalcApplying}>Close</AlertDialogCancel>
-            {recalcPreview && recalcPreview.plantCount + recalcPreview.productCount > 0 && (
-              <Button
-                onClick={applyStockRecalc}
-                disabled={recalcApplying || recalcConfirm.trim().toUpperCase() !== 'FIX'}
-                className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90"
-              >
-                {recalcApplying ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Applying…</> : 'Apply'}
-              </Button>
-            )}
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={recalcEventsOpen} onOpenChange={(open) => { if (!recalcEventsApplying) setRecalcEventsOpen(open); }}>
-        <AlertDialogContent className="max-w-3xl">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Recalculate Stock (from events only)</AlertDialogTitle>
-            <AlertDialogDescription>
-              {recalcEventsPreview && recalcEventsPreview.plantCount + recalcEventsPreview.productCount === 0
-                ? 'Every stock total already matches Order Scan + Unloading − Loading. Nothing to fix.'
-                : `${recalcEventsPreview?.plantCount ?? 0} item total(s) and ${recalcEventsPreview?.productCount ?? 0} product total(s) don't match the raw scan events. Apply sets them to the numbers below — computed purely from Order Scan, Unloading and Loading's own records, ignoring any Adjust/Exchange/Opening Stock/Clear Stock entries.`}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-
-          {recalcEventsPreview && recalcEventsPreview.plantCount + recalcEventsPreview.productCount > 0 && (
-            <div className="max-h-[55vh] space-y-4 overflow-y-auto">
-              {recalcEventsPreview.plantRows.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-sm font-semibold">Stock at a plant</p>
-                  <div className="overflow-x-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-100 text-left">
-                        <tr>
-                          <th className="px-2 py-1.5">Item</th>
-                          <th className="px-2 py-1.5">Plant</th>
-                          <th className="px-2 py-1.5 text-right">Now</th>
-                          <th className="px-2 py-1.5 text-right">From events</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recalcEventsPreview.plantRows.map((r) => (
-                          <tr key={`${r.barcode}::${r.plant}`} className="border-t">
-                            <td className="px-2 py-1.5">
-                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
-                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}{r.storedRows > 1 ? ` · saved ${r.storedRows} times` : ''}</div>
-                            </td>
-                            <td className="px-2 py-1.5">{r.plant}</td>
-                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedStock}{r.storedExtra > 0 ? ` (extra ${r.storedExtra})` : ''}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctStock}{r.correctExtra > 0 ? ` (extra ${r.correctExtra})` : ''}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {recalcEventsPreview.plantCount > recalcEventsPreview.plantRows.length && (
-                    <p className="mt-1 text-xs text-gray-500">Showing {recalcEventsPreview.plantRows.length} of {recalcEventsPreview.plantCount} — Apply fixes all of them.</p>
-                  )}
-                </div>
-              )}
-
-              {recalcEventsPreview.productRows.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-sm font-semibold">Total of all plants</p>
-                  <div className="overflow-x-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-100 text-left">
-                        <tr>
-                          <th className="px-2 py-1.5">Item</th>
-                          <th className="px-2 py-1.5 text-right">Now</th>
-                          <th className="px-2 py-1.5 text-right">From events</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recalcEventsPreview.productRows.map((r) => (
-                          <tr key={r.productId} className="border-t">
-                            <td className="px-2 py-1.5">
-                              <div className="font-medium">{r.itemName ?? r.barcode}</div>
-                              <div className="font-mono text-[10px] text-gray-400">{r.barcode}</div>
-                            </td>
-                            <td className="px-2 py-1.5 text-right text-red-600">{r.storedTotal}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.correctTotal}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {recalcEventsPreview.productCount > recalcEventsPreview.productRows.length && (
-                    <p className="mt-1 text-xs text-gray-500">Showing {recalcEventsPreview.productRows.length} of {recalcEventsPreview.productCount} — Apply fixes all of them.</p>
-                  )}
-                </div>
-              )}
-
-              <div className="space-y-1.5">
-                <Label htmlFor="recalcEventsConfirm">Type FIX to apply</Label>
-                <Input id="recalcEventsConfirm" value={recalcEventsConfirm} onChange={(e) => setRecalcEventsConfirm(e.target.value)} placeholder="FIX" />
-              </div>
-            </div>
-          )}
-
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={recalcEventsApplying}>Close</AlertDialogCancel>
-            {recalcEventsPreview && recalcEventsPreview.plantCount + recalcEventsPreview.productCount > 0 && (
-              <Button
-                onClick={applyStockRecalcFromEvents}
-                disabled={recalcEventsApplying || recalcEventsConfirm.trim().toUpperCase() !== 'FIX'}
-                className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90"
-              >
-                {recalcEventsApplying ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Applying…</> : 'Apply'}
-              </Button>
-            )}
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={ledgerBackfillOpen} onOpenChange={(open) => { if (!ledgerBackfillApplying) setLedgerBackfillOpen(open); }}>
-        <AlertDialogContent className="max-w-3xl">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Fill Stock Ledger (from Scan + Unload + Load events)</AlertDialogTitle>
-            <AlertDialogDescription>
-              {ledgerBackfillPreview && ledgerBackfillPreview.totalGaps === 0
-                ? 'Every Order Scan, Unloading and Loading record already has a matching stock_movements entry. Nothing to fill.'
-                : `${ledgerBackfillPreview?.totalGaps ?? 0} gap(s) (${ledgerBackfillPreview?.totalGapQty ?? 0} unit(s) total) have Scan/Unload/Load activity with no matching ledger entry. Apply adds one reconciliation row per gap, dated at that activity's own session/day — live stock is never touched.`}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-
-          {ledgerBackfillPreview && ledgerBackfillPreview.totalGaps > 0 && (
-            <div className="max-h-[55vh] space-y-4 overflow-y-auto">
-              {ledgerBackfillPreview.scanGaps.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-sm font-semibold">Order Scan ({ledgerBackfillPreview.scanGapCount})</p>
-                  <div className="overflow-x-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-100 text-left">
-                        <tr>
-                          <th className="px-2 py-1.5">Barcode</th>
-                          <th className="px-2 py-1.5">Plant</th>
-                          <th className="px-2 py-1.5 text-right">Missing qty</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {ledgerBackfillPreview.scanGaps.map((r) => (
-                          <tr key={`scan::${r.barcode}::${r.plant}`} className="border-t">
-                            <td className="px-2 py-1.5 font-mono text-[11px]">{r.barcode}</td>
-                            <td className="px-2 py-1.5">{r.plant}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.gap}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {ledgerBackfillPreview.scanGapCount > ledgerBackfillPreview.scanGaps.length && (
-                    <p className="mt-1 text-xs text-gray-500">Showing {ledgerBackfillPreview.scanGaps.length} of {ledgerBackfillPreview.scanGapCount} — Apply fills all of them.</p>
-                  )}
-                </div>
-              )}
-
-              {ledgerBackfillPreview.unloadGaps.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-sm font-semibold">Unloading ({ledgerBackfillPreview.unloadGapCount})</p>
-                  <div className="overflow-x-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-100 text-left">
-                        <tr>
-                          <th className="px-2 py-1.5">Barcode</th>
-                          <th className="px-2 py-1.5">Plant</th>
-                          <th className="px-2 py-1.5 text-right">Missing qty</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {ledgerBackfillPreview.unloadGaps.map((r) => (
-                          <tr key={`unload::${r.barcode}::${r.plant}`} className="border-t">
-                            <td className="px-2 py-1.5 font-mono text-[11px]">{r.barcode}</td>
-                            <td className="px-2 py-1.5">{r.plant}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.gap}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {ledgerBackfillPreview.unloadGapCount > ledgerBackfillPreview.unloadGaps.length && (
-                    <p className="mt-1 text-xs text-gray-500">Showing {ledgerBackfillPreview.unloadGaps.length} of {ledgerBackfillPreview.unloadGapCount} — Apply fills all of them.</p>
-                  )}
-                </div>
-              )}
-
-              {ledgerBackfillPreview.loadGaps.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-sm font-semibold">Loading ({ledgerBackfillPreview.loadGapCount})</p>
-                  <div className="overflow-x-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-100 text-left">
-                        <tr>
-                          <th className="px-2 py-1.5">Barcode</th>
-                          <th className="px-2 py-1.5">Plant</th>
-                          <th className="px-2 py-1.5 text-right">Missing qty</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {ledgerBackfillPreview.loadGaps.map((r) => (
-                          <tr key={`load::${r.barcode}::${r.plant}`} className="border-t">
-                            <td className="px-2 py-1.5 font-mono text-[11px]">{r.barcode}</td>
-                            <td className="px-2 py-1.5">{r.plant}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-emerald-700">{r.gap}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {ledgerBackfillPreview.loadGapCount > ledgerBackfillPreview.loadGaps.length && (
-                    <p className="mt-1 text-xs text-gray-500">Showing {ledgerBackfillPreview.loadGaps.length} of {ledgerBackfillPreview.loadGapCount} — Apply fills all of them.</p>
-                  )}
-                </div>
-              )}
-
-              <div className="space-y-1.5">
-                <Label htmlFor="ledgerBackfillConfirm">Type FIX to apply</Label>
-                <Input id="ledgerBackfillConfirm" value={ledgerBackfillConfirm} onChange={(e) => setLedgerBackfillConfirm(e.target.value)} placeholder="FIX" />
-              </div>
-            </div>
-          )}
-
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={ledgerBackfillApplying}>Close</AlertDialogCancel>
-            {ledgerBackfillPreview && ledgerBackfillPreview.totalGaps > 0 && (
-              <Button
-                onClick={applyLedgerBackfill}
-                disabled={ledgerBackfillApplying || ledgerBackfillConfirm.trim().toUpperCase() !== 'FIX'}
-                className="bg-[#001d6e] text-white hover:bg-[#001d6e]/90"
-              >
-                {ledgerBackfillApplying ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Applying…</> : 'Apply'}
-              </Button>
-            )}
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Clear Stock History — view + bulk-delete the ledger rows a past Clear Stock run left
-          behind, so Recalculate Stock above can rebuild live stock from clean history afterward. */}
-      <Dialog open={showClearStockEntries} onOpenChange={(open) => { if (!open) { setShowClearStockEntries(false); setClearStockEntries(null); } }}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Clear Stock History</DialogTitle>
-            <DialogDescription>
-              {clearStockEntries?.length
-                ? `${clearStockEntries.length} Clear Stock ledger entr${clearStockEntries.length === 1 ? 'y' : 'ies'}. Deleting removes them from the history only — live stock is not changed. Run Recalculate Stock afterward to rebuild it.`
-                : 'No Clear Stock entries found in the ledger.'}
-            </DialogDescription>
-          </DialogHeader>
-
-          {clearStockEntries && clearStockEntries.length > 0 && (
-            <div className="max-h-[55vh] overflow-y-auto rounded border">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-gray-100 text-left">
-                  <tr>
-                    <th className="px-2 py-1.5">Item</th>
-                    <th className="px-2 py-1.5">Plant</th>
-                    <th className="px-2 py-1.5 text-right">Qty</th>
-                    <th className="px-2 py-1.5">Reason</th>
-                    <th className="px-2 py-1.5">When</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {clearStockEntries.map((e) => (
-                    <tr key={e.id} className="border-t">
-                      <td className="px-2 py-1.5">
-                        <div className="font-medium">{e.itemName ?? e.barcode}</div>
-                        <div className="font-mono text-[10px] text-gray-400">{e.barcode}</div>
-                      </td>
-                      <td className="px-2 py-1.5">{e.plant}</td>
-                      <td className="px-2 py-1.5 text-right font-semibold text-red-600">{e.qty}</td>
-                      <td className="px-2 py-1.5 text-gray-600">{e.reason}</td>
-                      <td className="px-2 py-1.5 whitespace-nowrap text-gray-500">{new Date(e.at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true })}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setShowClearStockEntries(false); setClearStockEntries(null); }} disabled={deletingClearStockEntries}>
-              Close
-            </Button>
-            {clearStockEntries && clearStockEntries.length > 0 && (
-              <Button
-                variant="destructive"
-                onClick={deleteAllClearStockEntries}
-                disabled={deletingClearStockEntries}
-              >
-                {deletingClearStockEntries ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Deleting…</> : `Delete all ${clearStockEntries.length}`}
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Open for the whole Full Sync (it can take minutes) and closes itself when it's finished. */}
       <SyncProgressDialog
@@ -2166,7 +1550,6 @@ const Settings = () => {
                       <li>CSV items: <strong>{srPreview.counts.importItems}</strong></li>
                       <li>Scan history rows: <strong>{srPreview.counts.scanEvents}</strong></li>
                       <li>Scan item rows: <strong>{srPreview.counts.scanItems}</strong></li>
-                      <li>Stock movements: <strong>{srPreview.counts.stockMovements}</strong></li>
                       <li>Stock to take back: <strong>{srPreview.counts.qtyRemoved}</strong> box(es) over <strong>{srPreview.counts.stockRowsAdjusted}</strong> row(s)</li>
                     </ul>
                   )}
@@ -2299,7 +1682,6 @@ const Settings = () => {
                         {rdPreview.dateScoped ? 'Stock rows adjusted: ' : 'Stock rows deleted: '}
                         <strong>{rdPreview.counts.stockRows}</strong>
                       </li>
-                      <li>Stock movements: <strong>{rdPreview.counts.stockMovements}</strong></li>
                       {rdPreview.counts.activities > 0 && (
                         <li>Activity log: <strong>{rdPreview.counts.activities}</strong></li>
                       )}
@@ -2317,7 +1699,7 @@ const Settings = () => {
                     ? ' Stock rows are kept (they are running totals with no date of their own) but corrected by'
                       + ' exactly what those entries did, and no correction entry is left behind. An Opening Stock'
                       + ' or manual adjustment inside that range is not undone (it belongs to no order) — run'
-                      + ' Recalculate Stock afterwards to check.'
+                      + ''
                     : ' Stock rows are deleted outright.'}
                   {(rdPlant !== 'all' || !!rdOrderDateUpTo) && ' The activity log has no plant and no order date, so it is only cleared by a full all-plants removal with no date.'}
                 </div>
@@ -2391,21 +1773,7 @@ const Settings = () => {
             </div>
 
             <div className="space-y-2">
-              <Label>What to do with the quantities</Label>
-              <div className="grid grid-cols-2 gap-1.5">
-                <button type="button" onClick={() => setOsMode('add')}
-                  className={`rounded-md border px-2 py-1.5 text-left text-xs ${osMode === 'add' ? 'border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
-                  <span className="font-semibold">Add on top</span><br />the CSV's quantities are added to the stock and to the opening
-                </button>
-                <button type="button" onClick={() => setOsMode('set')}
-                  className={`rounded-md border px-2 py-1.5 text-left text-xs ${osMode === 'set' ? 'border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
-                  <span className="font-semibold">Set (replace)</span><br />each item's opening for this date becomes the CSV's quantity
-                </button>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="osFile">CSV or Excel File (Barcode + Quantity required)</Label>
+              <Label htmlFor="osFile">CSV or Excel File (Barcode + SAP Code + Quantity required)</Label>
               <Input
                 id="osFile" type="file" accept=".csv,.xlsx,.xls"
                 onChange={(e) => { const f = e.target.files?.[0]; if (f) handleOpeningStockFile(f); }}
@@ -2434,54 +1802,18 @@ const Settings = () => {
                   </div>
                 </div>
 
-                {/* What this file does to each item: stock now, the change, and stock after. Updates with the mode and the date above. */}
-                {(osPreview?.lines?.length ?? 0) > 0 && (
-                  <div className="rounded border bg-white">
-                    <div className="flex items-center justify-between border-b bg-gray-50 px-3 py-2 text-xs">
-                      <span className="font-semibold text-gray-700">Stock change for {osPlant}, item by item</span>
-                      <span className="text-gray-500">
-                        {osPreview!.lines!.filter((l) => l.change > 0).length} up · {osPreview!.lines!.filter((l) => l.change < 0).length} down · {osPreview!.lines!.filter((l) => l.change === 0).length} unchanged
-                      </span>
-                    </div>
-                    <div className="max-h-64 overflow-auto">
-                      <table className="w-full text-xs">
-                        <thead className="sticky top-0 bg-gray-50 text-left text-gray-600">
-                          <tr>
-                            <th className="px-2 py-1.5 font-semibold">Item</th>
-                            <th className="px-2 py-1.5 text-right font-semibold">Stock now</th>
-                            <th className="px-2 py-1.5 text-right font-semibold">Change</th>
-                            <th className="px-2 py-1.5 text-right font-semibold">Stock after</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {osPreview!.lines!.map((l) => (
-                            <tr key={l.barcode} className="border-t">
-                              <td className="px-2 py-1.5">
-                                <div className="font-medium text-gray-900">{l.itemName ?? <span className="text-amber-700">Not in Product Master</span>}</div>
-                                <div className="font-mono text-[11px] text-gray-400">{l.barcode}</div>
-                              </td>
-                              <td className="px-2 py-1.5 text-right tabular-nums">{l.current}</td>
-                              <td className={`px-2 py-1.5 text-right font-semibold tabular-nums ${l.change > 0 ? 'text-emerald-600' : l.change < 0 ? 'text-red-600' : 'text-gray-400'}`}>
-                                {l.change > 0 ? `+${l.change}` : l.change}
-                              </td>
-                              <td className="px-2 py-1.5 text-right font-semibold tabular-nums text-[#001d6e]">{l.after}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                        <tfoot className="sticky bottom-0 bg-[#001d6e] text-white">
-                          <tr>
-                            <td className="px-2 py-1.5 font-semibold">Total · {osPreview!.lines!.length} item{osPreview!.lines!.length === 1 ? '' : 's'}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{osPreview!.lines!.reduce((t, l) => t + l.current, 0)}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{(() => { const c = osPreview!.lines!.reduce((t, l) => t + l.change, 0); return c > 0 ? `+${c}` : c; })()}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold tabular-nums">{osPreview!.lines!.reduce((t, l) => t + l.after, 0)}</td>
-                          </tr>
-                        </tfoot>
-                      </table>
-                    </div>
+                {(osPreview?.needsSap?.length ?? 0) > 0 && (
+                  <div className="p-3 rounded border border-red-200 bg-red-50 text-sm space-y-1">
+                    <div className="font-medium text-red-700">These barcodes belong to more than one product — map a SAP Code column and give each row the right SAP code:</div>
+                    {osPreview?.needsSap?.map((n, i) => (
+                      <div key={i} className="text-red-700">
+                        {n.barcode}{n.sapCode ? ` (SAP "${n.sapCode}" not found)` : ' (no SAP code)'}: {n.options.map((o) => `${o.sapCode || '—'} ${o.name}`).join(' | ')}
+                      </div>
+                    ))}
                   </div>
                 )}
 
-                {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && osMode === 'add' && (
+                {(osPreview?.barcodesWithExistingStock ?? 0) > 0 && (
                   <div className="p-3 rounded border border-yellow-200 bg-yellow-50 text-sm">
                     {osPreview?.barcodesWithExistingStock} barcode(s) already have stock at {osPlant} — this ADDS on top of it,
                     it doesn't replace it. Only re-import these if you mean to add more.
@@ -2506,7 +1838,7 @@ const Settings = () => {
             <AlertDialogAction
               onClick={importOpeningStock}
               className="bg-red-600 hover:bg-red-700"
-              disabled={osImporting || !osPlant || !osRows || osConfirmText.toUpperCase() !== osExpectedConfirmText}
+              disabled={osImporting || !osPlant || !osRows || (osPreview?.needsSap?.length ?? 0) > 0 || osConfirmText.toUpperCase() !== osExpectedConfirmText}
             >
               {osImporting ? (<><Loader2 className="mr-1.5 h-4 w-4 animate-spin inline" />Importing...</>) : (<><Upload className="mr-1.5 h-4 w-4 inline" />Import</>)}
             </AlertDialogAction>
@@ -2623,7 +1955,7 @@ const Settings = () => {
             </Button>
             <Button
               onClick={confirmOsMapping}
-              disabled={!osCsvData || osMapping.barcode === OS_SKIP || osMapping.quantity === OS_SKIP}
+              disabled={!osCsvData || osMapping.barcode === OS_SKIP || osMapping.sapCode === OS_SKIP || osMapping.quantity === OS_SKIP}
               className="bg-[#001d6e] hover:bg-[#00154b] text-white rounded-xl"
             >
               <Upload className="mr-1.5 h-4 w-4" />Use this mapping

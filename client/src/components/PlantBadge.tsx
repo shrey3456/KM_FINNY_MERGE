@@ -42,3 +42,31 @@ export function PlantBadge({ plant, label, className, onClick }: PlantBadgeProps
     </span>
   );
 }
+
+/** A selectable plant capsule (e.g. the Valsad / Indore switch on the voucher pages), drawn as
+ *  the same Plant Master badge — faded when not selected. */
+export function PlantChoice({
+  plant,
+  label,
+  selected,
+  onSelect,
+}: {
+  plant: string;
+  label?: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={cn(
+        "rounded-full transition-opacity",
+        selected ? "ring-2 ring-[#001d6e] ring-offset-2" : "opacity-50 hover:opacity-80",
+      )}
+    >
+      <PlantBadge plant={plant} label={label} className="cursor-pointer px-4 py-1.5 text-sm font-semibold" />
+    </button>
+  );
+}

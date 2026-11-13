@@ -128,7 +128,7 @@ async function save(patch: Record<string, unknown>): Promise<void> {
 }
 
 async function productStep(): Promise<string> {
-  if (!process.env.NOTION_INVENTORY_DATABASE_ID) return 'products: skipped (Notion product database is not set)';
+  if (!process.env.NOTION_PRODUCTS_MASTER_DATABASE_ID) return 'products: skipped (Notion product database is not set)';
   const report = await withRetry(() => detectChangesFromNotion('system', false));
   const created = report.created ?? 0;
   const updated = report.updated ?? 0;
@@ -137,7 +137,7 @@ async function productStep(): Promise<string> {
 }
 
 async function proformaStep(tomorrow: string): Promise<string> {
-  if (!process.env.NOTION_PAGE_URL || !process.env.ORDER_DATABASE_ID) return 'proforma slips: skipped (Notion order database is not set)';
+  if (!process.env.NOTION_PROFORMA_DATABASE_ID || !process.env.NOTION_ORDER_DATABASE_ID) return 'proforma slips: skipped (Notion order database is not set)';
   const r = await withRetry(() => syncDateAndApply(tomorrow));
   return `proforma slips for ${tomorrow}: ${r.totalOrders} order(s) in Notion, ${r.created} new, ${r.updated} updated, ${r.unchanged} unchanged${r.failed ? `, ${r.failed} failed` : ''}`;
 }

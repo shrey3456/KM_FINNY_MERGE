@@ -73,7 +73,8 @@ export function PlantFilter({
               variant="secondary" 
               className="rounded-sm px-1 font-normal"
             >
-              {selectedPlants.length}
+              {/* The plant names themselves, not just how many — up to two, then a count. */}
+              {selectedPlants.length > 2 ? `${selectedPlants.length} plants` : selectedPlants.join(", ")}
             </Badge>
           )}
         </Button>

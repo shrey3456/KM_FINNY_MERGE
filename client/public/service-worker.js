@@ -1,6 +1,6 @@
-// KM Finny Service Worker
+// Team Finny Service Worker
 
-const CACHE_NAME = 'km-finny-cache-v2';
+const CACHE_NAME = 'team-finny-cache-v2';
 const urlsToCache = [
   '/',
   '/index.html',

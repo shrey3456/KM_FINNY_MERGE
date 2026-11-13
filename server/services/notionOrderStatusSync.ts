@@ -38,7 +38,7 @@ const STATUS_OPTION_TTL_MS = 10 * 60 * 1000;
 export async function getFinnyStatusOptions(): Promise<FinnyStatusOption[]> {
   if (statusOptionCache && Date.now() - statusOptionCache.at < STATUS_OPTION_TTL_MS) return statusOptionCache.options;
   try {
-    const orderDatabaseId = process.env.ORDER_DATABASE_ID;
+    const orderDatabaseId = process.env.NOTION_ORDER_DATABASE_ID;
     if (!orderDatabaseId || !process.env.NOTION_INTEGRATION_SECRET) throw new Error('Notion is not configured');
     const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
     const db: any = await notion.databases.retrieve({ database_id: orderDatabaseId });
@@ -54,7 +54,7 @@ export async function getFinnyStatusOptions(): Promise<FinnyStatusOption[]> {
   }
 }
 
-async function findOrderPageIds(notion: Client, orderDatabaseId: string, orderNumber: string): Promise<string[]> {
+export async function findOrderPageIds(notion: Client, orderDatabaseId: string, orderNumber: string): Promise<string[]> {
   const response = await notion.databases.query({
     database_id: orderDatabaseId,
     filter: { property: 'Order No. :', rich_text: { equals: orderNumber } },
@@ -118,21 +118,11 @@ function resolveStoreKeeperTags(parts: string[], existing: string[]): string[] {
 // Replaces the StoreKeeper tags on every ORDER-database page for this order with the app's current
 // value. Same best-effort rules as the status push below: never throws, a Notion failure never
 // blocks the Loading action that triggered it.
-// Slips generated from the Sales Orders file (proforma_slips.system_generated) are never written to Notion —
-// not their status, vehicle or StoreKeeper Info — whoever asks (opening the load, Complete, Sync to Notion, a vehicle change).
-async function isNotionBlocked(orderNumber: string): Promise<boolean> {
-  try {
-    const { rows } = await pool.query(`SELECT system_generated FROM proforma_slips WHERE order_number = $1`, [orderNumber]);
-    return rows[0]?.system_generated === true;
-  } catch { return false; } // the column is created at server start; never let this check break a normal push
-}
-
 export async function pushStoreKeeperInfoToNotion(orderNumber: string, storeKeeperInfo: string | null | undefined): Promise<void> {
   try {
-    if (await isNotionBlocked(orderNumber)) return;
-    const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+    const ORDER_DATABASE_ID = process.env.NOTION_ORDER_DATABASE_ID;
     if (!ORDER_DATABASE_ID) {
-      console.warn('[Notion storekeeper sync] ORDER_DATABASE_ID not set — skipping push');
+      console.warn('[Notion storekeeper sync] NOTION_ORDER_DATABASE_ID not set — skipping push');
       return;
     }
     const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
@@ -167,10 +157,9 @@ export async function pushStoreKeeperInfoToNotion(orderNumber: string, storeKeep
 // on any failure (missing env vars, Notion API error, no matching page, etc).
 export async function pushOrderStatusToNotion(orderNumber: string, statusName: string): Promise<void> {
   try {
-    if (await isNotionBlocked(orderNumber)) return;
-    const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+    const ORDER_DATABASE_ID = process.env.NOTION_ORDER_DATABASE_ID;
     if (!ORDER_DATABASE_ID) {
-      console.warn('[Notion status sync] ORDER_DATABASE_ID not set — skipping status push');
+      console.warn('[Notion status sync] NOTION_ORDER_DATABASE_ID not set — skipping status push');
       return;
     }
     const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
@@ -212,10 +201,12 @@ export type NotionSyncOutcome = {
   state: 'ok' | 'retrying' | 'skipped' | 'failed';
   message: string;
 };
-type NotionWanted = { status?: string; vehiclePageId?: string };
+// vehiclePageId / driverPageId SET the relation; clearVehicle / clearDriver EMPTY it (Vehicle Planning's "remove the vehicle").
+type NotionWanted = { status?: string; vehiclePageId?: string; clearVehicle?: boolean; driverPageId?: string; clearDriver?: boolean };
 type NotionWho = { userCode?: string | null; userName?: string | null };
 
 const VEHICLE_RELATION_PROPERTY = 'Vehi  No. :'; // two spaces — that is how the Order database names it
+const DRIVER_RELATION_PROPERTY = 'Driver :';
 // A status further along than Loading / Ready for Dispatch — never pushed back by the app.
 const LATER_STAGES = new Set(['DISPATCHED', 'DELIVERED', 'UNLOADING', 'SHORTAGE', 'CANCELLED']);
 const NOTION_MAX_TRIES = 5;
@@ -227,7 +218,7 @@ const compactId = (value: string) => String(value).replace(/-/g, '').toLowerCase
 type TryResult = { ok: boolean; permanent?: boolean; skipped?: boolean; reason?: string };
 
 async function tryNotionOnce(orderNumber: string, want: NotionWanted): Promise<TryResult> {
-  const orderDatabaseId = process.env.ORDER_DATABASE_ID?.trim();
+  const orderDatabaseId = process.env.NOTION_ORDER_DATABASE_ID?.trim();
   if (!orderDatabaseId || !process.env.NOTION_INTEGRATION_SECRET) {
     return { ok: false, permanent: true, reason: 'Notion is not configured' };
   }
@@ -252,6 +243,16 @@ async function tryNotionOnce(orderNumber: string, want: NotionWanted): Promise<T
       if (!(currentIds.length === 1 && currentIds[0] === compactId(want.vehiclePageId))) {
         updates[VEHICLE_RELATION_PROPERTY] = { relation: [{ id: want.vehiclePageId }] };
       }
+    } else if (want.clearVehicle) {
+      if ((page.properties?.[VEHICLE_RELATION_PROPERTY]?.relation ?? []).length > 0) updates[VEHICLE_RELATION_PROPERTY] = { relation: [] };
+    }
+    if (want.driverPageId) {
+      const currentIds: string[] = (page.properties?.[DRIVER_RELATION_PROPERTY]?.relation ?? []).map((r: any) => compactId(r.id));
+      if (!(currentIds.length === 1 && currentIds[0] === compactId(want.driverPageId))) {
+        updates[DRIVER_RELATION_PROPERTY] = { relation: [{ id: want.driverPageId }] };
+      }
+    } else if (want.clearDriver) {
+      if ((page.properties?.[DRIVER_RELATION_PROPERTY]?.relation ?? []).length > 0) updates[DRIVER_RELATION_PROPERTY] = { relation: [] };
     }
 
     if (Object.keys(updates).length > 0) {
@@ -263,9 +264,13 @@ async function tryNotionOnce(orderNumber: string, want: NotionWanted): Promise<T
       }
       if (updates[VEHICLE_RELATION_PROPERTY]) {
         const ids: string[] = (after.properties?.[VEHICLE_RELATION_PROPERTY]?.relation ?? []).map((r: any) => compactId(r.id));
-        if (!(ids.length === 1 && ids[0] === compactId(want.vehiclePageId!))) {
-          return { ok: false, reason: 'Notion did not keep the vehicle change' };
-        }
+        const wrong = want.vehiclePageId ? !(ids.length === 1 && ids[0] === compactId(want.vehiclePageId)) : ids.length > 0;
+        if (wrong) return { ok: false, reason: 'Notion did not keep the vehicle change' };
+      }
+      if (updates[DRIVER_RELATION_PROPERTY]) {
+        const ids: string[] = (after.properties?.[DRIVER_RELATION_PROPERTY]?.relation ?? []).map((r: any) => compactId(r.id));
+        const wrong = want.driverPageId ? !(ids.length === 1 && ids[0] === compactId(want.driverPageId)) : ids.length > 0;
+        if (wrong) return { ok: false, reason: 'Notion did not keep the driver change' };
       }
     }
   }
@@ -335,10 +340,13 @@ async function runNotionAttempt(orderNumber: string, entry: PendingNotionSync): 
 // it went); any later tries carry on in the background. Never throws.
 export async function syncOrderToNotion(orderNumber: string, want: NotionWanted, who?: NotionWho): Promise<NotionSyncOutcome> {
   try {
-    if (await isNotionBlocked(orderNumber)) return { state: 'skipped', message: 'This slip was generated from the Sales Orders file — it is not sent to Notion.' };
     const previous = pendingNotionSyncs.get(orderNumber);
     if (previous?.timer) clearTimeout(previous.timer);
-    const entry: PendingNotionSync = { want: { ...(previous?.want ?? {}), ...want }, tries: 0, who };
+    const merged: NotionWanted = { ...(previous?.want ?? {}), ...want };
+    // A later "set" cancels an earlier "clear" of the same relation, and the other way round.
+    if (want.vehiclePageId) merged.clearVehicle = false; else if (want.clearVehicle) delete merged.vehiclePageId;
+    if (want.driverPageId) merged.clearDriver = false; else if (want.clearDriver) delete merged.driverPageId;
+    const entry: PendingNotionSync = { want: merged, tries: 0, who };
     pendingNotionSyncs.set(orderNumber, entry);
     return await runNotionAttempt(orderNumber, entry);
   } catch (error) {
@@ -364,7 +372,6 @@ export async function reconcileOrderWithNotion(
   orderNumber: string, who?: NotionWho, opts?: { throttleMs?: number; keepCurrentStatus?: boolean },
 ): Promise<NotionSyncOutcome | null> {
   try {
-    if (await isNotionBlocked(orderNumber)) return null;
     if (opts?.throttleMs) {
       const last = lastReconcileAt.get(orderNumber) ?? 0;
       if (Date.now() - last < opts.throttleMs) return null;
@@ -468,8 +475,8 @@ export async function watchStatusAfterVehicleChange(
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 export async function fetchNotionStatusByOrderNumbers(orderNumbers: string[]): Promise<Map<string, string>> {
   const result = new Map<string, string>();
-  const ORDER_DATABASE_ID = (process.env.ORDER_DATABASE_ID ?? '').trim();
-  if (!ORDER_DATABASE_ID || !process.env.NOTION_INTEGRATION_SECRET) throw new Error('Notion is not configured (ORDER_DATABASE_ID / NOTION_INTEGRATION_SECRET)');
+  const ORDER_DATABASE_ID = (process.env.NOTION_ORDER_DATABASE_ID ?? '').trim();
+  if (!ORDER_DATABASE_ID || !process.env.NOTION_INTEGRATION_SECRET) throw new Error('Notion is not configured (NOTION_ORDER_DATABASE_ID / NOTION_INTEGRATION_SECRET)');
   const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
   const { extractText } = await import('../lib/notionProperties');
   const unique = Array.from(new Set(orderNumbers.map((o) => String(o).trim()).filter(Boolean)));

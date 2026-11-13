@@ -5,12 +5,12 @@ import { requirePageAccess, requirePageWrite, WRITE_ADMIN_ROLES } from '../lib/p
 import { getPlantStateCode, resolvePalletSizeOrQty, getPalletSize, getUserPlants } from './order-scan';
 import { remapDeletedUnloadSessionEvents } from '../lib/unloadRemap';
 import { reconcileUnloadCredits } from '../lib/unloadCredit';
+import { resolveLineProduct, noSapMessage, noSapWarningsForItems } from '../lib/productSap';
+import { postUnloadMovement, scanDay, unloadStockLeft } from '../lib/unloadStock';
 import {
   computeUnloadGroupReport, computeUnloadPartReport, resolveUnloadGroupId,
   computeUnloadDateReport, computeUnloadDateActivity,
 } from '../lib/unloadGroupReport';
-import { reconcileProductPlantStockBarcode } from '../lib/stockBarcodeReconcile';
-import { findProductForLine, chooseProductForLine, productsWithBarcode, productSapForState, stateOfPlant } from '../lib/productForLine';
 import { applyColumnFiltersToSql, type SqlFilterColumn } from '../lib/columnFilterSql';
 
 // Unloading — vehicle-wise receiving. See unloadImportSessions' comment in shared/schema.ts:
@@ -34,33 +34,6 @@ function isAdmin(req: Request): boolean {
 }
 
 const normalize = (value?: string | number | null) => String(value ?? '').trim().toLowerCase();
-
-// SAME BARCODE, DIFFERENT SAP = DIFFERENT ITEMS. A barcode that two lines of one batch list with different SAP codes (the 35 g and
-// the 37 g salted peanuts share a barcode, one per state) is two items: each keeps its own expected quantity and its own scanned
-// count. A barcode with one SAP code (or the same code on every line) behaves exactly as before — counted by barcode alone.
-const sapKey = (value?: string | number | null) => String(value ?? '').trim().toLowerCase();
-function sharedBarcodesOf(items: Array<{ barcode?: string | null; sapCode?: string | null; sap_code?: string | null }>): Set<string> {
-  const saps = new Map<string, Set<string>>();
-  for (const i of items) {
-    const b = normalize(i.barcode);
-    if (!b) continue;
-    if (!saps.has(b)) saps.set(b, new Set());
-    saps.get(b)!.add(sapKey(i.sapCode ?? i.sap_code));
-  }
-  return new Set(Array.from(saps.entries()).filter(([, set]) => set.size > 1).map(([b]) => b));
-}
-const lineKey = (barcode: string | null | undefined, sap: string | null | undefined, shared: Set<string>) => {
-  const b = normalize(barcode);
-  return shared.has(b) ? `${b}::${sapKey(sap)}` : b;
-};
-// The SAP a count must be limited to for this barcode in this batch — the event's own SAP when the barcode is shared, else null.
-async function sharedSapScope(client: any, sessionId: number, barcode: string, eventSap: string | null): Promise<string | null> {
-  const { rows } = await client.query(
-    `SELECT COUNT(DISTINCT LOWER(TRIM(COALESCE(sap_code, ''))))::int AS n FROM unload_import_items WHERE session_id = $1 AND LOWER(TRIM(barcode)) = LOWER(TRIM($2))`,
-    [sessionId, barcode],
-  );
-  return (rows[0]?.n ?? 0) > 1 ? sapKey(eventSap) : null;
-}
 
 function canAccessPlant(req: Request, plant: string): boolean {
   const userPlants = getUserPlants(req.user);
@@ -113,61 +86,41 @@ function requireUnloadingDeleteAccess(req: Request, res: Response, next: any) {
 async function withProgress(session: any) {
   const state = await getPlantStateCode(pool, session.plant ?? '');
   const { rows: items } = await pool.query(
-    `SELECT id, barcode, item_name AS "itemName", sap_code AS "sapCode", quantity
+    `SELECT id, barcode, item_name AS "itemName", sap_code AS "sapCode", quantity, product_id AS "productId"
      FROM unload_import_items WHERE session_id = $1 ORDER BY id ASC`,
     [session.id],
   );
   const { rows: scannedRows } = await pool.query(
-    `SELECT barcode, sap_code AS "sapCode", product_id AS "productId", COALESCE(SUM(total_qty), 0)::int AS "scannedQty"
-     FROM unload_scan_events WHERE session_id = $1 AND voided IS NOT TRUE GROUP BY barcode, sap_code, product_id`,
+    `SELECT barcode, product_id AS "productId", COALESCE(SUM(total_qty), 0)::int AS "scannedQty"
+     FROM unload_scan_events WHERE session_id = $1 AND voided IS NOT TRUE GROUP BY barcode, product_id`,
     [session.id],
   );
-  // The product behind every row of the batch. An entry scanned for a DIFFERENT product that shares the row's barcode (the twin that is not on
-  // this batch) is not that row's — it is extra received on the vehicle, counted below with the other off-batch extra.
-  const productOfRow = await Promise.all((items as any[]).map((item) => (item.barcode ? findProductForLine(item.barcode, item.sapCode, session.plant) : Promise.resolve(undefined))));
-  const rowProductIds = new Map<string, Set<number>>();
-  (items as any[]).forEach((item, idx) => {
-    const b = normalize(item.barcode);
-    const p = productOfRow[idx];
-    if (!b || !p) return;
-    if (!rowProductIds.has(b)) rowProductIds.set(b, new Set());
-    rowProductIds.get(b)!.add(p.id);
-  });
-  const twinExtra: Array<{ barcode: string; productId: number; qty: number }> = [];
-  // Barcodes this batch lists with more than one SAP code: those are counted per SAP (see sharedBarcodesOf).
-  const sharedBarcodes = sharedBarcodesOf(items as any[]);
-  // Summed, not set: two raw barcodes that differ only in case/spaces are the same product.
-  const scannedByBarcode = new Map<string, number>();
+  // A line is a barcode + product (two products can share a barcode). Summed, not set: two raw barcodes that differ only in case/spaces are the same product.
+  const lineKey = (barcode: string, productId: number | null | undefined) => `${normalize(barcode)}|${productId ?? ''}`;
+  const scannedByLine = new Map<string, number>();
   const rawBarcodeByKey = new Map<string, string>();
   for (const r of scannedRows as any[]) {
-    const rowIds = rowProductIds.get(normalize(r.barcode));
-    if (r.productId != null && rowIds && !rowIds.has(Number(r.productId))) {
-      twinExtra.push({ barcode: r.barcode, productId: Number(r.productId), qty: Number(r.scannedQty ?? 0) });
-      continue;
-    }
-    const key = lineKey(r.barcode, r.sapCode, sharedBarcodes);
-    scannedByBarcode.set(key, (scannedByBarcode.get(key) ?? 0) + Number(r.scannedQty ?? 0));
+    const key = lineKey(r.barcode, r.productId);
+    scannedByLine.set(key, (scannedByLine.get(key) ?? 0) + Number(r.scannedQty ?? 0));
     if (!rawBarcodeByKey.has(key)) rawBarcodeByKey.set(key, r.barcode);
   }
 
-  // A barcode can be listed on more than one line of the same file. Its scans are shared out
-  // across those lines in order (each line filled up to its own qty, the last line takes any
-  // over-scan) instead of every line claiming the full scanned amount — which counted the same
-  // boxes twice in the opened batch's totals.
-  const lastLineByBarcode = new Map<string, number>();
-  items.forEach((item: any, index: number) => lastLineByBarcode.set(lineKey(item.barcode, item.sapCode, sharedBarcodes), index));
-  const leftToShare = new Map(scannedByBarcode);
+  // The same product can still be listed on more than one line of the file. Its scans are shared out across those lines in order (each line filled up to
+  // its own qty, the last line takes any over-scan) instead of every line claiming the full scanned amount.
+  const lastLineByKey = new Map<string, number>();
+  items.forEach((item: any, index: number) => lastLineByKey.set(lineKey(item.barcode, item.productId), index));
+  const leftToShare = new Map(scannedByLine);
   const scannedPerLine = items.map((item: any, index: number) => {
-    const key = lineKey(item.barcode, item.sapCode, sharedBarcodes);
+    const key = lineKey(item.barcode, item.productId);
     const left = leftToShare.get(key) ?? 0;
-    const share = index === lastLineByBarcode.get(key) ? left : Math.min(left, item.quantity ?? 0);
+    const share = index === lastLineByKey.get(key) ? left : Math.min(left, item.quantity ?? 0);
     leftToShare.set(key, left - share);
     return share;
   });
 
   const progressItems = await Promise.all(items.map(async (item: any, index: number) => {
-    // Barcode + SAP + the plant's state decide the product when more than one product shares the barcode (lib/productForLine.ts).
-    const product = productOfRow[index];
+    // The line's OWN product (pallet size, Sr No ...), not the first product with this barcode.
+    const product = item.productId != null ? await storage.getProduct(item.productId) : (item.barcode ? await storage.getProductByBarcode(item.barcode, session.plant) : undefined);
     const expected = item.quantity ?? 0;
     const scanned = scannedPerLine[index];
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, expected);
@@ -185,20 +138,13 @@ async function withProgress(session: any) {
 
   let offBatchExtraQty = 0;
   let offBatchExtraPallets = 0;
-  for (const [key, qty] of Array.from(scannedByBarcode.entries())) {
-    if (lastLineByBarcode.has(key) || qty <= 0) continue;
-    const product = await storage.getProductByBarcode(rawBarcodeByKey.get(key) ?? key, session.plant);
+  for (const [key, qty] of Array.from(scannedByLine.entries())) {
+    if (lastLineByKey.has(key) || qty <= 0) continue;
+    const pid = key.split('|')[1];
+    const product = pid ? await storage.getProduct(Number(pid)) : await storage.getProductByBarcode(rawBarcodeByKey.get(key) ?? key, session.plant);
     const itemsPerPallet = resolvePalletSizeOrQty(product ?? null, state, qty);
     offBatchExtraQty += qty;
     if (itemsPerPallet > 0) offBatchExtraPallets += qty / itemsPerPallet;
-  }
-
-  for (const t of twinExtra) {
-    if (t.qty <= 0) continue;
-    const twin = await storage.getProduct(t.productId);
-    const ipp = resolvePalletSizeOrQty(twin ?? null, state, t.qty);
-    offBatchExtraQty += t.qty;
-    if (ipp > 0) offBatchExtraPallets += t.qty / ipp;
   }
 
   const allComplete = progressItems.length > 0 && progressItems.every((i) => i.isComplete);
@@ -211,14 +157,11 @@ async function withProgress(session: any) {
 // Per batch, how much of what its file lists has arrived — each barcode capped at its own listed
 // qty, so over-scans and products not on the file don't count here. scannedQty (every box
 // scanned) minus this is the batch's Extra, the same split the opened batch shows.
-// A barcode listed with more than one SAP code in the batch is matched per SAP (see sharedBarcodesOf); every other barcode by barcode alone.
-const SHARED_BARCODES_SQL = `(SELECT LOWER(TRIM(b2.barcode)) FROM unload_import_items b2 WHERE b2.session_id = s.id GROUP BY 1 HAVING COUNT(DISTINCT LOWER(TRIM(COALESCE(b2.sap_code, '')))) > 1)`;
-const LINE_KEY_SQL = (barcode: string, sap: string) => `CASE WHEN LOWER(TRIM(${barcode})) IN ${SHARED_BARCODES_SQL} THEN LOWER(TRIM(${barcode})) || '::' || LOWER(TRIM(COALESCE(${sap}, ''))) ELSE LOWER(TRIM(${barcode})) END`;
 const RECEIVED_QTY_SQL = `COALESCE((
   SELECT SUM(LEAST(sc.qty, ex.qty))
-  FROM (SELECT ${LINE_KEY_SQL('barcode', 'sap_code')} AS bc, SUM(quantity) AS qty FROM unload_import_items WHERE session_id = s.id GROUP BY 1) ex
-  JOIN (SELECT ${LINE_KEY_SQL('barcode', 'sap_code')} AS bc, SUM(total_qty) AS qty FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE GROUP BY 1) sc
-    ON sc.bc = ex.bc
+  FROM (SELECT LOWER(TRIM(barcode)) AS bc, COALESCE(product_id, 0) AS pid, SUM(quantity) AS qty FROM unload_import_items WHERE session_id = s.id GROUP BY 1, 2) ex
+  JOIN (SELECT LOWER(TRIM(barcode)) AS bc, COALESCE(product_id, 0) AS pid, SUM(total_qty) AS qty FROM unload_scan_events WHERE session_id = s.id AND voided IS NOT TRUE GROUP BY 1, 2) sc
+    ON sc.bc = ex.bc AND sc.pid = ex.pid
 ), 0)::int`;
 const withExtraQty = (row: any) => ({ ...row, extraQty: Math.max(0, (row.scannedQty ?? 0) - (row.receivedQty ?? 0)) });
 
@@ -247,8 +190,8 @@ async function isEligibleToActivate(session: { id: number; groupId: number; part
 // page itself, so a user who can only reach that page still needs to be able to call this.
 router.post('/unloading/import', requirePageWrite(['unloading', 'order-import']), async (req: Request, res: Response) => {
   try {
-    const { plant, orderDate, csvFileName, items } = req.body as {
-      plant: string; orderDate: string; csvFileName: string;
+    const { plant, orderDate, csvFileName, items, purchasePlant: rawPurchasePlant } = req.body as {
+      plant: string; orderDate: string; csvFileName: string; purchasePlant?: string | null;
       items: Array<{ vehicleNumber?: string; barcode?: string; itemName?: string; sapCode?: string; quantity?: number }>;
     };
 
@@ -257,6 +200,17 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
     if (!csvFileName) return res.status(400).json({ message: 'csvFileName is required' });
     if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ message: 'CSV has no rows' });
     if (!canAccessPlant(req, plant)) return res.status(403).json({ message: 'Access denied for this plant' });
+    // The purchase plant — only when it is a DIFFERENT plant from the stock plant above. The user must
+    // be able to access both (admins always can). Stored null when it is the same plant.
+    const purchasePlantName = typeof rawPurchasePlant === 'string' ? rawPurchasePlant.trim() : '';
+    const purchasePlant = purchasePlantName && purchasePlantName.toLowerCase() !== String(plant).trim().toLowerCase() ? purchasePlantName : null;
+    if (purchasePlant) {
+      const { rows: knownPlant } = await pool.query('SELECT name FROM plants WHERE LOWER(name) = LOWER($1) LIMIT 1', [purchasePlant]);
+      if (knownPlant.length === 0) return res.status(400).json({ message: `Purchase plant "${purchasePlant}" does not exist.` });
+      if (!canAccessPlant(req, purchasePlant)) {
+        return res.status(403).json({ message: 'You do not have access to the purchase plant — you need access to both plants to unload for one and stock into the other.' });
+      }
+    }
 
     const normOrderDate = String(orderDate).trim();
     const missingVehicle = items.findIndex((it) => !it.vehicleNumber || !String(it.vehicleNumber).trim());
@@ -268,6 +222,17 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
       return res.status(400).json({ message: `Row ${missingBarcode + 1} is missing a barcode.` });
     }
 
+    // Items whose product has no SAP for this plant's state would show a blank SAP: ask the person to confirm BEFORE anything is imported.
+    if (req.body?.confirmNoSap !== true) {
+      const noSap = await noSapWarningsForItems(pool, plant, items);
+      if (noSap.length > 0) {
+        return res.status(409).json({
+          code: 'NO_SAP_CONFIRM', warnings: noSap,
+          message: `${noSap.length} item(s) have no SAP for ${plant} in the Product Master. Confirm to import anyway.`,
+        });
+      }
+    }
+
     const { userCode, userName } = actor(req);
     const byVehicle = new Map<string, typeof items>();
     for (const item of items) {
@@ -276,6 +241,8 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
       byVehicle.get(key)!.push(item);
     }
 
+    const sapWarnings: string[] = [];
+    const importState = await getPlantStateCode(pool, plant);
     const summary: Array<{
       vehicleNumber: string; sessionId: number; groupId: number; partIndex: number; rowCount: number;
       replacesSessionId: number | null; remapSummary: any;
@@ -322,9 +289,9 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
       }
 
       const { rows: sessionRows } = await pool.query(
-        `INSERT INTO unload_import_sessions (plant, vehicle_number, order_date, csv_file_name, row_count, imported_by_code, group_id, part_index)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, group_id AS "groupId"`,
-        [plant, vehicleNumber, normOrderDate, csvFileName, vehicleItems.length, userCode ?? null, groupIdForInsert, partIndex],
+        `INSERT INTO unload_import_sessions (plant, vehicle_number, order_date, csv_file_name, row_count, imported_by_code, group_id, part_index, purchase_plant)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, group_id AS "groupId"`,
+        [plant, vehicleNumber, normOrderDate, csvFileName, vehicleItems.length, userCode ?? null, groupIdForInsert, partIndex, purchasePlant],
       );
       let session = sessionRows[0];
       let groupId = session.groupId as number | null;
@@ -333,45 +300,42 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
         groupId = session.id;
       }
 
-      // Merge duplicate barcodes within this vehicle's rows (a manifest listing the same SKU
-      // across multiple lines — different pallets/batches, or just a re-listed line — is common)
-      // into ONE item with the summed quantity. Without this, each duplicate landed as its own
-      // separate unload_import_items row, but /scan (below) matches a barcode to only the FIRST
-      // such row via .find() and caps "regular vs extra" against THAT row's own quantity alone —
-      // so scans past the first row's (partial) quantity were wrongly logged as Extra even though
-      // the manifest's true combined total for that barcode hadn't been reached yet, and the item
-      // table showed the SAME running scanned total against every duplicate row's own smaller
-      // expected figure. One row per barcode with the true total sidesteps both problems.
-      const mergedByBarcode = new Map<string, { barcode: string; itemName: string | null; sapCode: string | null; quantity: number }>();
+      // Merge repeated lines of the SAME PRODUCT within this vehicle's rows (a manifest listing the same SKU across multiple lines - different
+      // pallets/batches, or just a re-listed line - is common) into ONE item with the summed quantity. Two lines with the same barcode but different
+      // products (65 g / 60 g, told apart by SAP) are two items. Each line finds its product from barcode + SAP; the SAP kept is the product's SAP for
+      // this plant's state (blank when it has none there - the user is told).
+      type Merged = { barcode: string; itemName: string | null; sapCode: string | null; quantity: number; productId: number | null };
+      const mergedByLine = new Map<string, Merged>();
       for (const item of vehicleItems) {
         const barcode = typeof item.barcode === 'string' ? item.barcode.trim() : String(item.barcode ?? '').trim();
-        // Same barcode AND same SAP merge; the same barcode with a different SAP is a different item and keeps its own row.
-        const key = `${barcode.toLowerCase()}::${sapKey(item.sapCode)}`;
-        const existing = mergedByBarcode.get(key);
+        const lp = await resolveLineProduct(pool, barcode, item.sapCode, importState);
+        const key = `${barcode.toLowerCase()}|${lp.productId ?? ''}`;
+        const existing = mergedByLine.get(key);
         if (existing) {
           existing.quantity += item.quantity ?? 0;
           if (!existing.itemName && item.itemName) existing.itemName = item.itemName;
-          if (!existing.sapCode && item.sapCode) existing.sapCode = item.sapCode;
         } else {
-          mergedByBarcode.set(key, { barcode, itemName: item.itemName || null, sapCode: item.sapCode || null, quantity: item.quantity ?? 0 });
+          mergedByLine.set(key, { barcode, itemName: item.itemName || null, sapCode: lp.productId ? lp.sap : (item.sapCode || null), quantity: item.quantity ?? 0, productId: lp.productId });
+          if (lp.productId && lp.noSapForPlant) sapWarnings.push(noSapMessage(item.itemName || lp.name, barcode, plant, importState));
         }
       }
-      const rows = Array.from(mergedByBarcode.values()).map((item) => ({
+      const rows = Array.from(mergedByLine.values()).map((item) => ({
         sessionId: session.id,
         plant, vehicleNumber,
         barcode: item.barcode,
         itemName: item.itemName,
         sapCode: item.sapCode,
         quantity: item.quantity,
+        productId: item.productId,
       }));
       const values: any[] = [];
       const placeholders = rows.map((r, i) => {
         const base = i * 6;
         values.push(r.sessionId, r.plant, r.vehicleNumber, r.barcode, r.itemName, r.sapCode);
-        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},${r.quantity ?? 0})`;
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},${r.quantity ?? 0},${r.productId == null ? 'NULL' : Number(r.productId)})`;
       });
       await pool.query(
-        `INSERT INTO unload_import_items (session_id, plant, vehicle_number, barcode, item_name, sap_code, quantity)
+        `INSERT INTO unload_import_items (session_id, plant, vehicle_number, barcode, item_name, sap_code, quantity, product_id)
          VALUES ${placeholders.join(',')}`,
         values,
       );
@@ -431,13 +395,13 @@ router.post('/unloading/import', requirePageWrite(['unloading', 'order-import'])
     if (userCode) {
       await storage.logActivity({
         pageName: 'Unloading', action: 'create', entityType: 'unload_import', entityId: csvFileName,
-        details: `Imported ${csvFileName} for ${plant} (${normOrderDate}) by ${userName ?? userCode} — ${summary.length} vehicle(s): `
+        details: `Imported ${csvFileName} for ${plant}${purchasePlant ? ` (purchase plant ${purchasePlant} → stock plant ${plant})` : ""} (${normOrderDate}) by ${userName ?? userCode} — ${summary.length} vehicle(s): `
           + summary.map((s) => `${s.vehicleNumber} (${s.rowCount})`).join(', '),
         userCode, userName,
       });
     }
 
-    res.status(201).json({ success: true, vehicles: summary, totalRows: items.length });
+    res.status(201).json({ success: true, vehicles: summary, totalRows: items.length, sapWarnings: Array.from(new Set(sapWarnings)) });
   } catch (error) {
     console.error('Error importing unloading CSV:', error);
     res.status(500).json({ message: 'Failed to import CSV' });
@@ -517,7 +481,7 @@ router.get('/unloading/sessions', requirePageAccess('unloading'), async (req: Re
     const listWhere = listConditions.length ? `WHERE ${listConditions.join(' AND ')}` : '';
 
     const listSelect =
-        `SELECT s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+        `SELECT s.id, s.plant, s.purchase_plant AS "purchasePlant", s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
                 (SELECT vi.rto_number FROM vehicle_info vi
                   WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
                   ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
@@ -645,6 +609,7 @@ router.get('/unloading/csv-history', requirePageAccess(['unloading', 'order-impo
         `SELECT
            s.csv_file_name AS "csvFileName",
            s.plant,
+           MAX(s.purchase_plant) AS "purchasePlant",
            s.order_date AS "orderDate",
            s.imported_by_code AS "importedByCode",
            MAX(u.name) AS "importedByName",
@@ -714,7 +679,7 @@ router.get('/unloading/sessions/recent-complete', requirePageAccess('unloading')
 
     const { rows } = await pool.query(
       `SELECT DISTINCT ON (s.plant)
-         s.id, s.plant, s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
+         s.id, s.plant, s.purchase_plant AS "purchasePlant", s.vehicle_number AS "vehicleNumber", s.order_date AS "orderDate",
          (SELECT vi.rto_number FROM vehicle_info vi
                   WHERE LOWER(TRIM(vi.vehicle_number)) = LOWER(TRIM(s.vehicle_number))
                   ORDER BY (LOWER(TRIM(COALESCE(vi.plant, ''))) = LOWER(TRIM(COALESCE(s.plant, '')))) DESC, vi.id DESC
@@ -926,7 +891,7 @@ router.get('/unloading/sessions/:id', requirePageAccess('unloading'), async (req
     const { items, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id: session.id, plant: session.plant });
     res.json({
       session: {
-        id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
+        id: session.id, plant: session.plant, purchasePlant: session.purchase_plant ?? null, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
         csvFileName: session.csv_file_name, groupId: session.group_id, partIndex: session.part_index,
         scanStatus: session.scan_status, scanCompletedAt: session.scan_completed_at,
       },
@@ -935,22 +900,6 @@ router.get('/unloading/sessions/:id', requirePageAccess('unloading'), async (req
   } catch (error) {
     console.error('Error fetching unloading session:', error);
     res.status(500).json({ message: 'Failed to fetch unloading session' });
-  }
-});
-
-// GET /api/unloading/barcode-products?barcode=&plant= — every Product Master product that carries the barcode, each with its SAP code for the
-// plant's state. The scan screen asks "Which item?" whenever there is more than one (the 35 g and the 37 g salted peanuts), even if the
-// vehicle's file lists only one of them.
-router.get('/unloading/barcode-products', requirePageAccess('unloading'), async (req: Request, res: Response) => {
-  try {
-    const barcode = String(req.query.barcode ?? '').trim();
-    if (!barcode) return res.status(400).json({ message: 'barcode is required' });
-    const state = await stateOfPlant(String(req.query.plant ?? ''));
-    const products = (await productsWithBarcode(barcode)).map((p) => ({ ...p, sapForState: productSapForState(p, state) }));
-    res.json({ products });
-  } catch (error) {
-    console.error('Error looking up products for a barcode:', error);
-    res.status(500).json({ message: 'Failed to look up the barcode' });
   }
 });
 
@@ -1054,50 +1003,35 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
       `SELECT * FROM unload_import_items WHERE session_id = $1`,
       [id],
     );
-    // Rows of this batch that carry this barcode. With more than one SAP code among them it is more than one item: the scan names its
-    // SAP (the "Which item?" choice), or goes to the only one that still has quantity left, else the screen is asked to choose.
-    const sameBarcodeRows = itemRows.filter((i: any) => normalize(i.barcode) === normalize(barcode));
-    const sharedHere = new Set(sameBarcodeRows.map((i: any) => sapKey(i.sap_code))).size > 1;
-    let matchedItem: any = sameBarcodeRows[0];
-    if (sharedHere) {
-      const requestedSap = sapKey(req.body?.sapCode);
-      const { rows: scannedBySap } = await client.query(
-        `SELECT LOWER(TRIM(COALESCE(sap_code, ''))) AS sap, COALESCE(SUM(total_qty), 0)::int AS scanned
-           FROM unload_scan_events WHERE session_id = $1 AND LOWER(TRIM(barcode)) = LOWER(TRIM($2)) AND voided IS NOT TRUE GROUP BY 1`,
-        [id, barcode],
-      );
-      const scannedMap = new Map<string, number>(scannedBySap.map((r: any) => [r.sap, Number(r.scanned)]));
-      const options = sameBarcodeRows.map((i: any) => {
-        const expectedQty = Number(i.quantity ?? 0);
-        const scannedQty = scannedMap.get(sapKey(i.sap_code)) ?? 0;
-        return { sapCode: i.sap_code ?? '', itemName: i.item_name ?? null, expected: expectedQty, scanned: scannedQty, remaining: Math.max(0, expectedQty - scannedQty) };
-      });
-      if (requestedSap) {
-        const picked = sameBarcodeRows.find((i: any) => sapKey(i.sap_code) === requestedSap);
-        if (!picked) return res.status(400).json({ message: `SAP ${req.body?.sapCode} is not listed for barcode ${barcode} on this vehicle's manifest.` });
-        matchedItem = picked;
+    // One barcode can be several lines of the file (two products, 65 g / 60 g). The scan belongs to ONE of them: the product the person picked, else the only
+    // line that still has room, else - when the choice is real - 409 CHOOSE_ITEM with the options, and the app asks "Which item?".
+    const barcodeLines = itemRows.filter((i: any) => normalize(i.barcode) === normalize(barcode));
+    const chosenProductId = req.body?.productId != null && Number.isInteger(Number(req.body.productId)) ? Number(req.body.productId) : null;
+    let matchedItem: any = barcodeLines[0];
+    if (barcodeLines.length > 1) {
+      if (chosenProductId != null) {
+        matchedItem = barcodeLines.find((l: any) => Number(l.product_id) === chosenProductId);
       } else {
-        // No SAP named: never guessed — not even when only one of the rows still has quantity left. The screen asks every time.
-        return res.status(409).json({ code: 'CHOOSE_ITEM', message: 'This barcode is listed with more than one SAP code — choose the item.', barcode, options });
+        const { rows: sums } = await client.query(
+          `SELECT product_id, COALESCE(SUM(total_qty), 0)::int AS q FROM unload_scan_events
+            WHERE session_id = $1 AND LOWER(TRIM(barcode)) = LOWER($2) AND voided IS NOT TRUE GROUP BY product_id`,
+          [id, barcode],
+        );
+        const scannedOf = (l: any) => Number(sums.find((s: any) => Number(s.product_id) === Number(l.product_id))?.q ?? 0);
+        const open = barcodeLines.filter((l: any) => Number(l.quantity ?? 0) - scannedOf(l) > 0);
+        if (open.length === 1) matchedItem = open[0];
+        else {
+          return res.status(409).json({
+            code: 'CHOOSE_ITEM',
+            message: `Barcode ${barcode} is on more than one item of this vehicle - pick which one this scan is for.`,
+            options: barcodeLines.map((l: any) => ({ productId: l.product_id ?? null, itemName: l.item_name, sapCode: l.sap_code, remaining: Math.max(0, Number(l.quantity ?? 0) - scannedOf(l)) })),
+          });
+        }
       }
     }
-    // The barcode is listed once but the scan names the OTHER product that shares it (the twin that is not on this batch): it is not that row —
-    // it is received as an Extra of its own product.
-    const requestedProductId = Number.isFinite(Number(req.body?.productId)) && req.body?.productId != null ? Number(req.body.productId) : null;
-    let twinProduct: any;
-    if (!sharedHere && matchedItem && requestedProductId != null) {
-      const candidates = await productsWithBarcode(barcode);
-      const rowProduct = await findProductForLine(barcode, matchedItem.sap_code, session.plant);
-      const named = candidates.find((p) => p.id === requestedProductId);
-      if (named && rowProduct && named.id !== rowProduct.id) { twinProduct = named; matchedItem = undefined; }
-    }
-    // The barcode is not on the batch at all but the scan names one of the products that carry it: that product, not whichever the plant's state favours.
-    if (!matchedItem && !twinProduct && requestedProductId != null) {
-      twinProduct = (await productsWithBarcode(barcode)).find((p) => p.id === requestedProductId);
-    }
-    // The product behind the row this scan is for: its barcode, its SAP code and the plant's state (lib/productForLine.ts).
-    const product = twinProduct ?? await findProductForLine(barcode, matchedItem?.sap_code, session.plant);
-    const twinSap: string | null = twinProduct ? (productSapForState(twinProduct, await stateOfPlant(session.plant)) || twinProduct.sapCode || null) : null;
+    const lineProductId: number | null = matchedItem?.product_id ?? chosenProductId ?? null;
+    // The chosen line's OWN product (name, pallet size, SAP for this state) - not "the first product with this barcode".
+    const product = lineProductId != null ? await storage.getProduct(lineProductId) : await storage.getProductByBarcode(barcode, session.plant);
     // Tagged the same way PRODUCT_MASTER_MISSING is below — see matchBarcodeNotInSystemError's
     // client-side handling (a distinct centered popup, not the ordinary error toast) in
     // Unloading.tsx.
@@ -1170,8 +1104,8 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
       // think they're entirely regular.
       const { rows: scannedRows } = await client.query(
         `SELECT COALESCE(SUM(total_qty), 0)::int AS "scanned" FROM unload_scan_events
-         WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE${sharedHere ? " AND LOWER(TRIM(COALESCE(sap_code, ''))) = $3" : twinProduct ? ' AND product_id = $3' : matchedItem && product ? ' AND (product_id IS NULL OR product_id = $3)' : ''}`,
-        sharedHere ? [id, barcode, sapKey(matchedItem?.sap_code)] : (twinProduct || (matchedItem && product)) ? [id, barcode, product!.id] : [id, barcode],
+         WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3`,
+        [id, barcode, lineProductId],
       );
       const alreadyScanned = scannedRows[0]?.scanned ?? 0;
       remainingBefore = matchedItem ? Math.max(0, expected - alreadyScanned) : 0;
@@ -1180,39 +1114,32 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
 
       // clientRequestId is recorded on only the FIRST of the (up to two) rows this attempt
       // produces — see loading.ts's identical comment for why.
+      // The purchase is booked on the day of the scan (not the CSV's order date).
+      const bookedDay = scanDay();
       let requestIdRecorded = false;
       const insertEvent = (totalQty: number, isExtra: boolean) => {
         const idForThisRow = requestIdRecorded ? null : clientRequestId;
         requestIdRecorded = true;
         return client.query(
           `INSERT INTO unload_scan_events
-             (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, client_request_id, product_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+             (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, client_request_id, booked_day, product_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::date,$16)`,
           [
-            id, barcode, sharedHere ? (matchedItem?.item_name ?? product?.name ?? null) : (matchedItem?.itemName ?? product?.name ?? null), sharedHere ? (matchedItem?.sap_code ?? null) : twinProduct ? twinSap : (matchedItem?.sapCode ?? product?.sapCode ?? null),
+            id, barcode, matchedItem?.itemName ?? product?.name ?? null, matchedItem?.sap_code ?? null,
             itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
             itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
-            totalQty, isExtra, stv, session.plant, session.vehicle_number, userCode ?? null, userName ?? null, idForThisRow, product?.id ?? null,
+            totalQty, isExtra, stv, session.plant, session.vehicle_number, userCode ?? null, userName ?? null, idForThisRow, bookedDay, lineProductId,
           ],
         );
       };
       if (regularQty > 0) await insertEvent(regularQty, false);
       if (extraQty > 0) await insertEvent(extraQty, true);
 
-      // If this product's barcode changed since stock was last received under an old one, fold
-      // it onto this barcode first — see stockBarcodeReconcile.ts.
-      await reconcileProductPlantStockBarcode(client, product?.id, session.plant, barcode);
-      await client.query(
-        `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty)
-         VALUES ($1,$2,$3,$4,0)
-         ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
-        [barcode, product?.id ?? null, session.plant, qty],
-      );
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-         VALUES ($1,$2,$3,$4,$5,'receive',$6,$7,$8,'unloading')`,
-        [barcode, product?.id ?? null, session.plant, qty, extraQty, `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, id, userCode ?? null],
-      );
+      // One purchase at the one plant - or, when the batch has a separate purchase plant, the purchase plus the transfer pair (see server/lib/unloadStock.ts).
+      await postUnloadMovement(client, {
+        sessionId: id, barcode, productId: lineProductId ?? product?.id ?? null, qty, extraQty, type: 'receive',
+        reason: `Unloaded vehicle ${session.vehicle_number} (${session.order_date})`, userCode: userCode ?? null, day: bookedDay,
+      });
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
@@ -1222,7 +1149,8 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
     const { items: progressItems, allComplete, offBatchExtraQty, offBatchExtraPallets } = await withProgress({ id: session.id, plant: session.plant });
 
     let finalStatus = session.scan_status;
-    if (allComplete && session.scan_status !== 'completed') {
+    // A reopened session is not completed again by a scan - only the Complete button does that.
+    if (allComplete && session.scan_status !== 'completed' && !session.auto_complete_suppressed) {
       await pool.query(
         `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW() WHERE id = $2`,
         [userCode ?? null, id],
@@ -1254,15 +1182,15 @@ router.post('/unloading/sessions/:id/scan', requirePageWrite('unloading'), async
 
     res.json({
       session: {
-        id: session.id, plant: session.plant, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
+        id: session.id, plant: session.plant, purchasePlant: session.purchase_plant ?? null, vehicleNumber: session.vehicle_number, orderDate: session.order_date,
         scanStatus: finalStatus, groupId: session.group_id, partIndex: session.part_index,
       },
       items: progressItems, allComplete, offBatchExtraQty, offBatchExtraPallets,
       event: {
-        barcode, itemName: sharedHere ? (matchedItem?.item_name ?? product?.name ?? barcode) : (matchedItem?.itemName ?? product?.name ?? barcode),
-        sapCode: sharedHere ? (matchedItem?.sap_code ?? null) : (matchedItem?.sapCode ?? product?.sapCode ?? null),
+        barcode, itemName: matchedItem?.itemName ?? product?.name ?? barcode,
+        sapCode: matchedItem?.sap_code ?? null,
         totalQty: qty, isExtra: extraQty > 0, remaining: Math.max(0, remainingBefore - regularQty),
-        productId: product?.id ?? null,
+        productId: lineProductId ?? product?.id ?? null,
       },
     });
   } catch (error: any) {
@@ -1292,7 +1220,7 @@ router.post('/unloading/sessions/:id/complete', requirePageWrite('unloading'), a
 
     const { userCode, userName } = actor(req);
     await pool.query(
-      `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW() WHERE id = $2`,
+      `UPDATE unload_import_sessions SET scan_status = 'completed', scan_completed_by_code = $1, scan_completed_at = NOW(), auto_complete_suppressed = false WHERE id = $2`,
       [userCode ?? null, id],
     );
     if (session.group_id) {
@@ -1337,7 +1265,7 @@ router.post('/unloading/sessions/:id/reopen', requireUnloadingVoidAccess, async 
 
     const { userCode, userName } = actor(req);
     await pool.query(
-      `UPDATE unload_import_sessions SET scan_status = 'active', scan_completed_by_code = NULL, scan_completed_at = NULL WHERE id = $1`,
+      `UPDATE unload_import_sessions SET scan_status = 'active', scan_completed_by_code = NULL, scan_completed_at = NULL, auto_complete_suppressed = true WHERE id = $1`,
       [id],
     );
     // If reopening pulled this part back into play while a later part in the same group had
@@ -1423,29 +1351,25 @@ router.delete('/unloading/sessions/:id', requireUnloadingDeleteAccess, async (re
 
     const stockReversed: Array<{ barcode: string; qty: number }> = [];
     if (discard) {
+      // Per barcode AND booked day: each day's scans are taken back on that same day (an older scan with no booked day keeps the old rule).
       const { rows: received } = await client.query(
-        `SELECT barcode, SUM(total_qty)::int AS qty
+        `SELECT barcode, product_id AS "productId", to_char(booked_day, 'YYYY-MM-DD') AS day, SUM(total_qty)::int AS qty
          FROM unload_scan_events WHERE session_id = $1 AND barcode IS NOT NULL AND voided IS NOT TRUE
-         GROUP BY barcode HAVING SUM(total_qty) <> 0`,
+         GROUP BY barcode, product_id, to_char(booked_day, 'YYYY-MM-DD') HAVING SUM(total_qty) <> 0
+         ORDER BY barcode, 3 NULLS FIRST`,
         [id],
       );
+      const stockLeft = new Map<string, number>();
       for (const r of received) {
-        const { rows: plantRows } = await client.query(
-          `SELECT in_stock, product_id FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-          [r.barcode, session.plant],
-        );
-        const actualQty = Math.min(r.qty, Number(plantRows[0]?.in_stock ?? 0));
+        const lineKey = `${r.barcode}|${r.productId ?? ''}`;
+        if (!stockLeft.has(lineKey)) stockLeft.set(lineKey, await unloadStockLeft(client, id, r.barcode, r.productId ?? null));
+        const actualQty = Math.min(r.qty, stockLeft.get(lineKey)!);
         if (actualQty <= 0) continue;
-        const productId = plantRows[0]?.product_id ?? null;
-        await client.query(
-          `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
-          [actualQty, r.barcode, session.plant],
-        );
-        await client.query(
-          `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source)
-           VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading')`,
-          [r.barcode, productId, session.plant, -actualQty, 'Unloading CSV deleted — rollback', id, userCode ?? null],
-        );
+        stockLeft.set(lineKey, stockLeft.get(lineKey)! - actualQty);
+        await postUnloadMovement(client, {
+          sessionId: id, barcode: r.barcode, productId: r.productId ?? null, qty: -actualQty, type: 'adjust',
+          reason: 'Unloading CSV deleted - rollback', userCode: userCode ?? null, day: r.day ?? null,
+        });
         stockReversed.push({ barcode: r.barcode, qty: actualQty });
       }
       await client.query(`UPDATE unload_scan_events SET voided = true WHERE session_id = $1 AND voided IS NOT TRUE`, [id]);
@@ -1497,13 +1421,13 @@ router.delete('/unloading/sessions/:id', requireUnloadingDeleteAccess, async (re
 // directly. A single scan that straddled the regular/extra boundary was always inserted as two
 // separate rows (see insertEvent in /scan and here), never one row with a mixed qty, so this
 // only ever flips a whole row's flag — it never needs to split or merge rows.
-async function reclassifyUnloadEvents(client: any, sessionId: number, barcode: string, expectedQty: number, sapScope: string | null = null): Promise<void> {
+async function reclassifyUnloadEvents(client: any, sessionId: number, barcode: string, expectedQty: number, productId: number | null = null): Promise<void> {
   const { rows } = await client.query(
     `SELECT id, total_qty, is_extra, credited_qty, is_credit FROM unload_scan_events
-      WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE${sapScope !== null ? " AND LOWER(TRIM(COALESCE(sap_code, ''))) = $3" : ''}
+      WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3
       ORDER BY scanned_at ASC, id ASC
       FOR UPDATE`,
-    sapScope !== null ? [sessionId, barcode, sapScope] : [sessionId, barcode],
+    [sessionId, barcode, productId],
   );
   let regularSoFar = 0;
   for (const row of rows) {
@@ -1532,7 +1456,7 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows: eventRows } = await client.query(`SELECT * FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const { rows: eventRows } = await client.query(`SELECT *, to_char(booked_day, 'YYYY-MM-DD') AS booked_day_s FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
     const event = eventRows[0];
     if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Scan event not found' }); }
     if (!canAccessPlant(req, event.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Access denied for this plant' }); }
@@ -1541,34 +1465,23 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
     const qty = Number(event.total_qty ?? 0);
     let product: any = null;
     if (qty > 0 && event.plant && event.barcode) {
-      product = (event.product_id != null ? await storage.getProduct(event.product_id) : undefined) ?? await findProductForLine(event.barcode, event.sap_code, event.plant);
-      await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-      // Voiding a receive removes stock (the mirror of adding it) — but if those boxes have
-      // already been consumed elsewhere (loaded out, etc.) since they were received, there
-      // isn't enough left to take back. Reject rather than letting the pool go negative.
-      const { rows: stockRows } = await client.query(
-        `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-        [event.barcode, event.plant],
-      );
-      const currentStock = Number(stockRows[0]?.inStock ?? 0);
+      product = await storage.getProductByBarcode(event.barcode, event.plant);
+      // Voiding a receive removes stock (the mirror of adding it) - but if those boxes have already been used elsewhere (loaded out, etc.)
+      // since they were received, there isn't enough left to take back. Reject rather than letting the line go negative.
+      const currentStock = await unloadStockLeft(client, event.session_id, event.barcode, event.product_id ?? null);
       if (currentStock < qty) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           message: `Can't undo this — only ${currentStock} of these boxes are still in stock (${qty} were received here); the rest are already used elsewhere.`,
         });
       }
-      await client.query(
-        `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
-        [qty, event.barcode, event.plant],
-      );
       // origin = 'void' — same reasoning as Order Scan's own void (see reverseLiveScanStock in
-      // server/lib/orderGroupReport.ts): lets Overall Stock fold this back into Purchase instead
+      // server/lib/orderGroupReport.ts): lets Stock Overview fold this back into Purchase instead
       // of Adjust, always in the same period as the receive it's reversing (same session_id).
-      await client.query(
-        `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, origin, effective_date)
-         VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading','void',(SELECT scanned_at::date FROM unload_scan_events WHERE id = $8))`,
-        [event.barcode, product?.id ?? null, event.plant, -qty, reason ?? 'Unloading scan voided', event.session_id, userCode ?? null, eventId],
-      );
+      await postUnloadMovement(client, {
+        sessionId: event.session_id, barcode: event.barcode, productId: event.product_id ?? product?.id ?? null, qty: -qty, type: 'adjust', origin: 'void',
+        reason: reason ?? 'Unloading scan voided', userCode: userCode ?? null, day: event.booked_day_s ?? null,
+      });
     }
     await client.query(
       `UPDATE unload_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
@@ -1579,12 +1492,11 @@ router.post('/unloading/events/:id/void', requireUnloadingVoidAccess, async (req
     // any surviving events for the same session+barcode in case a separate extra scan now belongs
     // in the room this freed up.
     if (event.barcode) {
-      const sapScope = await sharedSapScope(client, event.session_id, event.barcode, event.sap_code);
       const { rows: expectedRows } = await client.query(
-        `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2${sapScope !== null ? " AND LOWER(TRIM(COALESCE(sap_code, ''))) = $3" : ''}`,
-        sapScope !== null ? [event.session_id, event.barcode, sapScope] : [event.session_id, event.barcode],
+        `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2 AND product_id IS NOT DISTINCT FROM $3`,
+        [event.session_id, event.barcode, event.product_id ?? null],
       );
-      await reclassifyUnloadEvents(client, event.session_id, event.barcode, expectedRows[0]?.expected ?? 0, sapScope);
+      await reclassifyUnloadEvents(client, event.session_id, event.barcode, expectedRows[0]?.expected ?? 0, event.product_id ?? null);
     }
     await client.query('COMMIT');
     res.json({ success: true });
@@ -1624,7 +1536,7 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows: eventRows } = await client.query(`SELECT * FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
+    const { rows: eventRows } = await client.query(`SELECT *, to_char(booked_day, 'YYYY-MM-DD') AS booked_day_s FROM unload_scan_events WHERE id = $1 FOR UPDATE`, [eventId]);
     const event = eventRows[0];
     if (!event) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Scan event not found' }); }
     if (!canAccessPlant(req, event.plant)) { await client.query('ROLLBACK'); return res.status(403).json({ message: 'Access denied for this plant' }); }
@@ -1649,23 +1561,21 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
     }
 
     const oldQty = Number(event.total_qty ?? 0);
-    const product = (event.product_id != null ? await storage.getProduct(event.product_id) : undefined) ?? await findProductForLine(event.barcode, event.sap_code, event.plant);
+    const product = event.product_id != null ? await storage.getProduct(event.product_id) : await storage.getProductByBarcode(event.barcode, event.plant);
 
-    // A correction is the old quantity coming off and the new one going on. What must still be in stock is only the NET amount that comes off:
-    // raising 30 to 35 needs nothing, lowering 35 to 30 needs 5. (It used to demand the whole old quantity, so raising an entry whose boxes were
-    // already partly used elsewhere was refused.) The new quantity is put on FIRST, then the old one taken off, so stock never dips below zero.
-    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-    const { rows: stockRows } = await client.query(
-      `SELECT in_stock AS "inStock" FROM product_plant_stock WHERE barcode = $1 AND plant = $2 FOR UPDATE`,
-      [event.barcode, event.plant],
-    );
-    const currentStock = Number(stockRows[0]?.inStock ?? 0);
-    if (currentStock + (newQty as number) < oldQty) {
+    // Reverse the old qty's stock — same direction the void handler above uses. Same guard too:
+    // if these boxes are already used elsewhere, there isn't enough left to take back.
+    const currentStock = await unloadStockLeft(client, event.session_id, event.barcode, event.product_id ?? null);
+    if (currentStock < oldQty) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         message: `Can't correct this — only ${currentStock} of these boxes are still in stock (${oldQty} were received here); the rest are already used elsewhere.`,
       });
     }
+    await postUnloadMovement(client, {
+      sessionId: event.session_id, barcode: event.barcode, productId: event.product_id ?? product?.id ?? null, qty: -oldQty, type: 'adjust',
+      reason: `Qty correction — old scan reversed (edited by ${editorLabel})`, userCode: userCode ?? null, day: event.booked_day_s ?? null,
+    });
 
     await client.query(
       `UPDATE unload_scan_events SET voided = true, voided_by_code = $1, voided_at = NOW(), void_reason = $2 WHERE id = $3`,
@@ -1674,15 +1584,14 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
 
     // Same regular/extra split /scan itself computes, against expected qty minus whatever's
     // still received for this barcode (now excluding the just-voided old event).
-    const sapScope = await sharedSapScope(client, event.session_id, event.barcode, event.sap_code);
     const { rows: expectedRows } = await client.query(
-      `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2${sapScope !== null ? " AND LOWER(TRIM(COALESCE(sap_code, ''))) = $3" : ''}`,
-      sapScope !== null ? [event.session_id, event.barcode, sapScope] : [event.session_id, event.barcode],
+      `SELECT COALESCE(SUM(quantity), 0)::int AS expected FROM unload_import_items WHERE session_id = $1 AND barcode = $2 AND product_id IS NOT DISTINCT FROM $3`,
+      [event.session_id, event.barcode, event.product_id ?? null],
     );
     const expected = expectedRows[0]?.expected ?? 0;
     const { rows: scannedRows } = await client.query(
-      `SELECT COALESCE(SUM(total_qty), 0)::int AS scanned FROM unload_scan_events WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE${sapScope !== null ? " AND LOWER(TRIM(COALESCE(sap_code, ''))) = $3" : ''}`,
-      sapScope !== null ? [event.session_id, event.barcode, sapScope] : [event.session_id, event.barcode],
+      `SELECT COALESCE(SUM(total_qty), 0)::int AS scanned FROM unload_scan_events WHERE session_id = $1 AND barcode = $2 AND voided IS NOT TRUE AND product_id IS NOT DISTINCT FROM $3`,
+      [event.session_id, event.barcode, event.product_id ?? null],
     );
     const alreadyScanned = scannedRows[0]?.scanned ?? 0;
     const remainingBefore = Math.max(0, expected - alreadyScanned);
@@ -1695,46 +1604,28 @@ router.put('/unloading/events/:id', requireUnloadingVoidAccess, async (req: Requ
       // is_adjust: this is a qty correction, not a fresh scan — shown as "Unload Adjust".
       // Original scan time kept, correction time recorded — same as Order Scan and Loading.
       `INSERT INTO unload_scan_events
-         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at, adjusted_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),NOW())`,
+         (session_id, barcode, item_name, sap_code, pallets, loose_qty, total_qty, is_extra, is_adjust, stv, plant, vehicle_number, scanned_by_code, scanned_by_name, scanned_at, adjusted_at, booked_day, product_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,$9,$10,$11,$12,$13,COALESCE($14::timestamp, NOW()),NOW(),$15::date,$16)`,
       [
         event.session_id, event.barcode, event.item_name, event.sap_code,
         itemsPerPallet > 0 ? Math.floor(totalQty / itemsPerPallet) : 0,
         itemsPerPallet > 0 ? totalQty % itemsPerPallet : totalQty,
         totalQty, isExtra, hasStv ? newStv : event.stv, event.plant, event.vehicle_number,
-        event.scanned_by_code, event.scanned_by_name, event.scanned_at,
+        event.scanned_by_code, event.scanned_by_name, event.scanned_at, event.booked_day_s ?? null, event.product_id ?? null,
       ],
     );
     if (regularQty > 0) await insertEvent(regularQty, false);
     if (extraQty > 0) await insertEvent(extraQty, true);
 
-    await reconcileProductPlantStockBarcode(client, product?.id, event.plant, event.barcode);
-    await client.query(
-      `INSERT INTO product_plant_stock (barcode, product_id, plant, in_stock, extra_qty, updated_at)
-       VALUES ($1,$2,$3,$4,0,NOW())
-       ON CONFLICT (barcode, plant) DO UPDATE SET in_stock = product_plant_stock.in_stock + EXCLUDED.in_stock, updated_at = NOW()`,
-      [event.barcode, product?.id ?? null, event.plant, newQty],
-    );
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, effective_date)
-       VALUES ($1,$2,$3,$4,$5,'adjust',$6,$7,$8,'unloading',(SELECT scanned_at::date FROM unload_scan_events WHERE id = $9))`,
-      [event.barcode, product?.id ?? null, event.plant, newQty, extraQty, `Qty corrected (edited by ${editorLabel})`, event.session_id, userCode ?? null, eventId],
-    );
-    // ...and now the old quantity comes off (the old scan reversed).
-    await client.query(
-      `UPDATE product_plant_stock SET in_stock = in_stock - $1, updated_at = NOW() WHERE barcode = $2 AND plant = $3`,
-      [oldQty, event.barcode, event.plant],
-    );
-    await client.query(
-      `INSERT INTO stock_movements (barcode, product_id, plant, qty, extra_qty, type, reason, session_id, created_by_code, source, effective_date)
-       VALUES ($1,$2,$3,$4,0,'adjust',$5,$6,$7,'unloading',(SELECT scanned_at::date FROM unload_scan_events WHERE id = $8))`,
-      [event.barcode, product?.id ?? null, event.plant, -oldQty, `Qty correction — old scan reversed (edited by ${editorLabel})`, event.session_id, userCode ?? null, eventId],
-    );
+    await postUnloadMovement(client, {
+      sessionId: event.session_id, barcode: event.barcode, productId: event.product_id ?? product?.id ?? null, qty: newQty as number, extraQty, type: 'adjust',
+      reason: `Qty corrected (edited by ${editorLabel})`, userCode: userCode ?? null, day: event.booked_day_s ?? null,
+    });
 
     // This correction just changed how much of this barcode is "scanned" for this session —
     // re-check every surviving event, not just the ones just inserted, in case a separate extra
     // scan should now slide into the room this correction opened up.
-    await reclassifyUnloadEvents(client, event.session_id, event.barcode, expected, sapScope);
+    await reclassifyUnloadEvents(client, event.session_id, event.barcode, expected, event.product_id ?? null);
 
     await client.query('COMMIT');
     res.json({ success: true, regularQty, extraQty });

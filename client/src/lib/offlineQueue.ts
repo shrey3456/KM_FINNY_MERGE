@@ -11,7 +11,7 @@ import { handleUnauthorized, queryClient } from "./queryClient";
 // its own retry state), and localStorage's synchronous, string-only, ~5MB-total API is the wrong
 // tool for that.
 
-const DB_NAME = "kmfinny-offline-queue";
+const DB_NAME = "teamfinny-offline-queue";
 const DB_VERSION = 1;
 const STORE_NAME = "pending-requests";
 // How long one scan request may take before it is treated as "network unreachable" and queued. At 5 s

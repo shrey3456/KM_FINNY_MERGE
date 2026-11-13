@@ -40,11 +40,13 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
+import { PlantChoice } from "@/components/PlantBadge";
+import { plantShortCode, useTabSubtitle } from "@/lib/appTabs";
 import { useToast } from "@/hooks/use-toast";
 import { useSingleDateFilter } from "@/hooks/useSingleDateFilter";
 import { TruckLoadingAnimation } from "@/components/TruckLoadingAnimation";
 import * as QRCode from "qrcode";
-import logoPath from "@assets/logo_wo_bg_1757152661130.png";
+const logoPath = "/logo_wo_bg_1757152661130.png"; // served from client/public
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { PageSkeleton } from "@/components/ui/loading-skeletons";
 
@@ -77,52 +79,29 @@ interface ExpenseVoucherResponse {
   itemCount: number;
 }
 
+// Read synchronously on first render (it is only localStorage), so the page never flashes a
+// loading skeleton before drawing.
 function useAccessControl() {
-  const [hasAccess, setHasAccess] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    const checkAccess = () => {
-      try {
-        const userString = localStorage.getItem("currentUser");
-        if (!userString) {
-          setHasAccess(false);
-          setIsLoading(false);
-          return;
-        }
-
-        const user = JSON.parse(userString);
-        const userRole = user.role?.toLowerCase();
-
-        const allowedRoles = [
-          "admin",
-          "super-admin",
-          "superadmin",
-          "super_admin",
-        ];
-
-        const isAdmin = allowedRoles.includes(userRole);
-
-        // Access is controlled by admin via User Management's Allowed Pages —
-        // route-level access is already enforced by ProtectedRoute before this
-        // component ever renders; this just mirrors that for the page's own state.
-        let allowedPages: string[] = [];
-        try { allowedPages = JSON.parse(user.allowedPages || "[]"); } catch { /* default [] */ }
-        const hasPageGrant = allowedPages.includes("expense-voucher");
-
-        setHasAccess(isAdmin || hasPageGrant);
-        setIsLoading(false);
-      } catch (error) {
-        console.error("Error checking access:", error);
-        setHasAccess(false);
-        setIsLoading(false);
-      }
-    };
-
-    checkAccess();
-  }, []);
-
-  return { hasAccess, isLoading };
+  const [hasAccess] = useState(() => {
+    try {
+      const userString = localStorage.getItem("currentUser");
+      if (!userString) return false;
+      const user = JSON.parse(userString);
+      const userRole = user.role?.toLowerCase();
+      const allowedRoles = ["admin", "super-admin", "superadmin", "super_admin"];
+      const isAdmin = allowedRoles.includes(userRole);
+      // Access is controlled by admin via User Management's Allowed Pages —
+      // route-level access is already enforced by ProtectedRoute before this
+      // component ever renders; this just mirrors that for the page's own state.
+      let allowedPages: string[] = [];
+      try { allowedPages = JSON.parse(user.allowedPages || "[]"); } catch { /* default [] */ }
+      return isAdmin || allowedPages.includes("expense-voucher");
+    } catch (error) {
+      console.error("Error checking access:", error);
+      return false;
+    }
+  });
+  return { hasAccess, isLoading: false };
 }
 
 const getPlantColor = (plant: string) => {
@@ -172,6 +151,8 @@ const getPartyTextFromVoucherInfo = (info?: Record<string, string>) => {
 
 export default function ExpenseVoucher() {
   const [selectedPlant, setSelectedPlant] = usePersistentFilter("expenseVoucher:plant", "valsad");
+  // Show the chosen plant on this page's tab in short form, e.g. "VAL" / "IND" / "LKW".
+  useTabSubtitle(plantShortCode(selectedPlant));
   // const [voucherPrefix, setVoucherPrefix] = useState("KM2526-EV-");
   const [voucherNumber, setVoucherNumber] = useState("");
   const [selectedOrder, setSelectedOrder] = useState("");
@@ -1226,28 +1207,10 @@ export default function ExpenseVoucher() {
           <h1 className="text-3xl font-bold text-[#001d6e]">Expense Voucher</h1>
         </div>
         <div className="flex gap-3">
-          <Button
-            onClick={() => setSelectedPlant("valsad")}
-            variant={selectedPlant === "valsad" ? "default" : "outline"}
-            className={`flex items-center gap-2 ${selectedPlant === "valsad"
-              ? "bg-orange-500 hover:bg-orange-600"
-              : "border-orange-500 text-orange-600 hover:bg-orange-50"
-              }`}
-          >
-            <div className="w-3 h-3 rounded-full bg-orange-500"></div>
-            Valsad
-          </Button>
-          <Button
-            onClick={() => setSelectedPlant("indore")}
-            variant={selectedPlant === "indore" ? "default" : "outline"}
-            className={`flex items-center gap-2 ${selectedPlant === "indore"
-              ? "bg-amber-700 hover:bg-amber-800"
-              : "border-amber-700 text-amber-700 hover:bg-amber-50"
-              }`}
-          >
-            <div className="w-3 h-3 rounded-full bg-amber-700"></div>
-            Indore
-          </Button>
+          {/* Plant capsules — same colours as Plant Master (PlantBadge). */}
+          <PlantChoice plant="VALSAD" selected={selectedPlant === "valsad"} onSelect={() => setSelectedPlant("valsad")} />
+          <PlantChoice plant="INDORE" selected={selectedPlant === "indore"} onSelect={() => setSelectedPlant("indore")} />
+          <PlantChoice plant="LUCKNOW" selected={selectedPlant === "lucknow"} onSelect={() => setSelectedPlant("lucknow")} />
         </div>
       </div>
 

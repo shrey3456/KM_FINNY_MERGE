@@ -1,3 +1,4 @@
+import { drawPdfHeader, drawPdfFooter, greenTotalRow, setPdfProperties } from "@/lib/pdfBranding";
 import { useState } from "react";
 import {
   ChevronDown, Clock, Download, Eye, ListChecks, Loader2,
@@ -135,10 +136,11 @@ function exportRows(fmt: Fmt, baseName: string, title: string, rows: Row[]) {
     XLSX.writeFile(book, `${baseName}.xlsx`);
   } else {
     const doc = new jsPDF({ orientation: "landscape" });
-    doc.setFontSize(12);
-    doc.text(title, 14, 12);
+    setPdfProperties(doc, title);
+    const startY = drawPdfHeader(doc, { title, margin: 14 });
     const [header, ...body] = rows;
-    autoTable(doc, { head: [header as string[]], body: body as string[][], startY: 18, styles: { fontSize: 8 }, headStyles: { fillColor: [226, 232, 244], textColor: [0, 29, 110], fontStyle: "bold" }, alternateRowStyles: { fillColor: [248, 250, 252] } });
+    autoTable(doc, { head: [header as string[]], body: body as string[][], startY, margin: { left: 14, right: 14 }, styles: { fontSize: 8 }, headStyles: { fillColor: [226, 232, 244], textColor: [0, 29, 110], fontStyle: "bold" }, alternateRowStyles: { fillColor: [248, 250, 252] }, didParseCell: greenTotalRow });
+    drawPdfFooter(doc, 14);
     doc.save(`${baseName}.pdf`);
   }
 }

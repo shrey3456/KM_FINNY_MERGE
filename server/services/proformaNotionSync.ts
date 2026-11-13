@@ -8,6 +8,8 @@
 import { Client } from '@notionhq/client';
 import { storage } from '../storage';
 import { pool } from '../db';
+import { stateSapOf } from '../lib/productSap';
+import { stateOfPlant } from '../lib/stockV2';
 import { extractText } from '../lib/notionProperties';
 import type { InsertProformaSlip } from '@shared/schema';
 import { dispatchUnlockPatch } from './autoDispatch';
@@ -35,7 +37,7 @@ export interface OrderData {
 }
 
 function getDatabaseId(): string {
-  const notionPageUrl = process.env.NOTION_PAGE_URL!;
+  const notionPageUrl = process.env.NOTION_PROFORMA_DATABASE_ID!;
   const match = notionPageUrl.match(/([a-f0-9]{32})/);
   if (!match) throw new Error('Invalid Notion page URL - could not extract database ID');
   return match[1];
@@ -94,8 +96,8 @@ export async function fetchProformaOrdersFromNotion(
     if (product.newSr) productBySrNo.set(product.newSr.toLowerCase(), product);
   }
 
-  const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
-  if (!ORDER_DATABASE_ID) throw new Error('ORDER_DATABASE_ID environment variable is not set');
+  const ORDER_DATABASE_ID = process.env.NOTION_ORDER_DATABASE_ID;
+  if (!ORDER_DATABASE_ID) throw new Error('NOTION_ORDER_DATABASE_ID environment variable is not set');
 
   // STEP 1: Order DB — Plant / Status / Quantity, filtered by its own plain "Ord Date :" property.
   const orderInfoMap = new Map<string, { plant: string; status: string; qty: number | undefined }>();
@@ -309,6 +311,7 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
   let itemsCreated = 0;
   let totalQuantity = 0;
   let totalVolume = 0;
+  const slipState = await stateOfPlant(pool, orderData.plant ?? '');
   for (const [, itemData] of Array.from(orderData.items.entries())) {
     const product = await storage.getProduct(itemData.productId);
     if (product) {
@@ -323,7 +326,8 @@ export async function writeOrderToDb(orderData: OrderData): Promise<{
         category: product.category || '',
         volumeInCuFt: product.volumeInCuFt || '',
         hsnCode: product.hsnCode || '',
-        sapCode: product.sapCode || '',
+        // The product's SAP for THIS plant's state; blank when it has none there (the Loading page tells the user).
+        sapCode: stateSapOf(product, slipState) ?? '',
         description: product.description || '',
         purchasePrice: product.purchasePrice || '',
         sellingPrice: product.sellingPrice || '',
@@ -656,8 +660,8 @@ export async function syncLatestDateFromOrderDb(apply: boolean): Promise<{ date:
   const date: string | null = rows[0]?.d ?? null;
   if (!date) return { date: null, checked: 0, updated: 0 };
 
-  const ORDER_DATABASE_ID = process.env.ORDER_DATABASE_ID;
-  if (!ORDER_DATABASE_ID) throw new Error('ORDER_DATABASE_ID environment variable is not set');
+  const ORDER_DATABASE_ID = process.env.NOTION_ORDER_DATABASE_ID;
+  if (!ORDER_DATABASE_ID) throw new Error('NOTION_ORDER_DATABASE_ID environment variable is not set');
   const notion = new Client({ auth: process.env.NOTION_INTEGRATION_SECRET });
 
   let checked = 0;

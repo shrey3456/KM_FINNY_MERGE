@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>KM Finny</title>
-    <meta name="description" content="KM Finny inventory management system" />
+    <title>Team Finny</title>
+    <meta name="description" content="Team Finny inventory management system" />
     <!-- White, matching manifest.json's theme_color/background_color — Android's own splash
          screen/adaptive-icon compositing was filling behind the logo with the OLD navy value
          here, which is the background the "loading" screen showed; this is what actually
@@ -28,24 +28,24 @@
     <link rel="manifest" href="/manifest.json" crossorigin="use-credentials" />
 
     <!-- PWA icons — same rule: keep these filenames stable, replace their contents in place. -->
-    <link rel="icon" href="/favicon-new-v2.ico" />
+    <!-- Browser tab icon: PNGs only (no .ico), so the browser can't fall back to an older square icon. -->
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/tab-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icons/tab-512.png" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192-v2.png" />
-    <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512-v2.png" />
     <link rel="apple-touch-startup-image" href="/icons/icon-512-v2.png" />
 
     <!-- iOS specific PWA meta tags -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="KM Finny" />
+    <meta name="apple-mobile-web-app-title" content="Team Finny" />
 
     <!-- Prevent telephone number detection -->
     <meta name="format-detection" content="telephone=no" />
 
     <!-- Ensure proper Android display -->
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="application-name" content="KM Finny" />
+    <meta name="application-name" content="Team Finny" />
 
     <!-- Add splash screen for Android -->
     <meta name="msapplication-TileImage" content="/icons/icon-512-maskable-v2.png" />
@@ -62,7 +62,7 @@
            <main>. The document must therefore never scroll — without this, anything
            that pushes #root past the viewport adds a second, outer scrollbar. */
         overflow: hidden;
-        /* overflow:hidden alone doesn't stop a touch browser (tablet Chrome/Safari) from panning
+          /* overflow:hidden alone doesn't stop a touch browser (tablet Chrome/Safari) from panning
            the page sideways or down when anything pokes past the viewport — it then shows a blank
            white area beyond the app. Pinning the document to the viewport removes that scroll
            entirely; the app's own panes still scroll inside it. */
@@ -70,6 +70,7 @@
         inset: 0;
         width: 100%;
         overscroll-behavior: none;
+        
       }
       #root {
         /* height, not min-height: min-height lets #root grow past the viewport, which

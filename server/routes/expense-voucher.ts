@@ -718,10 +718,23 @@ async function findDriverVouchers(
   query: string,
   voucherDate: string | null,
   maxBatches: number
-): Promise<{ infos: Record<string, string>[]; firstPlant?: string; firstStatus?: string }> {
+): Promise<{
+  infos: Record<string, string>[];
+  partialInfos: Record<string, string>[];
+  firstPlant?: string;
+  firstStatus?: string;
+}> {
+  // Exact driver-name matches are kept apart from partial (substring) ones: "RAM" must not
+  // pull in RAMESH's or SHRIRAM's vouchers. Callers fall back to partials only when no
+  // voucher matches exactly.
   const infos: Record<string, string>[] = [];
+  const partialInfos: Record<string, string>[] = [];
   let firstPlant: string | undefined;
   let firstStatus: string | undefined;
+  let partialPlant: string | undefined;
+  let partialStatus: string | undefined;
+  const normalizeName = (v: string) => v.trim().toLowerCase().replace(/\s+/g, ' ');
+  const target = normalizeName(query);
   let cursor: string | undefined = undefined;
   let hasMore = true;
   let batches = 0;
@@ -740,15 +753,34 @@ async function findDriverVouchers(
     for (const page of resp.results as any[]) {
       if (!('properties' in page)) continue;
       const info = buildVoucherInfo(page.properties);
-      const driver = getVoucherDriverName(info);
-      if (!driver || !driver.toLowerCase().includes(query)) continue;
+      // A voucher can carry the driver under several fields (Aadhar-wise name, linked driver...);
+      // the search-bar suggestions come from the driver master list, so check them all.
+      const driverNames = [
+        info['Driver - Aadhar Wise Name :'],
+        info['Driver :'],
+        info['Link to Driver :'],
+        info['Link to Driver'],
+      ].filter(Boolean).map(normalizeName);
+      const exact = driverNames.some((d) => d === target);
+      const partial = !exact && driverNames.some((d) => d.includes(target));
+      if (!exact && !partial) continue;
 
-      if (firstPlant === undefined) {
-        const p = page.properties;
-        firstPlant = p['Plant']?.select?.name || p['Stk Plant :']?.select?.name || 'INDORE';
-        firstStatus = p['Finny Status :']?.status?.name || p['Finny Status :']?.select?.name || 'Unknown';
+      const p = page.properties;
+      const plant = p['Plant']?.select?.name || p['Stk Plant :']?.select?.name || 'INDORE';
+      const status = p['Finny Status :']?.status?.name || p['Finny Status :']?.select?.name || 'Unknown';
+      if (exact) {
+        if (firstPlant === undefined) {
+          firstPlant = plant;
+          firstStatus = status;
+        }
+        infos.push(info);
+      } else {
+        if (partialPlant === undefined) {
+          partialPlant = plant;
+          partialStatus = status;
+        }
+        partialInfos.push(info);
       }
-      infos.push(info);
     }
 
     hasMore = resp.has_more;
@@ -761,7 +793,10 @@ async function findDriverVouchers(
     );
   }
 
-  return { infos, firstPlant, firstStatus };
+  if (infos.length === 0) {
+    return { infos: [], partialInfos, firstPlant: partialPlant, firstStatus: partialStatus };
+  }
+  return { infos, partialInfos, firstPlant, firstStatus };
 }
 
 // Paginate the expense-voucher database, scoped to voucherDate, looking for
@@ -908,7 +943,7 @@ function getDriverNameList(notion: Client, driverDatabaseId: string): Promise<st
 // after the rest of the module graph (env vars included) has finished
 // loading, regardless of import order.
 setImmediate(() => {
-  const driverDatabaseId = process.env.DRIVER_DATABASE_ID;
+  const driverDatabaseId = process.env.NOTION_DRIVER_DATABASE_ID;
   if (!driverDatabaseId) return;
   const notion = new Client({
     auth: process.env.NOTION_INTEGRATION_SECRET,
@@ -924,12 +959,12 @@ setImmediate(() => {
 router.get('/expense-voucher/driver-suggestions', async (req, res) => {
   try {
     const query = String(req.query.q || '').trim().toLowerCase();
-    const DRIVER_DATABASE_ID = process.env.DRIVER_DATABASE_ID;
+    const DRIVER_DATABASE_ID = process.env.NOTION_DRIVER_DATABASE_ID;
 
     if (!DRIVER_DATABASE_ID) {
       return res.status(500).json({
         success: false,
-        message: 'DRIVER_DATABASE_ID environment variable is not set',
+        message: 'NOTION_DRIVER_DATABASE_ID environment variable is not set',
         suggestions: []
       });
     }
@@ -988,37 +1023,37 @@ async function expenseVoucherHandler(req: Request, res: Response) {
       timeoutMs: 120000 // 60 seconds
     });
 
-    // Extract database ID from the provided URL: https://www.notion.so/kmfinny/173604c4adf080f7853dc9a41a8a69a9?v=173604c4adf08158ba8a000c964da041&source=copy_link
-    const EXPENSE_VOUCHER_DATABASE_ID = process.env.EXPENSE_VOUCHER_DATABASE_ID;
+    // Expense voucher database ID: 173604c4adf080f7853dc9a41a8a69a9
+    const EXPENSE_VOUCHER_DATABASE_ID = process.env.NOTION_AUTO_EXPENSES_DATABASE_ID;
 
-    const AEV_EXPENSE_DATABASE_ID = process.env.AEV_EXPENSE_VOUCHER_DATABASE_ID;
-    // Diesel bill database ID from: https://www.notion.so/kmfinny/dfba335ed74d4cd991b5b1a597c90605?v=a1866200419647f898d21f0fb6983a47&source=copy_link
-    const DIESEL_BILL_DATABASE_ID = process.env.DIESEL_BILL_DATABASE_ID;
+    const AEV_EXPENSE_DATABASE_ID = process.env.NOTION_AUTO_EXPENSES_DATABASE_ID;
+    // Diesel bill database ID: dfba335ed74d4cd991b5b1a597c90605
+    const DIESEL_BILL_DATABASE_ID = process.env.NOTION_FUEL_DATABASE_ID;
 
-    // Order details database ID from: https://www.notion.so/kmfinny/296851d9af9e4a14966376e58f8475e5?v=71fd049ebcc042dba43cc985ac6520a0&source=copy_link
-    const ORDER_DETAILS_DATABASE_ID = process.env.ORDER_DATABASE_ID;
+    // Order details database ID: 296851d9af9e4a14966376e58f8475e5
+    const ORDER_DETAILS_DATABASE_ID = process.env.NOTION_ORDER_DATABASE_ID;
 
-    // Driver database ID from: https://www.notion.so/kmfinny/7ac590de16e645cb96478236d5c47618?v=af0c988b17994ba7b7bdcce02f0a0cc2&source=copy_link
-    const DRIVER_DATABASE_ID = process.env.DRIVER_DATABASE_ID;
+    // Driver database ID: 7ac590de16e645cb96478236d5c47618
+    const DRIVER_DATABASE_ID = process.env.NOTION_DRIVER_DATABASE_ID;
 
-    const PARTY_DATABASE_ID = process.env.PARTY_DATABASE_ID;
+    const PARTY_DATABASE_ID = process.env.NOTION_DEALER_DATABASE_ID;
 
     if (!EXPENSE_VOUCHER_DATABASE_ID) {
       return res.status(500).json({
         success: false,
-        message: 'EXPENSE_VOUCHER_DATABASE_ID environment variable is not set'
+        message: 'NOTION_AUTO_EXPENSES_DATABASE_ID environment variable is not set'
       });
     }
     if (!AEV_EXPENSE_DATABASE_ID) {
     return res.status(500).json({
         success: false,
-        message: "AEV_EXPENSE_VOUCHER_DATABASE_ID is missing"
+        message: "NOTION_AUTO_EXPENSES_DATABASE_ID is missing"
     });
     }
     if (!DIESEL_BILL_DATABASE_ID) {
       return res.status(500).json({
         success: false,
-        message: 'DIESEL_BILL_DATABASE_ID environment variable is not set'
+        message: 'NOTION_FUEL_DATABASE_ID environment variable is not set'
       });
     }
     if (!ORDER_DETAILS_DATABASE_ID) {
@@ -1030,13 +1065,13 @@ async function expenseVoucherHandler(req: Request, res: Response) {
     if (!DRIVER_DATABASE_ID) {
       return res.status(500).json({
         success: false,
-        message: 'DRIVER_DATABASE_ID environment variable is not set'
+        message: 'NOTION_DRIVER_DATABASE_ID environment variable is not set'
       });
     }
     if (!PARTY_DATABASE_ID) {
       return res.status(500).json({
         success: false,
-        message: 'PARTY_DATABASE_ID environment variable is not set'
+        message: 'NOTION_DEALER_DATABASE_ID environment variable is not set'
       });
     }
 
@@ -1046,8 +1081,9 @@ async function expenseVoucherHandler(req: Request, res: Response) {
     // view / print are reused).
     if (driverName) {
       const query = String(driverName).trim().toLowerCase();
-      const databases = [EXPENSE_VOUCHER_DATABASE_ID];
-      if (AEV_EXPENSE_DATABASE_ID) databases.push(AEV_EXPENSE_DATABASE_ID);
+      // Both IDs currently point at the same database (NOTION_AUTO_EXPENSES_DATABASE_ID);
+      // scanning it twice returned every voucher twice and doubled every merged total.
+      const databases = Array.from(new Set([EXPENSE_VOUCHER_DATABASE_ID, AEV_EXPENSE_DATABASE_ID].filter(Boolean))) as string[];
 
       // Scan every database concurrently instead of one after another --
       // "first match wins" for plant/status is preserved by preferring the
@@ -1062,15 +1098,23 @@ async function expenseVoucherHandler(req: Request, res: Response) {
               dbError?.message || dbError
             );
             // Continue with the remaining databases instead of failing the request.
-            return { infos: [] as Record<string, string>[], firstPlant: undefined, firstStatus: undefined };
+            return {
+              infos: [] as Record<string, string>[],
+              partialInfos: [] as Record<string, string>[],
+              firstPlant: undefined,
+              firstStatus: undefined
+            };
           })
         )
       );
 
-      const infos: Record<string, string>[] = perDbResults.flatMap((r) => r.infos);
+      // Exact driver-name matches win; partial matches are only a fallback for a name typed
+      // without picking a suggestion, and are used only when nothing matched exactly.
+      const anyExact = perDbResults.some((r) => r.infos.length > 0);
+      const infos: Record<string, string>[] = perDbResults.flatMap((r) => (anyExact ? r.infos : r.partialInfos));
       let firstPlant = 'INDORE';
       let firstStatus = 'Unknown';
-      const firstMatchDb = perDbResults.find((r) => r.firstPlant !== undefined);
+      const firstMatchDb = perDbResults.find((r) => (anyExact ? r.infos.length > 0 : r.firstPlant !== undefined));
       if (firstMatchDb) {
         firstPlant = firstMatchDb.firstPlant!;
         firstStatus = firstMatchDb.firstStatus!;
@@ -1083,29 +1127,12 @@ async function expenseVoucherHandler(req: Request, res: Response) {
         });
       }
 
-      // Different vehicles for the same driver are kept as separate vouchers
-      // instead of being blended together; the client shows a dropdown to
-      // switch between them when more than one vehicle is found.
-      console.log(
-        `🚚 Driver "${driverName}" on ${voucherDate} vehicle values:`,
-        infos.map((info) => ({
-          vehicle: getVoucherVehicleNumber(info),
-          voucherNo: info['Voucher No. :'] || ''
-        }))
-      );
-
       const vehicleGroups = groupInfosByVehicle(infos);
       const vehicleOptions = vehicleGroups.map((g) => ({
         vehicleNumber: g.vehicleNumber || 'Unknown',
         voucherInfo: mergeVoucherInfos(g.infos),
         mergedVoucherCount: g.infos.length
       }));
-
-      console.log(
-        vehicleOptions.length > 1
-          ? `🔗 Driver "${driverName}": ${infos.length} voucher(s) found across ${vehicleOptions.length} distinct vehicles: ${vehicleOptions.map((o) => o.vehicleNumber).join(', ')}`
-          : `🔗 Driver "${driverName}": merging ${infos.length} voucher(s) into one printout (single vehicle: ${vehicleOptions[0]?.vehicleNumber})`
-      );
 
       const driverData: any = {
         orderNumber: String(driverName),
@@ -1335,14 +1362,6 @@ async function expenseVoucherHandler(req: Request, res: Response) {
       {
         const candidateInfos: Record<string, string>[] = [baseInfo, ...mergeSiblings];
 
-        console.log(
-          `🚚 Voucher-number siblings (${candidateInfos.length}) on ${voucherDate} vehicle values:`,
-          candidateInfos.map((info) => ({
-            vehicle: getVoucherVehicleNumber(info),
-            voucherNo: info['Voucher No. :'] || ''
-          }))
-        );
-
         // Same driver + same date but different vehicles (e.g. two trucks
         // dispatched the same day) must stay separate vouchers; default to
         // the vehicle the user actually searched for and offer the rest
@@ -1359,16 +1378,10 @@ async function expenseVoucherHandler(req: Request, res: Response) {
             0,
             vehicleGroups.findIndex((g) => g.vehicleNumber.toUpperCase() === baseVehicle)
           );
-          console.log(
-            `🔗 Driver "${baseDriver}" on ${voucherDate}: ${vehicleGroups.length} distinct vehicles found; keeping them separate`
-          );
           expenseVoucherData.voucherInfo = vehicleOptions[defaultIdx].voucherInfo;
           expenseVoucherData.mergedVoucherCount = vehicleOptions[defaultIdx].mergedVoucherCount;
           expenseVoucherData.vehicleOptions = vehicleOptions;
         } else {
-          console.log(
-            `🔗 Merging ${candidateInfos.length} voucher(s) for driver "${baseDriver}" on ${voucherDate}`
-          );
           expenseVoucherData.voucherInfo = mergeVoucherInfos(candidateInfos);
           expenseVoucherData.mergedVoucherCount = candidateInfos.length;
         }

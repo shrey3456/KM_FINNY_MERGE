@@ -1,5 +1,4 @@
 import { Router, Request, Response } from 'express';
-import path from 'path';
 import {
   detectChangesFromNotion,
   applyPendingChanges,
@@ -9,9 +8,9 @@ import {
   getSyncHistory,
   getAutoApplyEnabled,
   setAutoApplyEnabled,
-  PRODUCT_IMAGE_DIR,
 } from '../services/notionInventorySync';
 import { storage } from '../storage';
+import { getProductImage, PRODUCT_IMAGE_CONTENT_TYPE, type ProductImageSize } from '../lib/productImageStore';
 import { requirePageAccess, requirePageWrite } from '../lib/pageAccess';
 
 const router = Router();
@@ -111,8 +110,8 @@ router.get('/notion-inventory-sync/inspect-properties', async (_req, res) => {
     const notion = new Client({
       auth: (process.env.NOTION_INTEGRATION_SECRET ?? process.env.NOTION_API_KEY ?? '').trim(),
     });
-    const dbId = (process.env.NOTION_INVENTORY_DATABASE_ID ?? '').trim();
-    if (!dbId) return res.status(500).json({ error: 'NOTION_INVENTORY_DATABASE_ID not set' });
+    const dbId = (process.env.NOTION_PRODUCTS_MASTER_DATABASE_ID ?? '').trim();
+    if (!dbId) return res.status(500).json({ error: 'NOTION_PRODUCTS_MASTER_DATABASE_ID not set' });
 
     const [schema, sample] = await Promise.all([
       notion.databases.retrieve({ database_id: dbId }),
@@ -177,8 +176,26 @@ const CSV_HEADER_MAP: Record<string, string> = {
 };
 const INTEGER_FIELDS = new Set(["itemsPerPallet", "mpPlt", "gjPlt"]);
 
+// Sends a product/box photo from Neon Object Storage. The caller has already set the ETag (the
+// content hash) and answered 304 when it matched, so this only runs when the browser needs bytes.
+// ?size=thumb serves the small list copy; anything else the full photo. Each has its own ETag so the
+// browser caches them separately.
+function imageSizeOf(req: Request): ProductImageSize {
+  return req.query.size === 'thumb' ? 'thumb' : 'full';
+}
+function etagFor(hash: string, req: Request): string {
+  return imageSizeOf(req) === 'thumb' ? `${hash}-thumb` : hash;
+}
+
+async function sendStoredImage(req: Request, res: Response, key: string, hash: string, missingMessage: string) {
+  const body = await getProductImage(key, hash, imageSizeOf(req));
+  if (!body) return res.status(404).json({ message: missingMessage });
+  res.set('Content-Type', PRODUCT_IMAGE_CONTENT_TYPE);
+  res.send(body);
+}
+
 // GET /api/products/image-by-name?name=...
-// Serves a product's locally-cached image (never the raw Notion URL — see
+// Serves a product's stored image (never the raw Notion URL — see
 // notionInventorySync.ts for why). Looked up by name rather than barcode because the
 // same barcode can be shared by multiple distinct products; the Scan page already
 // resolves scans down to one exact item name before it needs the picture.
@@ -202,21 +219,13 @@ router.get('/products/image-by-name', async (req: Request, res: Response) => {
       // looking exactly like the sync had failed. Revalidating every time costs one conditional
       // request that answers 304 from the ETag below whenever the image really is unchanged.
       'Cache-Control': 'public, max-age=0, must-revalidate',
-      'ETag': product.productImageHash,
+      'ETag': etagFor(product.productImageHash, req),
     });
-    if (req.headers['if-none-match'] === product.productImageHash) {
+    if (req.headers['if-none-match'] === etagFor(product.productImageHash, req)) {
       return res.status(304).end();
     }
 
-    // etag/lastModified/cacheControl: false — sendFile generates and sets its OWN versions of
-    // these by default, which runs AFTER (and silently overwrites) the ones just set above. That
-    // own-generated ETag is based on the file's stat (mtime/size), not the Notion content hash,
-    // so a re-sync that happens to land within the same mtime/size as before (or a filesystem
-    // with coarse mtime resolution) could still 304 against stale bytes — the content hash above
-    // is the one actually meant to decide this, so it has to be the only one that wins.
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
-      if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
-    });
+    await sendStoredImage(req, res, product.productImage, product.productImageHash, 'Image file missing');
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
   }
@@ -241,15 +250,13 @@ router.get('/products/box-image-by-name', async (req: Request, res: Response) =>
 
     res.set({
       'Cache-Control': 'public, max-age=0, must-revalidate',
-      'ETag': product.boxImageHash,
+      'ETag': etagFor(product.boxImageHash, req),
     });
-    if (req.headers['if-none-match'] === product.boxImageHash) {
+    if (req.headers['if-none-match'] === etagFor(product.boxImageHash, req)) {
       return res.status(304).end();
     }
 
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
-      if (err && !res.headersSent) res.status(404).json({ message: 'Box image file missing' });
-    });
+    await sendStoredImage(req, res, product.boxImage, product.boxImageHash, 'Box image file missing');
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve box image' });
   }
@@ -282,15 +289,13 @@ router.get('/products/image-by-id', async (req: Request, res: Response) => {
       // looking exactly like the sync had failed. Revalidating every time costs one conditional
       // request that answers 304 from the ETag below whenever the image really is unchanged.
       'Cache-Control': 'public, max-age=0, must-revalidate',
-      'ETag': product.productImageHash,
+      'ETag': etagFor(product.productImageHash, req),
     });
-    if (req.headers['if-none-match'] === product.productImageHash) {
+    if (req.headers['if-none-match'] === etagFor(product.productImageHash, req)) {
       return res.status(304).end();
     }
 
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.productImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
-      if (err && !res.headersSent) res.status(404).json({ message: 'Image file missing' });
-    });
+    await sendStoredImage(req, res, product.productImage, product.productImageHash, 'Image file missing');
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve product image' });
   }
@@ -319,15 +324,13 @@ router.get('/products/box-image-by-id', async (req: Request, res: Response) => {
       // looking exactly like the sync had failed. Revalidating every time costs one conditional
       // request that answers 304 from the ETag below whenever the image really is unchanged.
       'Cache-Control': 'public, max-age=0, must-revalidate',
-      'ETag': product.boxImageHash,
+      'ETag': etagFor(product.boxImageHash, req),
     });
-    if (req.headers['if-none-match'] === product.boxImageHash) {
+    if (req.headers['if-none-match'] === etagFor(product.boxImageHash, req)) {
       return res.status(304).end();
     }
 
-    res.sendFile(path.join(PRODUCT_IMAGE_DIR, product.boxImage), { etag: false, lastModified: false, cacheControl: false }, (err) => {
-      if (err && !res.headersSent) res.status(404).json({ message: 'Box image file missing' });
-    });
+    await sendStoredImage(req, res, product.boxImage, product.boxImageHash, 'Box image file missing');
   } catch (err) {
     res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to serve box image' });
   }

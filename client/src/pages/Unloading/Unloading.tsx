@@ -1,23 +1,25 @@
-﻿import { Fragment, useEffect, useRef, useState } from "react";
+import { downloadCsv, downloadExcel, downloadPdf } from "@/lib/reportExport";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { sortNatural } from "@/lib/utils";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Result } from "@zxing/library";
 import type { Product } from "@shared/schema";
 import BarcodeScanner from "@/lib/barcodeScanner";
 import {
-  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, FileBarChart, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
+  AlertTriangle, Calendar, Camera, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Keyboard, Loader2, Package, PackageOpen, RotateCcw, RotateCw,
   ScanLine, Search, Trash2, Truck, X, Zap,
 } from "lucide-react";
 import { useSidebarContext } from "@/lib/sidebarContext";
+import { useActiveTabRef } from "@/lib/appTabs";
 import { usePersistentFilter } from "@/hooks/usePersistentFilter";
 import { AddColumnFilterButton, ColumnFilterChipView, ColumnHeaderFilterButton } from "@/components/filters/ColumnFilterChip";
 import { type FilterableColumn, type FilterCondition, type FilterOption, isConditionEmpty } from "@/lib/columnFilters";
 import { format as formatDay } from "date-fns";
 import PageHeader from "@/components/PageHeader";
-import ReportsDialog, { type ReportsDialogSession } from "@/components/modals/ReportsDialog";
 import ProductMasterMissingDialog from "@/components/modals/ProductMasterMissingDialog";
 import { matchProductMasterMissingError, matchBarcodeNotInSystemError, parseApiErrorMessage } from "@/lib/apiError";
 import { PlantBadge } from "@/components/PlantBadge";
+import { PlantRoute } from "@/components/PlantRoute";
 import { ProductPhoto } from "@/components/ProductPhoto";
 import { CircularProgress } from "@/components/ui/circular-progress";
 import { Button } from "@/components/ui/button";
@@ -25,6 +27,7 @@ import { HistoryStatus } from "@/components/HistoryStatus";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { DateInput } from "@/components/ui/date-input";
+import { SingleDateFilter } from "@/components/SingleDateFilter";
 import { Label } from "@/components/ui/label";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -42,7 +45,7 @@ import { SectionSkeleton } from "@/components/ui/loading-skeletons";
 
 // ─── Types (mirror server/routes/unloading.ts responses) ─────────────────────
 type SessionListItem = {
-  id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
+  id: number; plant: string; purchasePlant?: string | null; vehicleNumber: string; orderDate: string; csvFileName: string;
   rowCount: number; groupId: number; partIndex: number; scanStatus: "available" | "active" | "completed";
   createdAt: string; scanActivatedAt: string | null; scanCompletedAt: string | null;
   // Who completed the batch — a name, "System", or null (see server/routes/unloading.ts).
@@ -59,6 +62,8 @@ type SessionListItem = {
   canActivate: boolean;
 };
 type SessionItem = {
+  // The PRODUCT this line means - two products can share a barcode (65 g / 60 g); a scan is sent with it so it counts on this line.
+  productId?: number | null;
   id: number; barcode: string | null; itemName: string | null; sapCode: string | null; quantity: number;
   expected: number; scanned: number; remaining: number; itemsPerPallet: number; isComplete: boolean;
   // Product Master's Sr. No (products.new_sr) — what the item lists show instead of 1, 2, 3.
@@ -69,7 +74,7 @@ type SessionItem = {
   realPackSize?: number;
 };
 type SessionDetail = {
-  id: number; plant: string; vehicleNumber: string; orderDate: string; csvFileName: string;
+  id: number; plant: string; purchasePlant?: string | null; vehicleNumber: string; orderDate: string; csvFileName: string;
   groupId: number; partIndex: number; scanStatus: "available" | "active" | "completed"; scanCompletedAt: string | null;
 };
 type ScanEventRow = {
@@ -143,7 +148,7 @@ const TOTALS_ONE_ROW_MIN = 340;
 // Remembers the operator's STV pick across page navigations — same reasoning and key pattern as
 // Order Scan's OS_STV_STORAGE_KEY (client/src/pages/Scanning/Scan.tsx): this page unmounts on
 // navigation, which would otherwise clear the selection and re-trigger "Select an STV".
-const UNLOADING_STV_STORAGE_KEY = "km-finny.unloading.selectedStv";
+const UNLOADING_STV_STORAGE_KEY = "team-finny.unloading.selectedStv";
 const NO_STV = "__none__";
 
 // Kiosk rotation — same idea and CSS mechanics as Order Scan's own rotate view
@@ -248,7 +253,7 @@ export default function Unloading() {
   const allSessions = sessionsQuery.data?.sessions ?? [];
   const total = sessionsQuery.data?.total ?? 0;
 
-  // Same filter engine and UI as Overall Stock / Scan History / Scan Viewer: a "+ Filter" button,
+  // Same filter engine and UI as Stock Overview / Scan History / Scan Viewer: a "+ Filter" button,
   // a filter icon on each column header, and removable chips. Applied client-side over the page
   // already fetched — plant/vehicle/date/status tab still go to the server as before.
   // "Ready" vs "Locked (queued)" splits available batches the same way the row's own button does:
@@ -426,6 +431,7 @@ export default function Unloading() {
   // sidebar toggle — this floating button (same trick as the rotate button itself: fixed inside
   // the rotated container, so it turns with the content) reopens a path back to real navigation.
   const { setKioskRotateClass: setSidebarKioskRotateClass, setPortalRotation } = useSidebarContext();
+  const tabActiveRef = useActiveTabRef();
   // Keeps Layout's sidebar turning in sync with this page's own rotation, so opening it while
   // rotated doesn't pop it up unrotated on top of everything else. Cleared on unmount — leaving
   // a stale rotation class behind would wrongly rotate the sidebar on whatever page loads next.
@@ -572,6 +578,29 @@ export default function Unloading() {
   const itemScanSeqRef = useRef<{ seq: number; byId: Map<number, number> }>({ seq: 0, byId: new Map() });
   const scanItemRef = useRef<SessionItem | null>(null);
 
+  // CSV, Excel or PDF of the vehicle's items (what the filter and search leave), with SAP code, pallets beside the quantities and a Total row.
+  const exportUnloadItems = (fmt: "CSV" | "Excel" | "PDF") => {
+    const plt = (qty: number, ipp: number | null | undefined) => ((ipp ?? 0) > 0 ? qty / (ipp as number) : 0);
+    const f2 = (n: number) => n.toFixed(2);
+    const header = ["Sr", "Barcode", "Item Name", "SAP Code", "Expected", "Expected Pallets", "Received", "Received Pallets", "Extra", "Remaining"];
+    const list = filteredItems;
+    const body = list.map((it) => [
+      it.srNo ?? "", it.barcode ?? "", it.itemName ?? "", it.sapCode ?? "", it.expected, f2(plt(it.expected, it.itemsPerPallet)),
+      it.scanned, f2(plt(it.scanned, it.itemsPerPallet)), Math.max(0, it.scanned - it.expected), it.remaining,
+    ]);
+    const sum = (pick: (it: SessionItem) => number) => list.reduce((x, it) => x + pick(it), 0);
+    const total = [
+      "TOTAL", "", "", "", sum((it) => it.expected), f2(sum((it) => plt(it.expected, it.itemsPerPallet))),
+      sum((it) => it.scanned), f2(sum((it) => plt(it.scanned, it.itemsPerPallet))), sum((it) => Math.max(0, it.scanned - it.expected)), sum((it) => it.remaining), 
+    ];
+    const vehicle = detail?.session?.vehicleNumber ?? "vehicle";
+    const base = `unloading-${vehicle}-${detail?.session?.orderDate ?? ""}-items`;
+    const rows = [header, ...body, total];
+    if (fmt === "CSV") downloadCsv(`${base}.csv`, rows);
+    else if (fmt === "Excel") downloadExcel(`${base}.xlsx`, rows, "Unloading Items");
+    else downloadPdf(`${base}.pdf`, `Unloading Items — ${vehicle}`, rows, [detail?.session?.plant, detail?.session?.orderDate].filter(Boolean).join(" · "));
+  };
+
   const filteredItems = (detail?.items ?? [])
     .filter((item) => {
       if (itemStatusFilter) {
@@ -679,7 +708,7 @@ export default function Unloading() {
   };
 
   const scanMutation = useMutation({
-    mutationFn: async ({ barcode, qty, stv, sapCode, productId }: { barcode: string; qty: number; stv?: string | null; sapCode?: string | null; productId?: number | null }) => {
+    mutationFn: async ({ barcode, qty, stv, productId }: { barcode: string; qty: number; stv?: string | null; productId?: number | null }) => {
       // Tries live first; falls back to the offline queue only on a genuine network failure —
       // see client/src/lib/offlineQueue.ts. A queued scan has no server response yet (the
       // regular/extra split is decided server-side, under a lock, so it can't be guessed
@@ -689,7 +718,7 @@ export default function Unloading() {
       // activeSessionQuery's refetchInterval above) corrects it once the real data is back.
       const result = await scanOrQueue(
         `/api/unloading/sessions/${activeSessionId}/scan`,
-        { barcode, qty, stv: stv ?? null, sapCode: sapCode ?? null, ...(productId != null ? { productId } : {}) },
+        { barcode, qty, stv: stv ?? null, productId: productId ?? null },
         `${barcode} × ${qty} — Unloading session #${activeSessionId}`,
       );
       if (result.queued) return { queued: true as const };
@@ -697,7 +726,7 @@ export default function Unloading() {
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Scan failed");
       return { queued: false as const, data: await res.json() };
     },
-    onMutate: ({ barcode, qty }) => {
+    onMutate: ({ barcode, qty, productId }) => {
       const item = scanItemRef.current;
       if (item) {
         const s = itemScanSeqRef.current;
@@ -706,9 +735,7 @@ export default function Unloading() {
       }
       const key = ["/api/unloading/sessions", activeSessionId] as const;
       const prevData = queryClient.getQueryData<{ session: SessionDetail; items: SessionItem[]; allComplete: boolean; offBatchExtraQty?: number; offBatchExtraPallets?: number }>(key);
-      // The picked row (a barcode listed under two SAP codes is two rows); otherwise the first row with this barcode, as before.
-      const idxById = item ? (prevData?.items.findIndex((i) => i.id === item.id) ?? -1) : -1;
-      const idx = idxById !== -1 ? idxById : (prevData?.items.findIndex((i) => normalize(i.barcode) === normalize(barcode)) ?? -1);
+      const idx = prevData?.items.findIndex((i) => normalize(i.barcode) === normalize(barcode) && (productId == null || i.productId == null || i.productId === productId)) ?? -1;
       if (!prevData || idx === -1) return { prevData };
       const target = prevData.items[idx];
       const scanned = target.scanned + qty;
@@ -771,10 +798,6 @@ export default function Unloading() {
   });
   const [productMasterMissingMessage, setProductMasterMissingMessage] = useState<string | null>(null);
   const [barcodeNotInSystemMessage, setBarcodeNotInSystemMessage] = useState<string | null>(null);
-  // A scanned barcode that two rows of this batch share under different SAP codes — the operator picks the item ("Which item?").
-  const [chooseItem, setChooseItem] = useState<{ barcode: string; options: Array<{ key: string; item: SessionItem | null; product: Product | null; name: string; sap: string }> } | null>(null);
-  // Product Master products per barcode, asked once per barcode (GET /api/unloading/barcode-products).
-  const barcodeProductsRef = useRef<Map<string, Array<Product & { sapForState: string }>>>(new Map());
 
   // ─── Manual/Camera barcode input, same-barcode cooldown, auto-scan popup — mirrors
   // client/src/pages/Loading/LoadOperation.tsx's item-scanning UX exactly. ─────────────────────
@@ -819,7 +842,11 @@ export default function Unloading() {
   // all (pending.item null) — carries name/SAP/itemsPerPallet so the dialog can still show a
   // real identity and default the qty to a full pallet, same as Order Scan's own
   // inventoryProduct for an unmatched scan, instead of a bare barcode defaulting to 1.
-  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null; sapCode?: string | null } | null>(null);
+  const [pending, setPending] = useState<{ barcode: string; item: SessionItem | null; product: Product | null } | null>(null);
+  // A barcode on more than one item of this vehicle (65 g / 60 g): the person picks which one this scan is for.
+  const [multiMatch, setMultiMatch] = useState<{ barcode: string; matches: SessionItem[] } | null>(null);
+  // A scan terminator (Enter) can still be arriving when the picker opens and would tap its first button: taps in the first moments are ignored.
+  const multiMatchAtRef = useRef(0);
   const [dialogQty, setDialogQty] = useState(1);
   const [dialogPalletsInput, setDialogPalletsInput] = useState("");
   // Tracks WHICH resolved name last failed to load, not a plain boolean — a boolean reset by a
@@ -861,13 +888,13 @@ export default function Unloading() {
     if (!((item.realPackSize ?? 0) > 0)) return 0;
     return item.remaining > 0 && item.remaining < ipp ? item.remaining : ipp;
   }
-  function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null, sapCode: string | null = null) {
+  function openConfirmDialog(barcode: string, item: SessionItem | null, product: Product | null) {
     const qty = defaultDialogQty(item, product);
     const ipp = item?.itemsPerPallet || (product ? extraProductPalletSize(product) : 0);
     const packSizeMissing = !!item && !((item.realPackSize ?? 0) > 0);
     setDialogQty(qty);
     setDialogPalletsInput(ipp > 0 && !packSizeMissing ? (qty / ipp).toFixed(2) : "");
-    setPending({ barcode, item, product, sapCode });
+    setPending({ barcode, item, product });
   }
 
   // A 404 here means this barcode genuinely isn't a real product at all — anything else
@@ -889,9 +916,9 @@ export default function Unloading() {
     }
   }
 
-  async function handleItemBarcode(rawBarcode: string) {
+  async function handleItemBarcode(rawBarcode: string, forcedItem?: SessionItem) {
     const barcode = rawBarcode.trim();
-    if (!barcode || !detail || locked || scanLockRef.current || pending) return;
+    if (!barcode || !detail || locked || scanLockRef.current || pending || (multiMatch && !forcedItem)) return;
 
     if (stvs.length > 0 && !selectedStv) {
       toast({ title: "Select a Dispatch Directory before scanning", description: "Pick one from the Dispatch Directory selector above, then continue scanning.", variant: "destructive" });
@@ -903,47 +930,18 @@ export default function Unloading() {
     if (last && normalize(last.barcode) === nb && Date.now() - last.at < SAME_BARCODE_COOLDOWN_MS) return;
     lastScanRef.current = { barcode, at: Date.now() };
 
-    // SAME BARCODE, DIFFERENT PRODUCT = DIFFERENT ITEMS (e.g. the 35 g and 37 g salted peanuts). The barcode alone cannot say which one this
-    // scan is for, so the operator is ALWAYS asked ("Which item?") — whether the batch lists both, lists only one of them, or neither — and
-    // nothing is remembered between scans.
-    const sameBarcode = detail.items.filter((i) => normalize(i.barcode) === nb);
-    const item: SessionItem | null = sameBarcode[0] ?? null;
-    if (sameBarcode.length > 1 && new Set(sameBarcode.map((i) => normalize(i.sapCode))).size > 1) {
-      lastScanRef.current = null; // the scan is not done yet — the same barcode must be scannable again straight after the choice
-      setItemBarcode("");
-      setChooseItem({ barcode, options: sameBarcode.map((i) => ({ key: `row${i.id}`, item: i, product: null, name: i.itemName ?? barcode, sap: i.sapCode ?? "" })) });
-      return;
+    const matches = detail.items.filter((i) => normalize(i.barcode) === nb);
+    // Two or more items share this barcode: the picker asks which one (unless only one still has room - then it is that one).
+    if (!forcedItem && matches.length > 1) {
+      const open = matches.filter((m) => m.remaining > 0);
+      if (open.length !== 1) {
+        lastScanRef.current = null;
+        setMultiMatch({ barcode, matches });
+        multiMatchAtRef.current = Date.now();
+        return;
+      }
     }
-    // The batch lists the barcode once (or not at all): is it a barcode two Product Master products share?
-    let products = barcodeProductsRef.current.get(nb);
-    if (!products) {
-      try {
-        const plantQ = detail.session.plant ? `&plant=${encodeURIComponent(detail.session.plant)}` : "";
-        const res = await apiRequest("GET", `/api/unloading/barcode-products?barcode=${encodeURIComponent(barcode)}${plantQ}`);
-        products = ((await res.json()) as { products: Array<Product & { sapForState: string }> }).products ?? [];
-        barcodeProductsRef.current.set(nb, products);
-      } catch { products = []; } // a lookup hiccup must never block a scan — fall through to the normal flow
-    }
-    if (products.length > 1) {
-      lastScanRef.current = null;
-      setItemBarcode("");
-      setChooseItem({
-        barcode,
-        options: products.map((p) => {
-          // the batch row that is this product, when there is one (its SAP is the product's SAP for the plant's state)
-          const row = sameBarcode.find((i) => normalize(i.sapCode) === normalize(p.sapForState)) ?? (sameBarcode.length === 1 && !p.sapForState ? sameBarcode[0] : null);
-          return { key: `p${p.id}`, item: row, product: p, name: row?.itemName ?? p.name, sap: row?.sapCode ?? p.sapForState ?? "" };
-        }),
-      });
-      return;
-    }
-    await proceedWithItem(barcode, item);
-  }
-
-  // Everything after the row is known (picked, or the only one): lock, look the product up when the barcode is not on the batch, then
-  // auto-scan a full pallet or open the quantity dialog.
-  async function proceedWithItem(barcode: string, item: SessionItem | null, namedProduct?: Product | null) {
-    if (scanLockRef.current || pending) return;
+    const item = forcedItem ?? (matches.length > 1 ? matches.find((m) => m.remaining > 0) ?? matches[0] : (matches[0] ?? null));
     scanLockRef.current = true;
     scanItemRef.current = item;
 
@@ -953,9 +951,7 @@ export default function Unloading() {
     // identity and default the qty to a full pallet — same as Order Scan's own inventoryProduct
     // fallback for an unmatched scan — instead of a bare barcode defaulting to 1.
     let resolvedProduct: Product | null = null;
-    if (!item && namedProduct) {
-      resolvedProduct = namedProduct;
-    } else if (!item) {
+    if (!item) {
       // If this lookup throws (a network blip), the lock set above must still be released —
       // otherwise every later scan is silently ignored until the page is reloaded.
       let resolved: Awaited<ReturnType<typeof resolveProduct>>;
@@ -983,7 +979,7 @@ export default function Unloading() {
     const canAutoScan = autoScanEnabled && !!item && (item.realPackSize ?? 0) > 0
       && item.expected > 0 && ipp >= 1 && item.remaining >= ipp;
     if (canAutoScan) {
-      scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null, sapCode: item?.sapCode ?? null }, {
+      scanMutation.mutate({ barcode, qty: ipp, stv: selectedStv || null, productId: item?.productId ?? null }, {
         // Queued (offline) has no event data to show — the mutation's own onSuccess already
         // toasts "Scan saved offline" in that case, so this just skips the feedback popup.
         onSuccess: (result) => {
@@ -997,7 +993,7 @@ export default function Unloading() {
     }
 
     scanLockRef.current = false;
-    openConfirmDialog(barcode, item, resolvedProduct, namedProduct ? ((namedProduct as any).sapForState ?? null) : null);
+    openConfirmDialog(barcode, item, resolvedProduct);
     setItemBarcode("");
   }
 
@@ -1063,6 +1059,8 @@ export default function Unloading() {
       buffer = "";
     };
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Hidden tabs stay mounted — leave scans to the tab that is on screen.
+      if (!tabActiveRef.current) return;
       const target = e.target as HTMLElement | null;
       if (target === barcodeRef.current) return;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
@@ -1118,13 +1116,6 @@ export default function Unloading() {
     onError: (error: any) => toast({ title: "Failed", description: parseApiErrorMessage(error), variant: "destructive" }),
   });
 
-  // ─── Reports — same dialog Order Import uses (Summary/Activity/Hourly, per-part + whole-group),
-  // pointed at Unloading's own report endpoints via basePath="unloading". ───────────────────────
-  const [reportsSession, setReportsSession] = useState<ReportsDialogSession | null>(null);
-  const openReports = (s: SessionListItem) => {
-    setReportsSession({ id: s.id, csvFileName: s.csvFileName, plant: s.plant, receivingSessionId: s.groupId, partIndex: s.partIndex, orderDate: s.orderDate });
-  };
-
   // ─── Delete (replace vs discard) ──────────────────────────────────────────────────────────
   const [deleteTarget, setDeleteTarget] = useState<{ id: number; vehicleNumber: string; orderDate: string } | null>(null);
   const [deleteMode, setDeleteMode] = useState<"replace" | "discard">("replace");
@@ -1160,7 +1151,7 @@ export default function Unloading() {
   };
 
   // Item table columns — DataTable gives column resizing, its own search box, and expandable
-  // rows for free (client/src/components/ui/data-table), same component Order Scan/Overall Stock
+  // rows for free (client/src/components/ui/data-table), same component Order Scan/Stock Overview
   // use for their own item tables.
   // Widths kept compact (total ~660px, close to Order Scan's own kiosk table's 640px) so the
   // rotated/kiosk view never needs horizontal scrolling — DataTable floors the table at the sum
@@ -1199,11 +1190,17 @@ export default function Unloading() {
         <div>
           <p className="font-medium text-gray-900 whitespace-normal break-words leading-tight text-xs">{row.itemName ?? "—"}</p>
           <p className="text-gray-400 font-mono whitespace-normal break-words leading-tight text-[10px]">
-            {row.barcode ?? "—"}{row.sapCode && ` · SAP ${row.sapCode}`}
+            {row.barcode ?? "—"}
           </p>
           {(row.itemsPerPallet ?? 0) > 0 && <p className="text-gray-500 font-semibold leading-tight text-[10px]">{row.itemsPerPallet} per pallet</p>}
         </div>
       ),
+    },
+    {
+      id: "sapCode", header: "SAP Code", align: "center", width: 96, minWidth: 70, sortable: true, totalable: false,
+      accessor: (row) => row.sapCode ?? "",
+      cellClassName: "font-mono text-xs text-gray-600",
+      render: (row) => row.sapCode || <span className="text-gray-300">—</span>,
     },
     {
       id: "exp", header: "Exp", align: "right", width: 80, minWidth: 60, sortable: true,
@@ -1281,7 +1278,10 @@ export default function Unloading() {
   };
 
   function renderItemHistoryPanel(row: SessionItem) {
-    const rowEvents = (itemHistoryQuery.data?.events ?? []).filter((ev) => normalize(ev.barcode) === normalize(row.barcode));
+    // Two products can share a barcode (35GM / 37GM salted peanuts): an entry belongs to the line when the barcode AND the SAP code match
+    // (an entry with no stored SAP code falls back to the barcode alone).
+    const rowEvents = (itemHistoryQuery.data?.events ?? []).filter((ev) =>
+      normalize(ev.barcode) === normalize(row.barcode) && (!ev.sapCode || !row.sapCode || normalize(ev.sapCode) === normalize(row.sapCode)));
     return (
       <div className="bg-gray-50 px-3 py-3 sm:px-4">
         {itemHistoryQuery.isLoading ? (
@@ -1374,7 +1374,7 @@ export default function Unloading() {
     <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs">
       <span className="font-medium text-gray-600">{scanSession.orderDate}</span>
       <span className="text-gray-300">&middot;</span>
-      <PlantBadge plant={scanSession.plant} className="px-2 py-0 text-[11px]" />
+      <PlantRoute plant={scanSession.plant} purchasePlant={scanSession.purchasePlant} className="px-2 py-0 text-[11px]" />
     </div>
   ) : null;
 
@@ -1560,57 +1560,13 @@ export default function Unloading() {
                   </button>
                 )}
               </div>
-              <DateInput
-                value={sessionDateFilter}
-                onChange={(v) => { setSessionDateFilter(v); setOffset(0); }}
-                clearable={false}
-                className="h-8 text-sm"
+              {/* Same calendar filter Load Operations uses (SingleDateFilter); this page keeps its
+                  date as a plain local "YYYY-MM-DD" string, converted at the boundary. */}
+              <SingleDateFilter
+                pageKey="unloading-page"
+                selectedDate={sessionDateFilter ? new Date(`${sessionDateFilter}T00:00:00`) : null}
+                onDateChange={(d: Date | null) => { setSessionDateFilter(d ? getLocalISODate(d) : ""); setOffset(0); }}
               />
-              {/* Quick dates — one small button that opens a list (Today / Tomorrow / Yesterday), the
-                  same way the Loading page's date filter does. It names the day when the picked
-                  date is one of the three, so it stays one compact control in the row. */}
-              {(() => {
-                const dayValue = (offset: number) => { const t = new Date(); t.setDate(t.getDate() + offset); return getLocalISODate(t); };
-                const quick = [
-                  { label: "Today", value: dayValue(0) },
-                  { label: "Tomorrow", value: dayValue(1) },
-                  { label: "Yesterday", value: dayValue(-1) },
-                ];
-                const current = quick.find((q) => q.value === sessionDateFilter);
-                return (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className={`h-8 gap-1 px-2.5 text-xs font-semibold ${current ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : "text-gray-600"}`}
-                      >
-                        {current ? current.label : "Quick date"}
-                        <ChevronDown className="h-3.5 w-3.5" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-40">
-                      {quick.map((q) => (
-                        <DropdownMenuItem
-                          key={q.label}
-                          onClick={() => { setSessionDateFilter(q.value); setOffset(0); }}
-                          className={sessionDateFilter === q.value ? "font-semibold text-[#001d6e]" : ""}
-                        >
-                          {q.label}
-                        </DropdownMenuItem>
-                      ))}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                );
-              })()}
-              {sessionDateFilter && (
-                <Button
-                  size="sm" variant="ghost" className="h-8 w-8 p-0 text-gray-400 hover:text-red-500"
-                  onClick={() => { setSessionDateFilter(""); setOffset(0); }}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </Button>
-              )}
 
               <AddColumnFilterButton
                 columns={sessionFilterColumns}
@@ -1696,7 +1652,7 @@ export default function Unloading() {
                     >
                       <span className="text-sm font-bold text-[#001d6e]">{s.vehicleNumber}</span>
                       {s.rtoNumber && <span className="text-xs text-gray-500">RTO: {s.rtoNumber}</span>}
-                      <PlantBadge plant={s.plant} />
+                      <PlantRoute plant={s.plant} purchasePlant={s.purchasePlant} />
                       <span className="text-xs text-gray-500">{s.orderDate}</span>
                       {s.partsCount > 1 && (
                         <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[11px] font-semibold text-indigo-700">Batch {s.partIndex}/{s.partsCount}</span>
@@ -1712,13 +1668,6 @@ export default function Unloading() {
                         <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => openSession(s)}>
                           View
                         </Button>
-                        <button
-                          className="rounded p-1 text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
-                          title="Reports"
-                          onClick={() => openReports(s)}
-                        >
-                          <FileBarChart className="h-3.5 w-3.5" />
-                        </button>
                         {canWrite && (
                           <Button
                             size="sm" variant="outline" className="h-7 text-xs"
@@ -1789,7 +1738,7 @@ export default function Unloading() {
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-1.5">
                             <span className="text-base font-bold leading-none text-gray-900">#{s.id}</span>
-                            <PlantBadge plant={s.plant} />
+                            <PlantRoute plant={s.plant} purchasePlant={s.purchasePlant} />
                             {s.partsCount > 1 && (
                               <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
                                 Batch {s.partIndex}/{s.partsCount}
@@ -1809,15 +1758,6 @@ export default function Unloading() {
                         >
                           {String(s.scannedQty).padStart(2, "0")}
                         </span>
-                        <button
-                          type="button"
-                          className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-blue-50 text-[#001d6e] hover:bg-blue-100"
-                          title="Reports"
-                          aria-label={`View reports for ${s.vehicleNumber}`}
-                          onClick={(e) => { e.stopPropagation(); openReports(s); }}
-                        >
-                          <FileBarChart className="h-3.5 w-3.5" />
-                        </button>
                         {canWrite && (
                           <button
                             type="button"
@@ -1883,12 +1823,12 @@ export default function Unloading() {
                       <th className={`${compactVehicleTable ? "w-[6%]" : "w-[5%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>Sr. No</th>
                       <th className={`${compactVehicleTable ? "w-[20%]" : "w-[15%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("vehicle", "Vehicle")}</th>
                       <th className={`${compactVehicleTable ? "w-[14%]" : "w-[11%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("orderDate", "Order Date")}</th>
-                      <th className={`${compactVehicleTable ? "w-[13%]" : "w-[10%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("plant", "Plant")}</th>
+                      <th className={`${compactVehicleTable ? "w-[16%]" : "w-[13%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("plant", "Plant")}</th>
                       <th className={`${compactVehicleTable ? "w-[14%]" : "w-[12%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("status", "Status")}</th>
                       <th className={`${compactVehicleTable ? "w-[15%]" : "w-[10%]"} border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white`}>{sessionColumnHeader("progress", "Progress")}</th>
                       {!compactVehicleTable && <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Time from when scanning started to when the batch was marked complete">Time Taken</th>}
                       {!compactVehicleTable && <th className="w-[10%] border-r border-[#1a3a9c] px-1.5 py-2 leading-tight break-words text-left text-[11px] font-semibold tracking-wide uppercase text-white" title="Who marked this batch complete — the Complete button, or the scan that finished it">{sessionColumnHeader("completedBy", "Completed By")}</th>}
-                      <th className={`${compactVehicleTable ? "w-[18%]" : "w-[17%]"} px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white`}>Action</th>
+                      <th className={`${compactVehicleTable ? "w-[15%]" : "w-[14%]"} px-1.5 py-2 leading-tight break-words text-right text-[11px] font-semibold tracking-wide uppercase text-white`}>Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1906,7 +1846,7 @@ export default function Unloading() {
                               {s.rtoNumber && <span className="block text-[11px] font-normal text-gray-500">RTO: {s.rtoNumber}</span>}
                             </td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700">{s.orderDate}</td>
-                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantBadge plant={s.plant} /></td>
+                            <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words"><PlantRoute plant={s.plant} purchasePlant={s.purchasePlant} /></td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words">{statusBadge(s.scanStatus, s.canActivate)}</td>
                             <td className="border-r border-b border-gray-200 px-1.5 py-2 break-words text-gray-700 tabular-nums">
                               {s.scannedQty} / {s.expectedQty}
@@ -1934,13 +1874,6 @@ export default function Unloading() {
                                         ? (compactVehicleTable ? "Start" : "Start Scan")
                                         : "Locked"}
                                 </Button>
-                                <button
-                                  className="rounded p-1 text-gray-400 hover:bg-[#001d6e]/10 hover:text-[#001d6e]"
-                                  title="Reports"
-                                  onClick={(e) => { e.stopPropagation(); openReports(s); }}
-                                >
-                                  <FileBarChart className="h-3.5 w-3.5" />
-                                </button>
                                 {canWrite && (
                                   <button
                                     className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
@@ -2273,6 +2206,23 @@ export default function Unloading() {
                     >
                       <Search className="h-3.5 w-3.5" />
                     </button>
+                    {filteredItems.length > 0 && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            title="Export the items"
+                            className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-gray-200 bg-white px-2 text-xs font-medium text-gray-600 hover:bg-gray-50"
+                          >
+                            <Download className="h-3.5 w-3.5" /> Export <ChevronDown className="h-3 w-3 opacity-70" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-32">
+                          {(["CSV", "Excel", "PDF"] as const).map((f) => (
+                            <DropdownMenuItem key={f} onSelect={() => exportUnloadItems(f)}>{f}</DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                     {itemSearchOpen && (
                       <div className="relative w-full sm:w-64">
                         <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
@@ -2421,6 +2371,40 @@ export default function Unloading() {
       </div>
 
       {/* Confirm dialog — anything not a clean full-pallet auto-scan. */}
+      <Dialog open={!!multiMatch} onOpenChange={(open) => { if (!open) { setMultiMatch(null); scanLockRef.current = false; } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Which item?</DialogTitle>
+            <DialogDescription>
+              Barcode <span className="font-mono font-semibold text-gray-700">{multiMatch?.barcode}</span> is on {multiMatch?.matches.length} items of this vehicle. Tap the one you are unloading.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {multiMatch?.matches.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-white p-3 text-left hover:border-[#001d6e] hover:bg-blue-50/40"
+                onClick={() => {
+                  if (Date.now() - multiMatchAtRef.current < 450) return;
+                  const chosen = m;
+                  const barcode = multiMatch!.barcode;
+                  setMultiMatch(null);
+                  lastScanRef.current = null;
+                  void handleItemBarcode(barcode, chosen);
+                }}
+              >
+                <span>
+                  <span className="block font-medium text-gray-900">{m.itemName ?? m.barcode}</span>
+                  <span className="block text-xs text-gray-500">{m.sapCode ? `SAP ${m.sapCode}` : "No SAP for this plant"}</span>
+                </span>
+                <span className="text-sm tabular-nums text-gray-600">{m.scanned} / {m.expected}{m.remaining > 0 ? ` · ${m.remaining} left` : " · done"}</span>
+              </button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!pending} onOpenChange={(open) => { if (!open) setPending(null); }}>
         <DialogContent
           className={`overflow-y-auto rounded-2xl p-0 ${
@@ -2564,7 +2548,7 @@ export default function Unloading() {
                       if (e.key === "Enter") {
                         e.preventDefault();
                         if (pending && dialogQty > 0 && !scanMutation.isPending) {
-                          scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? pending.sapCode ?? null, productId: pending.item ? null : (pending.product?.id ?? null) }, { onSuccess: () => setPending(null) });
+                          scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, productId: pending.item?.productId ?? pending.product?.id ?? null }, { onSuccess: () => setPending(null) });
                         }
                       }
                     }}
@@ -2620,7 +2604,7 @@ export default function Unloading() {
                         if (e.key === "Enter") {
                           e.preventDefault();
                           if (pending && dialogQty > 0 && !scanMutation.isPending) {
-                            scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? pending.sapCode ?? null, productId: pending.item ? null : (pending.product?.id ?? null) }, { onSuccess: () => setPending(null) });
+                            scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, productId: pending.item?.productId ?? pending.product?.id ?? null }, { onSuccess: () => setPending(null) });
                           }
                         }
                       }}
@@ -2653,7 +2637,7 @@ export default function Unloading() {
               disabled={dialogQty <= 0 || scanMutation.isPending}
               onClick={() => {
                 if (!pending) return;
-                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, sapCode: pending.item?.sapCode ?? pending.sapCode ?? null, productId: pending.item ? null : (pending.product?.id ?? null) }, { onSuccess: () => setPending(null) });
+                scanMutation.mutate({ barcode: pending.barcode, qty: dialogQty, stv: selectedStv || null, productId: pending.item?.productId ?? pending.product?.id ?? null }, { onSuccess: () => setPending(null) });
               }}
             >
               {scanMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
@@ -2702,58 +2686,8 @@ export default function Unloading() {
       {/* Import CSV moved to the Order Import page's own "Unloading" mode
           (client/src/pages/OrderImport.tsx) — see that page's plan comment for why. */}
 
-      <ReportsDialog session={reportsSession} onClose={() => setReportsSession(null)} basePath="unloading" />
       <ProductMasterMissingDialog message={productMasterMissingMessage} onClose={() => setProductMasterMissingMessage(null)} />
       <ProductMasterMissingDialog message={barcodeNotInSystemMessage} onClose={() => setBarcodeNotInSystemMessage(null)} title="Barcode Not Found" />
-
-      {/* Which item? — one barcode, more than one SAP code on this vehicle's list. */}
-      <Dialog open={!!chooseItem} onOpenChange={(o) => { if (!o) setChooseItem(null); }}>
-        <DialogContent className="w-[calc(100%-2rem)] max-w-sm" onOpenAutoFocus={(e) => e.preventDefault()}>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-[#001d6e]">
-              <AlertTriangle className="h-5 w-5 text-amber-500" />
-              Which item?
-            </DialogTitle>
-            <DialogDescription className="text-left pt-1">
-              Barcode <span className="font-mono font-semibold text-gray-700">{chooseItem?.barcode}</span> belongs to more than one item. Tap the item you are scanning.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2 py-1 max-h-72 overflow-y-auto pr-1">
-            {chooseItem?.options.map((opt) => (
-              <button
-                key={opt.key}
-                type="button"
-                onClick={() => {
-                  const picked = opt;
-                  const bc = chooseItem!.barcode;
-                  setChooseItem(null);
-                  lastScanRef.current = { barcode: bc, at: Date.now() };
-                  void proceedWithItem(bc, picked.item, picked.product);
-                }}
-                className={`w-full border-2 px-4 py-3 text-left transition-colors hover:border-[#001d6e] hover:bg-[#001d6e]/5 ${!opt.item ? "border-sky-200 bg-sky-50" : opt.item.remaining > 0 ? "border-gray-200 bg-white" : "border-amber-300 bg-amber-50"}`}
-              >
-                <p className="font-semibold text-gray-900 text-sm leading-tight">{opt.name || <span className="italic text-gray-400">Unknown</span>}</p>
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1 text-[11px] text-gray-400">
-                  <span>SAP: <span className="font-mono font-medium text-gray-600">{opt.sap || "—"}</span></span>
-                  {opt.item ? (
-                    <>
-                      <span>Expected: <span className="font-medium text-gray-600">{opt.item.expected}</span></span>
-                      <span>Scanned: <span className="font-medium text-emerald-600">{opt.item.scanned}</span></span>
-                      <span>Left: <span className="font-medium text-gray-600">{opt.item.remaining}</span></span>
-                      {opt.item.remaining <= 0 && <span className="font-semibold text-amber-600">Complete</span>}
-                    </>
-                  ) : (
-                    <span className="font-semibold text-sky-700">Not on this vehicle's list — logs as Extra</span>
-                  )}
-                </div>
-              </button>
-            ))}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setChooseItem(null)}>Cancel</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* ── Delete confirmation — replace (soft, carries forward on re-upload) vs discard
           (reverses stock, voids history, self-resolves) ─────────────────────────────────── */}

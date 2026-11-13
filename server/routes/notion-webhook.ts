@@ -8,6 +8,7 @@ import { applyVehiclePageFromNotionWebhook } from '../services/notionVehicleSync
 import { applyProductPageFromNotionWebhook } from '../services/notionInventorySync';
 import { isNotionStatusGuarded, isLaterStageStatus } from '../services/notionOrderStatusSync';
 import { dispatchUnlockPatch } from '../services/autoDispatch';
+import { syncHomeSlides, homeSlidesDatabaseId } from '../services/homeSlidesSync';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Notion webhook — Notion calls this the moment a page changes, so the app follows Notion directly
@@ -16,6 +17,7 @@ import { dispatchUnlockPatch } from '../services/autoDispatch';
 //   ORDER database          → only proforma_slips.notion_status ("Finny Status :") is updated
 //   Vehicle Master database → the vehicle_info row is updated / created (same mapping as the sync)
 //   Product Master database → the products row is updated / created (same mapping as the sync)
+//   Attachment database     → home slides (slider ads + welcome photo) re-synced to the bucket
 //
 // How a request is handled:
 //   1. Verification (once, when the subscription is created in Notion): Notion posts
@@ -40,9 +42,9 @@ const notion = new Client({
 const normalizeId = (id: string | null | undefined) => String(id ?? '').replace(/-/g, '').trim().toLowerCase();
 
 const DATABASES = {
-  order: normalizeId(process.env.ORDER_DATABASE_ID),
+  order: normalizeId(process.env.NOTION_ORDER_DATABASE_ID),
   vehicle: normalizeId(process.env.NOTION_VEHICLE_DATABASE_ID),
-  product: normalizeId(process.env.NOTION_INVENTORY_DATABASE_ID),
+  product: normalizeId(process.env.NOTION_PRODUCTS_MASTER_DATABASE_ID),
 };
 
 // Page events worth reading the page back for. Deletions are only logged: removing a vehicle or a
@@ -107,6 +109,10 @@ async function processPage(pageId: string, eventType: string, attempt = 0): Prom
   }
 
   const parentId = normalizeId(page?.parent?.database_id);
+  if (parentId && parentId === homeSlidesDatabaseId()) {
+    scheduleHomeSlides(eventType, pageId);
+    return;
+  }
   const database =
     parentId && parentId === DATABASES.order ? 'order'
     : parentId && parentId === DATABASES.vehicle ? 'vehicle'
@@ -140,6 +146,16 @@ async function processPage(pageId: string, eventType: string, attempt = 0): Prom
   }
 }
 
+// A burst of edits in the attachment database becomes one home-slides sync.
+let homeSlidesTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleHomeSlides(eventType: string, pageId: string) {
+  if (homeSlidesTimer) clearTimeout(homeSlidesTimer);
+  homeSlidesTimer = setTimeout(async () => {
+    homeSlidesTimer = null;
+    logActivity({ type: eventType, pageId, database: 'attachment', result: await syncHomeSlides() });
+  }, COALESCE_MS);
+}
+
 const pendingPages = new Map<string, { timer: ReturnType<typeof setTimeout>; eventType: string }>();
 function schedulePage(pageId: string, eventType: string) {
   const existing = pendingPages.get(pageId);
@@ -156,7 +172,7 @@ router.post('/webhooks/notion', (req: Request, res: Response) => {
   const body = req.body ?? {};
 
   // 1. One-time verification when the subscription is created.
-  if (typeof body.verification_token === 'string' && !req.headers['x-notion-signature']) {
+  if (typeof body.verification_token === 'string') {
     lastVerificationAt = new Date().toISOString();
     console.log('\n[Notion webhook] ================================================================');
     console.log('[Notion webhook] Verification token received. Paste it into Notion (Webhooks → Verify)');
@@ -188,6 +204,7 @@ router.post('/webhooks/notion', (req: Request, res: Response) => {
     return;
   }
   if (type === 'page.deleted') {
+    scheduleHomeSlides(type, pageId); // a trashed ad / welcome row must disappear from the app
     logActivity({ type, pageId, result: 'ignored', detail: 'page moved to trash in Notion — nothing is deleted in the app' });
     return;
   }

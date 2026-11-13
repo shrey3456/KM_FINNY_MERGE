@@ -143,6 +143,8 @@ interface DataTableProps<TData> {
 
   sortMode?: "none" | "client" | "external";
   sortState?: DataTableSortState | null;
+  /** sortMode="client" only: the sort the table starts with (a page that remembers its sort passes the saved one here). */
+  defaultSort?: DataTableSortState | null;
   onSortingChange?: (state: DataTableSortState | null) => void;
   onSortColumnClick?: (columnId: string) => void;
 
@@ -254,6 +256,7 @@ export function DataTable<TData>({
   searchableColumnIds,
   sortMode = "none",
   sortState,
+  defaultSort,
   onSortingChange,
   onSortColumnClick,
   paginationMode = "none",
@@ -296,7 +299,7 @@ export function DataTable<TData>({
   containerClassName,
 }: DataTableProps<TData>) {
   const [internalSearch, setInternalSearch] = useState("");
-  const [internalSort, setInternalSort] = useState<DataTableSortState | null>(null);
+  const [internalSort, setInternalSort] = useState<DataTableSortState | null>(defaultSort ?? null);
   const [internalPageIndex, setInternalPageIndex] = useState(0);
   const [internalPageSize, setInternalPageSize] = useState(defaultPageSize);
   const [internalSelectedIds, setInternalSelectedIds] = useState<string[]>([]);
@@ -430,8 +433,8 @@ export function DataTable<TData>({
   if (sortMode === "client" && activeSort) {
     const col = columns.find((c) => c.id === activeSort.columnId);
     sortedRows = [...processed].sort((a, b) => {
-      const va = col ? getCellValue(a.row, col) : undefined;
-      const vb = col ? getCellValue(b.row, col) : undefined;
+      const va = col ? (col.sortAccessor ? col.sortAccessor(a.row) : getCellValue(a.row, col)) : undefined;
+      const vb = col ? (col.sortAccessor ? col.sortAccessor(b.row) : getCellValue(b.row, col)) : undefined;
       if (va == null && vb == null) return 0;
       if (va == null) return 1;
       if (vb == null) return -1;

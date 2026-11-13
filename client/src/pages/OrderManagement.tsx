@@ -137,7 +137,7 @@ export default function OrderManagement() {
 
 
   return (
-    <main className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8">
+    <main className="min-h-screen bg-white px-2 py-4 sm:py-6">
       {/* CSV Delete Confirmation Dialog */}
       <Dialog open={!!fileToDelete} onOpenChange={(open) => !open && !deleteCsvMutation.isPending && setFileToDelete(null)}>
         <DialogContent>
@@ -163,11 +163,11 @@ export default function OrderManagement() {
         </DialogContent>
       </Dialog>
 
-      <div className="mx-auto w-full max-w-[1800px] space-y-6">
+      <div className="w-full space-y-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-md bg-[#001d6e] text-white">
-              <ClipboardList className="h-6 w-6" />
+            <div className="flex h-11 w-11 items-center justify-center text-[#001d6e]">
+              <ClipboardList className="h-8 w-8" />
             </div>
             <div>
               <h1 className="text-2xl font-semibold text-gray-950">Order Management</h1>

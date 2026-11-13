@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>KM Finny — Field Manual</title>
+<title>Team Finny — Field Manual</title>
 <style>
   :root {
     --paper: #F3F5F8;
@@ -503,7 +503,7 @@
     <div class="intro">
       <p class="eyebrow">Read this first</p>
       <h2>How the pieces fit before you touch any one of them</h2>
-      <p>KM Finny runs a physical warehouse: CSV orders come in, staff scan boxes against them on the floor, stock totals move, and paperwork (vouchers, slips, dispatch labels) gets printed along the way. Every module below either <em>produces</em> data the others read, or <em>consumes</em> data another module produced — Order Management feeds Order Scan, Order Scan feeds Overall Stock and Order Reports, Product Master feeds product data to all of them.</p>
+      <p>Team Finny runs a physical warehouse: CSV orders come in, staff scan boxes against them on the floor, stock totals move, and paperwork (vouchers, slips, dispatch labels) gets printed along the way. Every module below either <em>produces</em> data the others read, or <em>consumes</em> data another module produced — Order Management feeds Order Scan, Order Scan feeds Overall Stock and Order Reports, Product Master feeds product data to all of them.</p>
       <p>Three separate mechanisms gate what a person can see and do, layered on top of each other. <strong>Role</strong> (<code>admin</code> / <code>super-admin</code> / <code>read/write</code> / <code>read</code>) is global and coarse — admins bypass every other check. <strong>Allowed Pages</strong> (<code>users.allowedPages</code>, a JSON array of page keys) is per-user and controls which pages even render for someone who isn't an admin. <strong>Write Access</strong> (<code>users.pageWriteAccess</code>, a subset of Allowed Pages) controls whether a non-admin can edit or only view a page they can already see. All three are set from User Management. A handful of pages layer a fourth, older mechanism on top — department-name string matching (e.g. <code>"DISPATCH {VALSAD}"</code>) — which predates the page-key system and still drives a few pages noted below.</p>
       <div class="stack-row">
         <span class="chip">React + TypeScript</span>
@@ -534,7 +534,7 @@
         <ol class="steps">
           <li>User taps four digits on the on-screen pad (or types them on a physical keyboard — the page listens for keydown events directly, no hidden input field).</li>
           <li>On the fourth digit it auto-submits — no explicit "Log in" tap needed.</li>
-          <li>The server tries, in order: PIN <code>9999</code> as a hardcoded emergency admin bypass; a PIN-only lookup across every user (rejecting common PINs like <code>0000</code>/<code>1111</code>/<code>1234</code> unless a username is also given, and rejecting the login outright if two people share the same PIN); then a normal username lookup.</li>
+          <li>The server tries, in order: a PIN-only lookup across every user (rejecting common PINs like <code>0000</code>/<code>1111</code>/<code>1234</code> unless a username is also given, and rejecting the login outright if two people share the same PIN); then a normal username lookup.</li>
           <li>On success, the full user record lands in React Query's cache and a trimmed copy (role, department, plants, allowedPages, pageWriteAccess) is written to <code>localStorage['currentUser']</code> — this is what every page's client-side permission check actually reads.</li>
           <li>Logging out clears the session server-side and wipes four localStorage keys, then returns to the PIN pad.</li>
         </ol>
@@ -545,12 +545,7 @@
           <div class="ep"><span class="m get">GET</span><span class="path">/api/user</span><span class="note">current session's user; Cache-Control: no-store so a permission grant is never served stale</span></div>
           <div class="ep"><span class="m post">POST</span><span class="path">/api/logout</span></div>
         </div>
-        <p>Sessions are identified by <code class="mono">userCode</code> (the stable employee code), not the numeric row id — <code class="filepath">server/auth.ts</code>'s <code>serializeUser</code>/<code>deserializeUser</code> re-reads the user fresh from Postgres on every request, so a permission change made in User Management is live on that person's very next request, no re-login needed. Passwords/PINs are hashed with scrypt; a legacy plaintext PIN is silently upgraded to a hash the first time it's used successfully. Cookie name <code>km-tribe-session</code>, 24h expiry.</p>
-
-        <div class="note crit">
-          <span class="tag">Worth knowing</span>
-          <p><code>comparePasswords</code> treats PIN <code>9999</code> (and, depending on stored format, <code>0000</code>) as matching <em>any</em> stored hash — a second, implicit backdoor beyond the documented 9999 bypass. Also, two different code paths write <code>localStorage['currentUser']</code> with slightly different field sets (<code class="filepath">Login.tsx</code> vs <code class="filepath">use-auth.tsx</code>'s <code>syncCurrentUserToLocalStorage</code>) — worth consolidating if you're touching auth.</p>
-        </div>
+        <p>Sessions are identified by <code class="mono">userCode</code> (the stable employee code), not the numeric row id — <code class="filepath">server/auth.ts</code>'s <code>serializeUser</code>/<code>deserializeUser</code> re-reads the user fresh from Postgres on every request, so a permission change made in User Management is live on that person's very next request, no re-login needed. Passwords/PINs are hashed with scrypt; a legacy plaintext PIN is silently upgraded to a hash the first time it's used successfully. Cookie name <code>team-finny-session</code>, 24h expiry.</p>
       </article>
 
       <article class="page" id="users">
@@ -991,7 +986,7 @@
   </main>
 
   <footer class="colophon">
-    <span>KM Finny — internal reference, written for onboarding, not end users.</span>
+    <span>Team Finny — internal reference, written for onboarding, not end users.</span>
     <span>Verify against current source before relying on any endpoint shape.</span>
   </footer>
 </div>

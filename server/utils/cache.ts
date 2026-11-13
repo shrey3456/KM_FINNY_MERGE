@@ -20,7 +20,7 @@ class MemoryCache {
    * @param key Cache key
    * @returns The cached value or undefined if not found or expired
    */
-  get<T>(key: string): T | undefined {
+  get<T = any>(key: string): T | undefined {
     const entry = this.cache.get(key);
     
     // Return undefined if no entry exists or if it has expired

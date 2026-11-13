@@ -132,6 +132,7 @@ function ItemPhoto({ item, size = 40, className }: { item: SortSlipItem; size?: 
     <ZoomableImg
       src={src}
       alt={item.itemName ?? ""}
+      thumb={!className}
       title={item.itemName}
       onError={() => setFailed(true)}
       className={`rounded border border-gray-200 bg-white object-contain ${className ?? ""}`}
@@ -448,7 +449,20 @@ export default function SortSlips() {
     <div className="py-4 lg:py-6">
       <div className="mx-auto w-full max-w-[1800px]">
         <div className="mb-6">
-          <h2 className="text-2xl font-bold">Sort Slip</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="flex items-center gap-3 text-2xl font-bold text-[#001d6e]">
+              <ClipboardList className="h-7 w-7" /> Sort Slip
+            </h2>
+            {canWrite && (
+              <Button
+                size="sm"
+                className="ml-auto h-9 shrink-0 bg-[#001d6e] text-white hover:bg-[#00154b]"
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" /> New Sort Slip
+              </Button>
+            )}
+          </div>
           <p className="text-gray-600">
             {canWrite
               ? "Assign an order to loaders and follow what has been picked."
@@ -459,40 +473,22 @@ export default function SortSlips() {
         <Card className="overflow-hidden">
           <div className="border-b border-gray-200 bg-white px-3 py-3 sm:px-5">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-3">
-                <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#001d6e] text-white">
-                  <ClipboardList className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="text-lg font-bold tracking-tight text-gray-900 sm:text-xl">Sort Slips</div>
-                  <div className="mt-0.5 text-xs leading-none text-gray-400">
-                    {total.toLocaleString()} slip{total === 1 ? "" : "s"}
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative flex-1 sm:flex-none">
-                  <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-gray-400" />
-                  <Input
-                    value={search}
-                    onChange={(e) => { setSearch(e.target.value); setPageIndex(0); }}
-                    placeholder="Order or party…"
-                    className="h-9 w-full pl-8 text-sm sm:h-8 sm:w-52"
-                  />
-                </div>
-                {canWrite && (
-                  <Button
-                    size="sm"
-                    className="h-9 shrink-0 bg-[#001d6e] text-white hover:bg-[#00154b] sm:h-8"
-                    onClick={() => setCreateOpen(true)}
-                  >
-                    <Plus className="mr-1.5 h-3.5 w-3.5" /> New Sort Slip
-                  </Button>
-                )}
+              <div className="text-xs font-medium text-gray-500">
+                {total.toLocaleString()} slip{total === 1 ? "" : "s"}
               </div>
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
+              {/* Search leads the row, before the status tabs. */}
+              <div className="relative flex-1 sm:flex-none">
+                <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-gray-400" />
+                <Input
+                  value={search}
+                  onChange={(e) => { setSearch(e.target.value); setPageIndex(0); }}
+                  placeholder="Order or party…"
+                  className="h-8 w-full pl-8 text-sm sm:w-52"
+                />
+              </div>
               {/* "unassigned" is gone as a tab: a slip is created with its loader, and the only
                   way it loses one without a Pause is a reopen that could not give it back — a
                   rare state that the All tab still shows. "paused" IS its own tab, though — a

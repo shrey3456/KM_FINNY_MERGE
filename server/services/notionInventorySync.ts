@@ -1,31 +1,23 @@
 import { Client } from '@notionhq/client';
 import { storage } from '../storage';
 import { pool } from '../db';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import sharp from 'sharp';
+import { compressProductImage, compressProductThumb, putProductImage, deleteProductImage, thumbKeyOf } from '../lib/productImageStore';
 import {
   extractText, extractInteger, extractMultiSelect, multiSelectToText, extractFileUrl, firstOf,
 } from '../lib/notionProperties';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const notion = new Client({
   auth: (process.env.NOTION_INTEGRATION_SECRET ?? process.env.NOTION_API_KEY ?? '').trim(),
 });
 
-export const NOTION_INVENTORY_DATABASE_ID = (process.env.NOTION_INVENTORY_DATABASE_ID ?? '').trim() || undefined;
+export const NOTION_INVENTORY_DATABASE_ID = (process.env.NOTION_PRODUCTS_MASTER_DATABASE_ID ?? '').trim() || undefined;
 
-// Local disk cache for product images — never stores the raw Notion URL (Notion-hosted
-// files expire after ~1 hour). Downloaded once per sync, resized down, and reused across
-// every scan afterward; product_image_hash lets re-syncs skip untouched images entirely.
-export const PRODUCT_IMAGE_DIR = path.join(__dirname, '..', 'uploads', 'product-images');
-if (!fs.existsSync(PRODUCT_IMAGE_DIR)) {
-  fs.mkdirSync(PRODUCT_IMAGE_DIR, { recursive: true });
-}
+// Product images are copied into Neon Object Storage (see lib/productImageStore) — never stored
+// as the raw Notion URL (Notion-hosted files expire after ~1 hour). Downloaded once per sync,
+// compressed, and reused across every scan afterward; product_image_hash lets re-syncs skip
+// untouched images entirely.
 
 // Runs an async task over each item with a bounded number in flight at once. The image
 // sync has to download every product's picture from Notion to hash-check it (Notion's file
@@ -57,8 +49,8 @@ async function mapWithConcurrency<T>(
 // property they come from, the filename they cache under and the columns they live in.
 type ImageKind = 'product' | 'box';
 const IMAGE_SPEC: Record<ImageKind, { property: string; file: (id: number) => string; column: 'productImage' | 'boxImage'; hashColumn: 'productImageHash' | 'boxImageHash'; refColumn: 'productImageRef' | 'boxImageRef'; label: string }> = {
-  product: { property: 'Product Image', file: (id) => `${id}.jpg`,     column: 'productImage', hashColumn: 'productImageHash', refColumn: 'productImageRef', label: 'product image' },
-  box:     { property: 'Box Image',     file: (id) => `${id}-box.jpg`, column: 'boxImage',     hashColumn: 'boxImageHash',     refColumn: 'boxImageRef',     label: 'box image' },
+  product: { property: 'Product Image', file: (id) => `${id}.webp`,    column: 'productImage', hashColumn: 'productImageHash', refColumn: 'productImageRef', label: 'product image' },
+  box:     { property: 'Box Image',     file: (id) => `${id}-box.webp`, column: 'boxImage',     hashColumn: 'boxImageHash',     refColumn: 'boxImageRef',     label: 'box image' },
 };
 
 // Which Notion FILE a URL points at, ignoring the part that rotates. A Notion-hosted file comes
@@ -95,21 +87,13 @@ async function syncProductImage(
     return ref && ref !== existingRef ? { [IMAGE_SPEC[kind].refColumn]: ref } : null;
   }
 
-  // Most of these are PNGs with a transparent background (Notion's own default product-photo
-  // style). JPEG has no alpha channel, so sharp has to flatten transparency onto a solid color
-  // before it can encode one — and its own default for that is BLACK, not white. Without this,
-  // every photo whose source PNG was transparent came out with a black box around it instead of
-  // blending into the white card it's actually displayed on.
-  const resized = await sharp(original)
-    .resize({ width: 600, height: 600, fit: 'inside', withoutEnlargement: true })
-    .flatten({ background: '#ffffff' })
-    .jpeg({ quality: 82 })
-    .toBuffer();
+  const resized = await compressProductImage(original);
 
   const spec = IMAGE_SPEC[kind];
   const filename = spec.file(productId);
-  await fs.promises.writeFile(path.join(PRODUCT_IMAGE_DIR, filename), resized);
-  console.log(`[Notion Inventory Sync] Cached ${spec.label} for product ${productId} → ${filename} (${resized.length} bytes, was ${original.length})`);
+  await putProductImage(filename, resized);
+  await putProductImage(thumbKeyOf(filename), await compressProductThumb(resized));
+  console.log(`[Notion Inventory Sync] Stored ${spec.label} for product ${productId} → ${filename} (${resized.length} bytes, was ${original.length})`);
 
   return { [spec.column]: filename, [spec.hashColumn]: hash, [spec.refColumn]: ref };
 }
@@ -120,7 +104,7 @@ async function syncProductImage(
 async function clearProductImage(productId: number, kind: ImageKind): Promise<Record<string, null>> {
   const spec = IMAGE_SPEC[kind];
   try {
-    await fs.promises.unlink(path.join(PRODUCT_IMAGE_DIR, spec.file(productId)));
+    await deleteProductImage(spec.file(productId));
   } catch { /* already gone — the row is what matters */ }
   console.log(`[Notion Inventory Sync] Removed ${spec.label} for product ${productId} (deleted in Notion)`);
   return { [spec.column]: null, [spec.hashColumn]: null, [spec.refColumn]: null };
@@ -166,7 +150,7 @@ export const FIELD_LABELS: Record<string, string> = {
   forMpOrderForm: 'For MP Order Form',
   upSr: 'UP Sr', upHsn: 'UP HSN', upSap: 'UP SAP', upRate: 'UP Rate', upIgst: 'UP IGST',
   forUpOrderForm: 'For UP Order Form',
-  hsnCode: 'HSN Code', sapCode: 'SAP Code', newSr: 'New Sr.',
+  hsnCode: 'HSN Code', newSr: 'New Sr.',
   sellingPrice: 'Selling Price',
 };
 
@@ -286,7 +270,7 @@ function mapNotionPageToFields(page: any) {
     upIgst:          firstOf(p, 'UP IGST :'),
     forUpOrderForm:  firstOf(p, 'For UP Order Form :'),
     hsnCode:         gjHsnVal || firstOf(p, 'HSN Code', 'HSN'),
-    sapCode:         gjSapVal || firstOf(p, 'SAP Code', 'SAP'),
+    // No general SAP: the product's SAPs are the three state SAPs only (GJ / MP / UP SAP).
     newSr:           firstOf(p, 'New Sr.'),
     sellingPrice:    gjSaleRate || firstOf(p, 'Selling Price', 'Sale Rate'),
   };
@@ -309,7 +293,7 @@ function buildProductData(fields: ReturnType<typeof mapNotionPageToFields>): Rec
     'mpSr', 'mpHsn', 'mpSap', 'mpJhPur', 'mpMhPur', 'mpMpPurJabalpur', 'mpMpPurKhargone', 'mpWbPur',
     'saleMpJh', 'saleMpMh', 'saleMpMp', 'mpJhIgst', 'mpMhIgst', 'mpMpCgst', 'mpMpSgst', 'mpWbIgst', 'mpWbSale', 'forMpOrderForm',
     'upSr', 'upHsn', 'upSap', 'upRate', 'upIgst', 'forUpOrderForm',
-    'hsnCode', 'sapCode', 'sellingPrice',
+    'hsnCode', 'sellingPrice',
   ];
   for (const key of optional) {
     const val = (fields as any)[key];
@@ -483,7 +467,6 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
       check('upIgst',          fields.upIgst          || null, product.upIgst);
       check('forUpOrderForm',  fields.forUpOrderForm  || null, product.forUpOrderForm);
       check('hsnCode',         fields.hsnCode         || null, product.hsnCode);
-      check('sapCode',         fields.sapCode         || null, product.sapCode);
       check('newSr',           fields.newSr           || null, product.newSr);
       check('sellingPrice',    fields.sellingPrice    || null, product.sellingPrice);
 
@@ -515,7 +498,7 @@ async function computeChanges(notionPages: any[], allProducts: any[], triggeredB
 // ─── Detect-only (dry-run): stores pending, no DB writes ─────────────────────
 
 export async function detectChangesFromNotion(triggeredBy = 'system', syncImages = true): Promise<SyncReport> {
-  if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_INVENTORY_DATABASE_ID is not set');
+  if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_PRODUCTS_MASTER_DATABASE_ID is not set');
   if (isSyncing) throw new Error('A sync is already in progress — please wait');
 
   isSyncing = true;
@@ -739,7 +722,7 @@ export async function applyPendingChanges(): Promise<SyncReport> {
 // ─── Full sync: clear inventory → import everything from Notion ───────────────
 
 export async function fullSyncFromNotion(triggeredBy = 'system'): Promise<SyncReport> {
-  if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_INVENTORY_DATABASE_ID is not set');
+  if (!NOTION_INVENTORY_DATABASE_ID) throw new Error('NOTION_PRODUCTS_MASTER_DATABASE_ID is not set');
   if (isSyncing) throw new Error('A sync is already in progress — please wait');
 
   isSyncing = true;

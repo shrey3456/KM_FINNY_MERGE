@@ -157,7 +157,8 @@ function buildProductLookup(productRows: Array<typeof products.$inferSelect>) {
   const byBarcode = new Map<string, typeof products.$inferSelect>();
 
   productRows.forEach((product) => {
-    if (product.sapCode) bySap.set(product.sapCode.trim(), product);
+    // The product's SAPs are the three state SAPs (no general SAP).
+    for (const sap of [product.gjSap, product.mpSap, product.upSap]) if (sap && String(sap).trim()) bySap.set(String(sap).trim(), product);
     byName.set(product.name.trim().toLowerCase(), product);
     if (product.barcode) byBarcode.set(product.barcode.trim().toLowerCase(), product);
   });
@@ -256,7 +257,7 @@ function parseArrivingOrdersCsv(
           const product = matchProduct(parsedProduct, lookup);
           ordersByDealer.get(dealer)?.items.push({
             productId: product?.id,
-            srNo: product?.srNo || '',
+            srNo: product?.newSr || '',
             name: product?.name || parsedProduct.name,
             barcode: product?.barcode || '',
             quantity,
@@ -297,7 +298,7 @@ function parseArrivingOrdersCsv(
           const product = matchProduct(productColumn, lookup);
           order.items.push({
             productId: product?.id,
-            srNo: product?.srNo || '',
+            srNo: product?.newSr || '',
             name: product?.name || productColumn.name,
             barcode: product?.barcode || '',
             quantity,
@@ -352,7 +353,7 @@ function parseArrivingOrdersCsv(
 
       groupedOrders.get(orderNumber)?.items.push({
         productId: product?.id,
-        srNo: getCell(row, ['productsrno', 'srno', 'serialnumber']) || product?.srNo || '',
+        srNo: getCell(row, ['productsrno', 'srno', 'serialnumber']) || product?.newSr || '',
         name: product?.name || productName,
         // Always prefer the barcode from the CSV column over the inventory fallback
         barcode: barcodeFromCsv || product?.barcode || '',
@@ -393,7 +394,7 @@ function parseArrivingOrdersCsv(
     const product = matchProduct(parsedProduct, lookup);
     order.items.push({
       productId: product?.id,
-      srNo: product?.srNo || '',
+      srNo: product?.newSr || '',
       name: product?.name || parsedProduct.name,
       barcode: product?.barcode || '',
       quantity: qty,

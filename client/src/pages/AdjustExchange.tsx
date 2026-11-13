@@ -54,12 +54,14 @@ function fmtDate(dt: string | null | undefined): string {
 }
 
 type ExtraRow = {
-  id: number; sessionId: number; barcode: string; itemName: string | null;
+  id: number; sessionId: number; barcode: string; productId?: number | null; itemName: string | null;
   totalQty: number; creditedQty: number; available: number;
   scannedAt: string; scannedByName: string | null;
   voided: boolean; voidReason: string | null;
   plant: string; csvFileName: string; orderDate: string;
   srNo: string | null;
+  // This product's SAP for the plant's state (blank when it has none) - tells two products with one barcode apart.
+  sapCode?: string | null;
   itemsPerPallet: number | null;
 };
 type ShortfallRow = {
@@ -72,7 +74,7 @@ type ShortfallRow = {
 // product scanned as Extra several times that day (different STVs, different moments) used to
 // list every single entry separately. Clicking a product's row expands it to that full history.
 type GroupedExtra = {
-  key: string; barcode: string; itemName: string | null; srNo: string | null; plant: string;
+  key: string; barcode: string; itemName: string | null; srNo: string | null; sapCode?: string | null; plant: string;
   totalQty: number; totalAvailable: number; entryCount: number; anyVoided: boolean;
   extraPallets: number; availablePallets: number; creditedQty: number;
 };
@@ -125,8 +127,8 @@ export default function AdjustExchange() {
   const groupedExtras = useMemo<GroupedExtra[]>(() => {
     const map = new Map<string, GroupedExtra>();
     for (const r of extrasQuery.data ?? []) {
-      const key = `${r.plant}::${r.barcode}`;
-      const g = map.get(key) ?? { key, barcode: r.barcode, itemName: r.itemName, srNo: r.srNo, plant: r.plant, totalQty: 0, totalAvailable: 0, entryCount: 0, anyVoided: false, extraPallets: 0, availablePallets: 0, creditedQty: 0 };
+      const key = `${r.plant}::${r.barcode}::${r.productId ?? ""}`;
+      const g = map.get(key) ?? { key, barcode: r.barcode, itemName: r.itemName, srNo: r.srNo, sapCode: r.sapCode ?? null, plant: r.plant, totalQty: 0, totalAvailable: 0, entryCount: 0, anyVoided: false, extraPallets: 0, availablePallets: 0, creditedQty: 0 };
       g.totalQty += r.totalQty;
       g.totalAvailable += r.available;
       g.extraPallets += palletsOf(r.totalQty, r.itemsPerPallet);
@@ -166,6 +168,7 @@ export default function AdjustExchange() {
     queryFn: async () => {
       if (!selectedExtra) return [];
       const q = new URLSearchParams({ plant: selectedExtra.plant, beforeDate: selectedExtra.orderDate, barcode: selectedExtra.barcode });
+      if (selectedExtra.productId != null) q.set("productId", String(selectedExtra.productId));
       const res = await apiRequest("GET", `/api/order-scan/exchange/shortfalls?${q}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to load candidates");
       const rows: ShortfallRow[] = await res.json();
@@ -338,7 +341,7 @@ export default function AdjustExchange() {
   // same product once the first is fully claimed).
   const bestEntryFor = (key: string) =>
     (extrasQuery.data ?? [])
-      .filter((e) => `${e.plant}::${e.barcode}` === key && !e.voided && e.available > 0 && e.creditedQty === 0)
+      .filter((e) => `${e.plant}::${e.barcode}::${e.productId ?? ""}` === key && !e.voided && e.available > 0 && e.creditedQty === 0)
       .sort((a, b) => a.scannedAt.localeCompare(b.scannedAt))[0];
 
   const groupColumns: DataTableColumn<GroupedExtra>[] = [
@@ -350,10 +353,10 @@ export default function AdjustExchange() {
       cellClassName: "text-gray-900",
       render: (r) => (
         <div className="flex items-center gap-2">
-          <ProductPhoto name={r.itemName} className="h-10 w-10 shrink-0 rounded border border-gray-200 bg-white object-contain" zoomable />
+          <ProductPhoto thumb name={r.itemName} className="h-10 w-10 shrink-0 rounded border border-gray-200 bg-white object-contain" zoomable />
           <div className="min-w-0">
             <p className="truncate font-medium">{r.itemName || "—"}</p>
-            <p className="break-all font-mono text-xs text-gray-500">{r.barcode}</p>
+            <p className="break-all font-mono text-xs text-gray-500">{r.barcode}{r.sapCode ? ` · SAP ${r.sapCode}` : ""}</p>
           </div>
         </div>
       ),
@@ -469,17 +472,17 @@ export default function AdjustExchange() {
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         {visibleGroups.map((g) => {
           const isOpen = expandedGroupKey === g.key;
-          const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}` === g.key);
+          const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}::${e.productId ?? ""}` === g.key);
           const entry = bestEntryFor(g.key);
           return (
             <div key={g.key} className={`overflow-hidden rounded-xl border shadow-sm ${isOpen ? "sm:col-span-2" : ""} ${g.anyVoided ? "border-amber-200 bg-amber-50/20" : "border-gray-200 bg-white"}`}>
               <button type="button" className="flex w-full items-start gap-3 p-3 text-left" onClick={() => setExpandedGroupKey(isOpen ? null : g.key)}>
-                <ProductPhoto name={g.itemName} className="h-12 w-12 shrink-0 rounded border border-gray-200 bg-white object-contain" />
+                <ProductPhoto thumb name={g.itemName} className="h-12 w-12 shrink-0 rounded border border-gray-200 bg-white object-contain" />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate font-semibold text-gray-900">{g.itemName || "—"}</p>
-                      <p className="break-all font-mono text-xs text-gray-500">{g.barcode}</p>
+                      <p className="break-all font-mono text-xs text-gray-500">{g.barcode}{g.sapCode ? ` · SAP ${g.sapCode}` : ""}</p>
                     </div>
                     <PlantBadge plant={g.plant} className="shrink-0 px-2 py-0 text-[11px]" />
                   </div>
@@ -638,7 +641,7 @@ export default function AdjustExchange() {
           isRowExpandable={() => true}
           expandedRowId={expandedGroupKey}
           renderExpandedRow={(r) => {
-            const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}` === r.key);
+            const entries = (extrasQuery.data ?? []).filter((e) => `${e.plant}::${e.barcode}::${e.productId ?? ""}` === r.key);
             return (
               <div className="border-y border-[#001d6e]/20 bg-slate-50/70 p-3">
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
@@ -804,7 +807,7 @@ export default function AdjustExchange() {
                         onClick={() => { setExchangePick(p); setExchangeQty(exchangeTarget.totalQty); setExchangeReason(""); }}
                         className="flex w-full items-center gap-2.5 rounded-lg border border-gray-200 p-2.5 text-left text-sm hover:border-[#001d6e]/40 hover:bg-[#001d6e]/5"
                       >
-                        <ProductPhoto name={p.name} className="h-9 w-9 shrink-0 rounded border bg-white object-contain" />
+                        <ProductPhoto thumb name={p.name} className="h-9 w-9 shrink-0 rounded border bg-white object-contain" />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate font-medium text-gray-900">{p.name || "—"}</span>
                           <span className="font-mono text-xs text-gray-500">{p.barcode}</span>
