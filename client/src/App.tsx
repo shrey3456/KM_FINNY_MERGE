@@ -253,66 +253,63 @@ function Router() {
   };
 
   return (
-    <Layout
-      onLogout={handleLogout}
-      bottomBar={
-        <InstallPromptBanner
-          deferredPrompt={installSnoozed ? null : deferredPrompt}
-          isStandalone={isStandalone}
-          onInstallClick={handleInstallClick}
-          onDismiss={dismissInstall}
-        />
-      }
-    >
-      <Switch>
-        <Route path="/" component={Home} />
-        <ProtectedRoute path="/notion-inventory" component={NotionInventory} requiredPage="notion-inventory" />
-        <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
-        <ProtectedRoute path="/driver-master" component={DriverMaster} requiredPage="driver-master" />
-        <ProtectedRoute path="/vehicle-planning" component={VehiclePlanning} requiredPage="vehicle-planning" />
-        <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
-        <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
-        <ProtectedRoute path="/proforma-slips" component={ProformaSlips} requiredPage="proforma" />
-        <ProtectedRoute path="/load-csv-upload" component={LoadCsvUpload} requiredPage="proforma" />
-        <ProtectedRoute path="/dispatch" component={Dispatch} requiredPage="dispatch" />
-        <ProtectedRoute path="/expense-voucher" component={ExpenseVoucher} requiredPage="expense-voucher" />
-        <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />
-        <Route path="/stock-sheets" component={StockSheets} />
-        <ProtectedRoute path="/scan-history" component={ScanHistory} requiredPage="scan-history" />
-        <ProtectedRoute path="/adjust-exchange" component={AdjustExchange} requiredPage="adjust-exchange" />
-        <ProtectedRoute path="/load-master/slip/:orderNumber" component={LoadMasterSlip} requiredPage="loading-overview" />
-        <ProtectedRoute path="/load-master" component={LoadingOverview} requiredPage="loading-overview" />
-        <ProtectedRoute path="/loading-overview" component={LoadingOverview} requiredPage="loading-overview" />
-        {/* /reports was the old path for this page — kept as a redirect so any existing
-            bookmark/browser history still lands somewhere instead of 404ing. */}
-        <Route path="/reports"><Redirect to="/scan-history" /></Route>
-        <ProtectedRoute path="/overall-stock" component={StockOverview} requiredPage="overall-stock" />
-        <Route path="/stock-v2"><Redirect to="/overall-stock" /></Route>
-        <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
-        <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
-        <ProtectedRoute path="/unloading" component={Unloading} requiredPage="unloading" />
-        <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
-        <ProtectedRoute path="/sort-slip" component={SortSlips} requiredPage="sort-slip" />
-        <ProtectedRoute path="/daily-reports" component={DailyReports} requiredPage="daily-reports" />
-        <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
-        <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />
-        <ProtectedRoute path="/settings" component={Settings} requiredPage="settings" />
-        <ProtectedRoute path="/plant-settings" component={PlantSettings} requiredPage="plant-management" />
-        <ProtectedRoute path="/order-management" component={OrderManagement} requiredPage="order-management" />
-        <ProtectedRoute path="/order-import" component={OrderImport} requiredPage="order-import" />
-        <Route path="/messages" component={MessagesPage} />
-        <Route path="/profile" component={Profile} />
-        <Route path="/logout">
-          {() => {
-            handleLogout();
-            return null;
-          }}
-        </Route>
-        {/* Fallback to 404 */}
-        <Route component={NotFound} />
-      </Switch>
-      </Suspense>
-    </Layout>
+    <>
+      <Layout onLogout={handleLogout}>
+        <Switch>
+          <Route path="/" component={Home} />
+          <ProtectedRoute path="/notion-inventory" component={NotionInventory} requiredPage="notion-inventory" />
+          <ProtectedRoute path="/vehicle-master" component={VehicleMaster} requiredPage="vehicle-master" />
+          <ProtectedRoute path="/driver-master" component={DriverMaster} requiredPage="driver-master" />
+          <ProtectedRoute path="/vehicle-planning" component={VehiclePlanning} requiredPage="vehicle-planning" />
+          <ProtectedRoute path="/purchases" component={Purchases} requireInventoryAccess={true} requiredPage="purchases" />
+          <ProtectedRoute path="/print-operations" component={PrintOperations} requiredPage="print-operations" />
+          <ProtectedRoute path="/proforma-slips" component={ProformaSlips} requiredPage="proforma" />
+          <ProtectedRoute path="/load-csv-upload" component={LoadCsvUpload} requiredPage="proforma" />
+          <ProtectedRoute path="/dispatch" component={Dispatch} requiredPage="dispatch" />
+          <ProtectedRoute path="/expense-voucher" component={ExpenseVoucher} requiredPage="expense-voucher" />
+          <ProtectedRoute path="/toll-voucher" component={TollVoucher} requiredPage="toll-voucher" />
+          <Route path="/stock-sheets" component={StockSheets} />
+          <ProtectedRoute path="/scan-history" component={ScanHistory} requiredPage="scan-history" />
+          <ProtectedRoute path="/adjust-exchange" component={AdjustExchange} requiredPage="adjust-exchange" />
+          <ProtectedRoute path="/load-master/slip/:orderNumber" component={LoadMasterSlip} requiredPage="loading-overview" />
+          <ProtectedRoute path="/load-master" component={LoadingOverview} requiredPage="loading-overview" />
+          <ProtectedRoute path="/loading-overview" component={LoadingOverview} requiredPage="loading-overview" />
+          {/* /reports was the old path for this page — kept as a redirect so any existing
+              bookmark/browser history still lands somewhere instead of 404ing. */}
+          <Route path="/reports"><Redirect to="/scan-history" /></Route>
+          <ProtectedRoute path="/overall-stock" component={StockOverview} requiredPage="overall-stock" />
+          <Route path="/stock-v2"><Redirect to="/overall-stock" /></Route>
+          <ProtectedRoute path="/scan" component={ScanOrder} requiredPage="scan-order" />
+          <ProtectedRoute path="/loading" component={LoadOperation} requiredPage="loading" />
+          <ProtectedRoute path="/unloading" component={Unloading} requiredPage="unloading" />
+          <ProtectedRoute path="/scan-viewer" component={ScanViewer} requiredPage="scan-viewer" />
+          <ProtectedRoute path="/sort-slip" component={SortSlips} requiredPage="sort-slip" />
+          <ProtectedRoute path="/daily-reports" component={DailyReports} requiredPage="daily-reports" />
+          <ProtectedRoute path="/users" component={Users} requireAdmin={true} requiredPage="user-management" />
+          <ProtectedRoute path="/activities" component={Activities} requireAdmin={true} requiredPage="activities" />
+          <ProtectedRoute path="/settings" component={Settings} requiredPage="settings" />
+          <ProtectedRoute path="/plant-settings" component={PlantSettings} requiredPage="plant-management" />
+          <ProtectedRoute path="/order-management" component={OrderManagement} requiredPage="order-management" />
+          <ProtectedRoute path="/order-import" component={OrderImport} requiredPage="order-import" />
+          <Route path="/messages" component={MessagesPage} />
+          <Route path="/profile" component={Profile} />
+          <Route path="/logout">
+            {() => {
+              handleLogout();
+              return null;
+            }}
+          </Route>
+          {/* Fallback to 404 */}
+          <Route component={NotFound} />
+        </Switch>
+      </Layout>
+      <InstallPromptBanner
+        deferredPrompt={installSnoozed ? null : deferredPrompt}
+        isStandalone={isStandalone}
+        onInstallClick={handleInstallClick}
+        onDismiss={dismissInstall}
+      />
+    </>
   );
 }
 
