@@ -2223,14 +2223,6 @@ export default function VehiclePlanning() {
                 {row("Driver", selectedMember.driver ?? trip.driver ?? "—")}
                 {row("In our system", selectedMember.notInSystem ? "No - only in Notion (no slip here)" : "Yes", selectedMember.notInSystem ? "text-amber-700" : "text-gray-700")}
               </div>
-              {trip.members.length > 1 && (
-                <div className="mt-2 rounded bg-sky-50 px-2 py-1.5 text-[11px] text-sky-900">
-                  <div className="font-semibold">Shared load - {trip.members.length} orders on one trip</div>
-                  {trip.members.filter((m) => m.orderNumber !== member.orderNumber).map((m) => (
-                    <div key={m.orderNumber} className="break-words">#{m.orderNumber} · {m.partyName ?? "—"} · {m.tripDays} day{m.tripDays === 1 ? "" : "s"}, ends {dayLabel(m.plannedLastDay)}</div>
-                  ))}
-                </div>
-              )}
               {trip.lockedReason && <div className="mt-2 rounded bg-gray-50 px-2 py-1.5 text-[11px] text-gray-600">{trip.lockedReason}</div>}
               {trip.notionNote && <div className="mt-2 rounded bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">Notion not updated. {trip.notionNote}</div>}
               {canWrite && (() => {
