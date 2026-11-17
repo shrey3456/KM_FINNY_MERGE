@@ -286,12 +286,14 @@ const REASONS = ["Breakdown", "Waiting to unload", "Road / traffic", "Party dela
 const addIsoDays = (day: string, n: number) => { const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 
 // "Extend": the new last day (quick +1 / +2 / +3 days or a date) and the reason, both here. onNewEnd changes the day the page holds for this box.
-export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd }: {
+export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd, embedded = false }: {
   ask: { vehicleNumber: string | null; orders: string[]; oldEnd: string; newEnd: string; extraDays: number } | null;
   pending: boolean;
   onCancel: () => void;
   onConfirm: (reason: string) => void;
   onNewEnd?: (day: string) => void;
+  // Used inside the vehicle-status dialog so Extend does not open a second popup.
+  embedded?: boolean;
 }) {
   const [chip, setChip] = useState<(typeof REASONS)[number] | "">("");
   const [text, setText] = useState("");
@@ -301,9 +303,8 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd
   const reason = chip === "Other" ? detail : chip;
   const valid = reason.length >= 3;
 
-  return (
-    <Dialog open={!!ask} onOpenChange={(o) => { if (!o && !pending) onCancel(); }}>
-      <DialogContent className="max-w-[calc(100vw-1rem)] overflow-x-hidden sm:max-w-md [&>*]:min-w-0">
+  const content = (
+    <>
         <DialogHeader>
           <DialogTitle>{onNewEnd ? "Extend the trip" : "Why is the trip extended?"}</DialogTitle>
           <DialogDescription>
@@ -349,7 +350,12 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd
             {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save extension"}
           </Button>
         </DialogFooter>
-      </DialogContent>
+    </>
+  );
+  if (embedded) return content;
+  return (
+    <Dialog open={!!ask} onOpenChange={(o) => { if (!o && !pending) onCancel(); }}>
+      <DialogContent className="max-w-[calc(100vw-1rem)] overflow-x-hidden sm:max-w-md [&>*]:min-w-0">{content}</DialogContent>
     </Dialog>
   );
 }

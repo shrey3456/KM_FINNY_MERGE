@@ -154,13 +154,14 @@ function parseTripDate(raw: string | null): Date | null {
   }
 }
 
-// Is the vehicle free on `day`? Not when a trip covers that day: it starts on or before it and does not free the vehicle until after it (a trip frees the vehicle on
-// its last day). A vehicle planned to be back, or arrived, by that day counts as available.
+// Is the vehicle free on `day`? A trip's final day is available: its status is "Ends today",
+// even when its free-from value is the following day. A vehicle planned to be back, or arrived,
+// by that day also counts as available.
 function isAvailableOn(v: VehicleRow, day: string): boolean {
   const m = v.manualStatus;
   if (m?.blocks && m.endDay && m.startDay <= day && day <= m.endDay) return false;   // under maintenance / breakdown that day
   const live = (v.trips ?? []).filter((t) => t.state !== "cancelled");
-  return !live.some((t) => t.startDay <= day && day < t.freeFromDay);
+  return !live.some((t) => t.startDay <= day && day < t.freeFromDay && t.lastBusyDay !== day);
 }
 
 const OTHER_STATUS = "Other";
@@ -263,7 +264,6 @@ function DayFilterButton({ filter, onChange, title }: { filter: DayFilter | unde
           <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-gray-500">Vehicle on this day</div>
           <div className="flex gap-1.5">
             {chip(!f.occupancy, "Any", () => set({ occupancy: undefined }))}
-            {chip(f.occupancy === "busy", "Busy", () => set({ occupancy: "busy" }))}
             {chip(f.occupancy === "free", "Available", () => set({ occupancy: "free" }))}
           </div>
         </div>
@@ -341,7 +341,9 @@ function computeStatus(v: VehicleRow, todayIso: string): { label: string; tone: 
     };
   }
   const trips = (v.trips ?? []).filter((x) => x.state !== "cancelled");
-  const covering = trips.find((x) => x.startDay <= todayIso && todayIso < x.freeFromDay);
+  const covering = trips.find((x) => x.startDay <= todayIso && todayIso < x.freeFromDay && x.lastBusyDay !== todayIso);
+  const endsToday = trips.some((x) => !x.arrivedOn && x.lastBusyDay === todayIso);
+  if (endsToday && !covering) return { label: "Ends today", tone: "border border-emerald-400 bg-white text-emerald-700", daysText: "", title: "Today is the last day of the trip - the vehicle is available", note: "Last day of the trip - available" };
   if (covering) return { label: "On trip", tone: "bg-purple-100 text-purple-600", daysText: "", title: `Free from ${fmtShort(covering.freeFromDay)}`, note: `Free from ${fmtShort(covering.freeFromDay)}` };
   const late = trips.find((x) => x.state === "awaiting");
   if (late) {
@@ -349,7 +351,6 @@ function computeStatus(v: VehicleRow, todayIso: string): { label: string; tone: 
     return { label: "Overdue", tone: "bg-amber-100 text-amber-800", daysText: `${n} d late`, title: `${n} day${n === 1 ? "" : "s"} past its last day with no arrival recorded - the vehicle is available`, note: `${n} day${n === 1 ? "" : "s"} past its last day, no arrival recorded - available` };
   }
   if (trips.some((x) => x.arrivedOn === todayIso)) return { label: "Available now", tone: "bg-emerald-600 text-white", daysText: "", title: "Arrived today - available now", note: "Arrived today - available now" };
-  if (trips.some((x) => !x.arrivedOn && x.startDay < x.lastBusyDay && x.lastBusyDay === todayIso)) return { label: "Ends today", tone: "border border-emerald-400 bg-white text-emerald-700", daysText: "", title: "Today is the last day of the trip - the vehicle is available", note: "Last day of the trip - available" };
   if (trips.some((x) => x.startDay > todayIso)) return { label: "Planned", tone: "bg-blue-100 text-blue-800", daysText: "", title: "Free now; an order is planned", note: "Free now; an order is planned" };
   return { label: "Available", tone: "bg-emerald-50 text-emerald-700", daysText: "", title: "Free - available now", note: "Available now" };
 }
@@ -406,7 +407,6 @@ export default function VehiclePlanning() {
   // The Status box of one vehicle (availability actions + a status set here: parking, maintenance, breakdown ...).
   const [statusTarget, setStatusTarget] = useState<VehicleRow | null>(null);
   const [stPick, setStPick] = useState("");
-  const [statusTab, setStatusTab] = useState<"actions" | "set">("actions");   // the tab of the status box
   const [stOther, setStOther] = useState("");   // the typed status when "Other" is picked
   const [stDays, setStDays] = useState("");
   const [stFrom, setStFrom] = useState("");   // the day the vehicle is available again (today + days)
@@ -497,6 +497,8 @@ export default function VehiclePlanning() {
   const ganttRef = useRef<HTMLDivElement>(null);
   // The selected day cell (a vehicle's box on one day): click one, then move with the arrow keys. Enter opens its note, Esc clears it.
   const [selCell, setSelCell] = useState<{ vehicleId: number; dayIso: string } | null>(null);
+  // Driver cells use the same spreadsheet pattern as date cells: select first, then Ctrl/Cmd+C.
+  const [selectedDriverCell, setSelectedDriverCell] = useState<{ vehicleId: number; name: string } | null>(null);
   // One "are you sure?" box for every action of this page that changes something (Mark available, Assign, Add to trip, Move, Driver, Status, Delete note, Undo ...).
   const [confirmAsk, setConfirmAsk] = useState<{ title: string; message: ReactNode; confirmLabel: string; danger?: boolean; run: () => void } | null>(null);
   const askConfirm = (a: { title: string; message: ReactNode; confirmLabel: string; danger?: boolean; run: () => void }) => setConfirmAsk(a);
@@ -1150,8 +1152,16 @@ export default function VehiclePlanning() {
   }
   function openStatus(v: VehicleRow) {
     const n = v.manualStatus?.blocks ? Math.max(1, v.manualStatus.daysLeft ?? 1) : 0;
-    setStatusTarget(v); setStatusTab("actions"); { const cur = v.manualStatus?.status ?? ""; const custom = !!cur && !(MANUAL_STATUSES as readonly string[]).includes(cur); setStPick(custom ? OTHER_STATUS : cur); setStOther(custom ? cur : ""); } setStComment(v.manualStatus?.comment ?? "");
+    setStatusTarget(v); { const cur = v.manualStatus?.status ?? ""; const custom = !!cur && !(MANUAL_STATUSES as readonly string[]).includes(cur); setStPick(custom ? OTHER_STATUS : cur); setStOther(custom ? cur : ""); } setStComment(v.manualStatus?.comment ?? "");
     setStDays(n ? String(n) : ""); setStFrom(n ? format(addDays(new Date(), n), "yyyy-MM-dd") : "");
+  }
+  async function copyDriverName(name: string) {
+    try {
+      await navigator.clipboard.writeText(name);
+      toast({ title: "Driver name copied", description: name });
+    } catch {
+      toast({ title: "Could not copy the driver name", variant: "destructive" });
+    }
   }
   // Days and the "available again" date are one setting: changing either updates the other (days counted from today).
   function changeStDays(value: string) {
@@ -1592,6 +1602,12 @@ export default function VehiclePlanning() {
           onClick={(e) => e.currentTarget.focus()}
           onKeyDown={(e) => {
             if (!ganttActive) return;
+            if (selectedDriverCell && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c") {
+              e.preventDefault();
+              void copyDriverName(selectedDriverCell.name);
+              return;
+            }
+            if (e.key === "Escape" && selectedDriverCell) { setSelectedDriverCell(null); return; }
             if (selCell && !noteTarget && e.target === e.currentTarget) {
               // Like Excel: arrows, Tab / Shift+Tab (right / left), Home / End (first / last day shown), Page Up / Page Down (10 vehicles).
               if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(e.key)) { e.preventDefault(); moveSelection(e.key); return; }
@@ -1700,9 +1716,9 @@ export default function VehiclePlanning() {
                     <div
                       key={c.key}
                       style={{ width: widthOf(c.key) }}
-                      className={`shrink-0 border-r border-gray-100 px-2 ${c.key === "orderNumber" ? "py-1.5" : "py-2.5"} text-[11px] ${c.key === "vehicleNumber" && selCell?.vehicleId === v.id ? "shadow-[inset_4px_0_0_0_#f59e0b]" : ""} ${c.key === "orderNumber" ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" || c.key === "tripDays" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-start gap-1 whitespace-pre-line leading-tight" : c.key === "tripDays" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
-                      title={c.key === "orderNumber" ? "Click for this vehicle's order history" : c.key === "tripDays" ? (slipsToday(v, todayIso).filter((x) => x.tripDays != null).map((x) => `#${x.orderNumber}: ${x.tripDays} day${x.tripDays === 1 ? "" : "s"}`).join("\n") || undefined) : (c.value ?? undefined)}
-                      onClick={c.key === "orderNumber" ? () => setHistoryTarget(v) : undefined}
+                      className={`shrink-0 border-r border-gray-100 px-2 ${c.key === "orderNumber" ? "py-1.5" : "py-2.5"} text-[11px] ${c.key === "vehicleNumber" && selCell?.vehicleId === v.id ? "shadow-[inset_4px_0_0_0_#f59e0b]" : ""} ${c.key === "driver" && selectedDriverCell?.vehicleId === v.id ? "bg-[#001d6e]/10 shadow-[inset_0_0_0_2px_#001d6e]" : ""} ${c.key === "orderNumber" || (c.key === "driver" && !!c.value) ? "cursor-pointer hover:bg-[#001d6e]/5" : ""} ${c.key === "driver" || c.key === "orderNumber" || c.key === "tripDays" ? "" : "truncate"} ${c.bold ? "font-semibold text-[#001d6e]" : "text-gray-600"} ${c.key === "orderNumber" ? "flex items-start gap-1 whitespace-pre-line leading-tight" : c.key === "tripDays" ? "flex items-center gap-1 whitespace-pre-line leading-tight" : ""}`}
+                      title={c.key === "orderNumber" ? "Click for this vehicle's order history" : c.key === "driver" && c.value ? "Click to select, then press Ctrl+C to copy" : c.key === "tripDays" ? (slipsToday(v, todayIso).filter((x) => x.tripDays != null).map((x) => `#${x.orderNumber}: ${x.tripDays} day${x.tripDays === 1 ? "" : "s"}`).join("\n") || undefined) : (c.value ?? undefined)}
+                      onClick={c.key === "orderNumber" ? () => setHistoryTarget(v) : c.key === "driver" && c.value ? () => { setSelectedDriverCell({ vehicleId: v.id, name: c.value }); setSelCell(null); } : undefined}
                     >
                       {c.key === "orderNumber" && v.currentOrder?.vehicleMismatch && (
                         <button
@@ -1726,7 +1742,10 @@ export default function VehiclePlanning() {
                   </div>
                   </div>
                   {/* isolate: everything inside (dots, party labels, buttons) gets its own stacking context, so it stays below the pinned columns. */}
-                  <div data-track className="relative isolate z-0 flex-1" style={{ minHeight: Math.max(ROW_MIN_HEIGHT, rowH) }}>
+                  {/* Keep the body track exactly as wide as the date header. Its cells are absolutely
+                      positioned, so flex sizing alone can shrink the track after a horizontal scroll
+                      and make past-trip labels paint across neighbouring days. */}
+                  <div data-track className="relative isolate z-0 shrink-0" style={{ width: windowDays * dayColW, minWidth: windowDays * dayColW, minHeight: Math.max(ROW_MIN_HEIGHT, rowH) }}>
                     {/* One continuous area. A thin, light vertical line at each day (a little firmer at the start of a week, Monday) lines the dots up
                         with the dates in the header; today keeps its faint tint. Each day a vehicle is out has one dot per order (a shared load: two). */}
                     <div className="absolute inset-0 flex">
@@ -2025,14 +2044,16 @@ export default function VehiclePlanning() {
                 {assignMode === "new" && <div className="space-y-1">
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Driver</div>
                   <div className="flex gap-2">
-                    <Input
-                      list="vp-driver-list"
+                    <select
                       value={effectiveDriver}
-                      onChange={(e) => setDriverText(e.target.value)}
-                      placeholder="Driver name"
-                      className="h-9 flex-1"
-                    />
-                    <datalist id="vp-driver-list">{driverList.map((d) => <option key={d.id} value={d.name} />)}</datalist>
+                      onChange={(e) => { setDriverText(e.target.value); setDriverExtra(null); }}
+                      className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-sm shadow-sm outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={driversQuery.isLoading}
+                    >
+                      <option value="">No driver</option>
+                      {!driverList.some((d) => d.name.trim().toLowerCase() === effectiveDriver.trim().toLowerCase()) && effectiveDriver.trim() && <option value={effectiveDriver}>{effectiveDriver}</option>}
+                      {driverList.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+                    </select>
                     <Button
                       type="button" variant="outline" size="sm" className="h-9 shrink-0 text-xs"
                       disabled={!assignPick || fetchDriverMutation.isPending}
@@ -2043,7 +2064,7 @@ export default function VehiclePlanning() {
                     </Button>
                   </div>
                   <p className="text-[11px] text-gray-400">
-                    {effectiveDriver.trim() === "" ? "No driver will be set." : matchedDriverId ? "Will also be set on the Notion order." : driversQuery.data?.message ?? "Not in the Notion driver list - saved here only."}
+                    {driversQuery.isLoading ? "Loading drivers…" : effectiveDriver.trim() === "" ? "No driver will be set." : matchedDriverId ? "Will also be set on the Notion order." : driversQuery.data?.message ?? "This driver is not in the Notion driver list - saved here only."}
                   </p>
                 </div>}
 
@@ -2421,17 +2442,29 @@ export default function VehiclePlanning() {
                     <p className="text-xs text-gray-500">{sv.volume != null ? `Volume ${sv.volume}` : ""}{sv.bodyType ? `${sv.volume != null ? " · " : ""}Body type ${sv.bodyType}` : ""}</p>
                   )}
                 </DialogHeader>
-                {canWrite && (
-                  <div className="flex gap-1 border-b border-gray-200" role="tablist">
-                    {([["actions", "Status"], ["set", "Set status"]] as const).map(([k, label]) => (
-                      <button key={k} type="button" role="tab" aria-selected={statusTab === k} onClick={() => setStatusTab(k)}
-                        className={`-mb-px border-b-2 px-3 py-1.5 text-xs font-semibold ${statusTab === k ? "border-[#001d6e] text-[#001d6e]" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {canWrite && statusTab === "actions" && (() => {
+                {extendAsk?.vehicle.id === sv.id ? (
+                  <ExtendReasonDialog
+                    embedded
+                    ask={{
+                      vehicleNumber: extendAsk.vehicle.vehicleNumber,
+                      orders: extendAsk.trip.members.map((m) => m.orderNumber),
+                      oldEnd: extendAsk.trip.lastBusyDay,
+                      newEnd: extendAsk.newEnd,
+                      extraDays: Math.max(1, differenceInCalendarDays(parse(extendAsk.newEnd, "yyyy-MM-dd", new Date()), parse(extendAsk.trip.lastBusyDay, "yyyy-MM-dd", new Date()))),
+                    }}
+                    pending={expectedEndMutation.isPending}
+                    onCancel={() => setExtendAsk(null)}
+                    onNewEnd={(day) => setExtendAsk((p) => (p ? { ...p, newEnd: day } : p))}
+                    onConfirm={(reason) => {
+                      const current = extendAsk;
+                      if (!current) return;
+                      const clashes = clashesFor(current.vehicle, current.trip, current.newEnd);
+                      if (clashes.length > 0) { setExtendAsk(null); setStatusTarget(null); setStretchAsk({ ...current, clashes, reason }); return; }
+                      expectedEndMutation.mutate({ vehicleId: current.vehicle.id, orderNumber: current.trip.orderNumber, expectedEnd: current.newEnd, reason });
+                    }}
+                  />
+                ) : <>
+                {canWrite && (() => {
                   // Every action of the vehicle, by what it is doing: Remove (take it off an order), Mark available (it came back today), Extend (the trip runs longer), Assign (give it an order).
                   const freeable = at.live.filter((x) => !x.lockedReason);
                   const allLocked = at.live.length > 0 && freeable.length === 0;
@@ -2447,7 +2480,7 @@ export default function VehiclePlanning() {
                             <CheckCircle2 className="mr-1.5 h-4 w-4" /> Mark available
                           </Button>
                         )}
-                        {av.extendTrip && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openExtend(sv, av.extendTrip!); }}>Extend</Button>}
+                        {av.extendTrip && <Button size="sm" variant="outline" onClick={() => openExtend(sv, av.extendTrip!)}>Extend</Button>}
                         {!av.blocked && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openAssign(sv, av.day); }}>Assign an order</Button>}
                         {canAddSlip(sv) && <Button size="sm" variant="outline" onClick={() => { setStatusTarget(null); openAddSlip(sv); }}>Add slip</Button>}
                         {(sv.conflicts?.length ?? 0) > 0 && (
@@ -2468,7 +2501,6 @@ export default function VehiclePlanning() {
                   );
                 })()}
                 {canWrite ? (<>
-                {statusTab === "set" && (
                   <div className="space-y-2.5">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Set a status</div>
                     <div className="flex flex-wrap gap-1.5">
@@ -2483,11 +2515,9 @@ export default function VehiclePlanning() {
                       <Input value={stOther} onChange={(e) => setStOther(e.target.value)} maxLength={40} placeholder="Type the status (for example: Tyre change)" className="h-8 text-xs" autoFocus />
                     )}
                   </div>
-                )}
-                {statusTab === "actions" && (
                   <div className="space-y-2.5">
                     <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Status duration</div>
-                    {stPick && <div className="text-xs text-gray-600">Status to set: <span className="font-semibold text-[#001d6e]">{stPick === OTHER_STATUS ? (stOther.trim() || "Other (type it in the Set status tab)") : stPick}</span></div>}
+                    {stPick && <div className="text-xs text-gray-600">Status to set: <span className="font-semibold text-[#001d6e]">{stPick === OTHER_STATUS ? (stOther.trim() || "Other (type it above)") : stPick}</span></div>}
                     <div className="flex flex-wrap items-end gap-3">
                       <div className="space-y-1">
                         <label className="text-xs font-semibold text-gray-700">Days <span className="text-red-500">*</span></label>
@@ -2503,7 +2533,6 @@ export default function VehiclePlanning() {
                     <Textarea value={stComment} onChange={(e) => setStComment(e.target.value)} maxLength={300} rows={2} placeholder="Comment (for example: gearbox repair at the showroom)" />
                     <p className="text-[11px] text-gray-400">Only on this page. Notion is not changed.</p>
                   </div>
-                )}
                 </>
                 ) : sv.manualStatus?.comment ? (
                   <div className="whitespace-pre-wrap rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm">{sv.manualStatus.comment}</div>
@@ -2524,6 +2553,7 @@ export default function VehiclePlanning() {
                     </Button>
                   )}
                 </DialogFooter>
+                </>}
               </>
             );
           })()}
@@ -2532,7 +2562,7 @@ export default function VehiclePlanning() {
 
       {/* Why is the trip extended? Asked whenever a trip's last day moves later; then the clash question below, if the longer trip runs into the next one. */}
       <ExtendReasonDialog
-        ask={extendAsk ? {
+        ask={extendAsk && extendAsk.vehicle.id !== statusTarget?.id ? {
           vehicleNumber: extendAsk.vehicle.vehicleNumber,
           orders: extendAsk.trip.members.map((m) => m.orderNumber),
           oldEnd: extendAsk.trip.lastBusyDay,
