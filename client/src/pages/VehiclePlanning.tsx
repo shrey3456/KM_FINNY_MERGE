@@ -700,7 +700,7 @@ export default function VehiclePlanning() {
 
   // Stretch (or reset) the expected last day of a trip that has not arrived.
   const expectedEndMutation = useMutation({
-    mutationFn: async (body: { vehicleId: number; orderNumber: string; expectedEnd: string | null; reason?: string }) => {
+    mutationFn: async (body: { vehicleId: number; orderNumber: string; orderNumbers?: string[]; expectedEnd: string | null; reason?: string }) => {
       const res = await apiRequest("POST", "/api/vehicle-planning/trips/expected-end", body);
       if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.message || "Failed to change the end day");
       return res.json();
@@ -1261,30 +1261,30 @@ export default function VehiclePlanning() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-none px-2 pb-3 pt-10 sm:px-3">
+    <div className="mx-auto w-full max-w-none px-2 pb-3 pt-3 sm:px-3">
       {/* After a Reset planning: when, by whom, the day Refresh from Notion starts from, and Undo (7 days). */}
       <ResetBanner planningStartDate={fleetQuery.data?.planningStartDate ?? null} lastReset={fleetQuery.data?.lastReset ?? null} lastRefreshedAt={fleetQuery.data?.lastRefreshedAt ?? null} isAdmin={canWrite && isAdmin} onRefreshNow={() => syncMutation.mutate()} onResetAgain={() => setResetOpen(true)} />
 
       {/* Fleet controls - search at the left; Companies (with the planning settings); at the right Filter, Available and Refresh from Notion
           (the only thing that ever talks to Notion; the page itself just reads vehicle_planning_state). */}
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <h2 className="mr-1 flex items-center gap-2 text-lg font-bold leading-none text-[#001d6e]">
+      <div className="mb-2 flex min-w-0 items-center gap-1.5 overflow-x-auto whitespace-nowrap">
+        <h2 className="mr-0.5 flex shrink-0 items-center gap-1.5 text-base font-bold leading-none text-[#001d6e]">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#001d6e] text-white"><CalendarClock className="h-4 w-4" /></span>
           Vehicle Planning
         </h2>
-        <div className="relative">
+        <div className="relative w-44 shrink-0 xl:w-56">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search vehicle, driver, order…"
-            className="h-8 w-56 rounded-full pl-8 text-xs"
+            className="h-7 w-full rounded-full pl-8 text-[11px]"
           />
         </div>
 
         <Popover open={filterOpen} onOpenChange={setFilterOpen}>
           <PopoverTrigger asChild>
-            <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs">
+            <Button size="sm" variant="outline" className="h-7 shrink-0 rounded-full px-2.5 text-[11px]">
               Companies{activeCompanyFilters.length > 0 ? ` (${activeCompanyFilters.length})` : ""}
             </Button>
           </PopoverTrigger>
@@ -1323,26 +1323,26 @@ export default function VehiclePlanning() {
 
         {/* Always visible for admins (it is also in the Companies settings and, right after a reset, in the yellow line). */}
         {canWrite && isAdmin && (
-          <Button size="sm" variant="outline" className="h-8 rounded-full border-red-200 px-3 text-xs text-red-700 hover:bg-red-50 hover:text-red-800" onClick={() => setResetOpen(true)}
+          <Button size="sm" variant="outline" className="h-7 shrink-0 rounded-full border-red-200 px-2.5 text-[11px] text-red-700 hover:bg-red-50 hover:text-red-800" onClick={() => setResetOpen(true)}
             title="Clear our planning board and start again from a day. Notion is not changed.">
             <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> Reset planning
           </Button>
         )}
 
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {/* "+ Filter": pick a column, then the same Values / Condition builder the other pages have. Every column header has its own filter button too. */}
           <AddColumnFilterButton
             columns={filterableColumns}
             conditions={columnConditions}
             onApply={setColumnCondition}
             onClear={clearColumnCondition}
-            className="h-8 gap-1 rounded-full border-dashed border-[#001d6e]/40 bg-white px-3 text-xs font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
+            className="h-7 gap-1 rounded-full border-dashed border-[#001d6e]/40 bg-white px-2.5 text-[11px] font-medium text-[#001d6e] hover:bg-[#001d6e]/5 hover:text-[#001d6e]"
           />
 
           {/* Available: the vehicles that are free on a day you pick (by their arrival / trip end). */}
           <Popover open={availableOpen} onOpenChange={setAvailableOpen}>
             <PopoverTrigger asChild>
-              <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${availableOn ? "border-emerald-500 bg-emerald-50 text-emerald-800" : ""}`}>
+              <Button size="sm" variant="outline" className={`h-7 shrink-0 rounded-full px-2.5 text-[11px] ${availableOn ? "border-emerald-500 bg-emerald-50 text-emerald-800" : ""}`}>
                 <Truck className="mr-1.5 h-3.5 w-3.5" />
                 {availableOn ? `Available on ${dayLabel(availableOn)}` : "Available"}
               </Button>
@@ -1358,13 +1358,13 @@ export default function VehiclePlanning() {
                 <span className="text-gray-500">
                   {availableOn ? `${allVehicles.filter((v) => isAvailableOn(v, availableOn)).length} vehicle(s) free` : "Pick a day to filter"}
                 </span>
-                {availableOn && <button type="button" className="text-gray-400 hover:text-red-500" onClick={() => { setAvailableOn(""); setAvailableOpen(false); }}>Clear</button>}
+                {availableOn && <button type="button" className="font-semibold text-red-600 hover:text-red-700" onClick={() => { setAvailableOn(""); setAvailableOpen(false); }}>Clear</button>}
               </div>
             </PopoverContent>
           </Popover>
 
           {/* Nothing refreshes this page by itself, so say how old the data is. */}
-          <span className="text-[11px] text-gray-500" title="Vehicle Planning reads Notion only when you press Refresh">
+          <span className="hidden 2xl:inline text-[10px] text-gray-500" title="Vehicle Planning reads Notion only when you press Refresh">
             Last refreshed: {fleetQuery.data?.lastRefreshedAt
               ? new Date(fleetQuery.data.lastRefreshedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true })
               : "never"}
@@ -1373,7 +1373,7 @@ export default function VehiclePlanning() {
               vehicle's latest order), then Refresh now. */}
           <Popover open={refreshOpen} onOpenChange={(open) => { setRefreshOpen(open); if (open) setRefreshFrom((fleetQuery.data?.planningStartDate ?? "").slice(0, 10)); }}>
             <PopoverTrigger asChild>
-              <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs" disabled={syncMutation.isPending}>
+              <Button size="sm" variant="outline" className="h-7 shrink-0 rounded-full px-2.5 text-[11px]" disabled={syncMutation.isPending}>
                 <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
                 {syncMutation.isPending ? "Refreshing…" : "Refresh from Notion"}
               </Button>
@@ -1397,7 +1397,7 @@ export default function VehiclePlanning() {
         </div>
       </div>
 
-      <div className="mb-2 flex flex-wrap items-center gap-2">
+      <div className="mb-2 flex min-w-0 items-center gap-1.5 overflow-x-auto whitespace-nowrap">
         {/* Which vehicles to list - same pill style as the 14 / 30 days switch. */}
         <div className="flex overflow-hidden rounded-full border border-gray-200 bg-white text-xs font-medium" role="group" aria-label="Vehicles to show">
           {([
@@ -1410,7 +1410,7 @@ export default function VehiclePlanning() {
               type="button"
               onClick={() => setOrderView(o.key)}
               aria-pressed={orderView === o.key}
-              className={`h-8 px-3 ${orderView === o.key ? "bg-[#001d6e] text-white" : "text-gray-600 hover:bg-gray-50"}`}
+              className={`h-7 shrink-0 px-2.5 text-[11px] ${orderView === o.key ? "bg-[#001d6e] text-white" : "text-gray-600 hover:bg-gray-50"}`}
             >
               {o.label}
             </button>
@@ -1426,15 +1426,15 @@ export default function VehiclePlanning() {
             key={c.key}
             type="button"
             onClick={() => setTripFilter((p) => (p === c.key ? "all" : c.key))}
-            className={`h-8 rounded-full border px-3 text-xs font-medium ${tripFilter === c.key ? c.on : `border-gray-200 bg-white ${c.off}`}`}
+            className={`h-7 shrink-0 rounded-full border px-2.5 text-[11px] font-medium ${tripFilter === c.key ? c.on : `border-gray-200 bg-white ${c.off}`}`}
             title={tripFilter === c.key ? "Click to show all vehicles again" : `Show only vehicles with ${c.label.toLowerCase()}`}
           >
             {c.label}: {c.count}
           </button>
         ))}
 
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-        <Button size="sm" variant="outline" className={`h-8 rounded-full px-3 text-xs ${adjustMode ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : ""}`}
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+        <Button size="sm" variant="outline" className={`h-7 rounded-full px-2.5 text-[11px] ${adjustMode ? "border-[#001d6e] bg-[#001d6e]/5 text-[#001d6e]" : ""}`}
           onClick={() => setAdjustMode((p) => !p)} aria-pressed={adjustMode} title={adjustMode ? "Hide the column width handles" : "Show the column width handles"}>
           <SlidersHorizontal className="mr-1.5 h-3.5 w-3.5" /> {adjustMode ? "Done" : "Columns"}
         </Button>
@@ -1453,7 +1453,7 @@ export default function VehiclePlanning() {
           }}
         >
           <PopoverTrigger asChild>
-            <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs">
+            <Button size="sm" variant="outline" className="h-7 rounded-full px-2.5 text-[11px]">
               <CalendarDays className="mr-1.5 h-3.5 w-3.5" />
               {windowDays <= 1
                 ? format(windowStart, "d MMM yyyy")
@@ -1512,20 +1512,20 @@ export default function VehiclePlanning() {
             )}
           </PopoverContent>
         </Popover>
-        <div className="flex items-center gap-1">
-          <Button size="sm" variant="outline" className="h-8 w-8 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -windowDays))} aria-label="Back a full window" title="Back a full window">
+        <div className="flex shrink-0 items-center gap-1">
+          <Button size="sm" variant="outline" className="h-7 w-7 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -windowDays))} aria-label="Back a full window" title="Back a full window">
             <ChevronsLeft className="h-4 w-4" />
           </Button>
-          <Button size="sm" variant="outline" className="h-8 w-8 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -SCROLL_STEP_DAYS))} aria-label="Back a day" title="Back a day (or scroll/arrow-key over the chart)">
+          <Button size="sm" variant="outline" className="h-7 w-7 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, -SCROLL_STEP_DAYS))} aria-label="Back a day" title="Back a day (or scroll/arrow-key over the chart)">
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <Button size="sm" variant="outline" className="h-8 rounded-full px-3 text-xs" onClick={() => { setWindowStart(startOfDay(new Date())); ganttRef.current?.scrollTo({ left: 0 }); }}>
+          <Button size="sm" variant="outline" className="h-7 rounded-full px-2.5 text-[11px]" onClick={() => { setWindowStart(startOfDay(new Date())); ganttRef.current?.scrollTo({ left: 0 }); }}>
             Today
           </Button>
-          <Button size="sm" variant="outline" className="h-8 w-8 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, SCROLL_STEP_DAYS))} aria-label="Forward a day" title="Forward a day (or scroll/arrow-key over the chart)">
+          <Button size="sm" variant="outline" className="h-7 w-7 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, SCROLL_STEP_DAYS))} aria-label="Forward a day" title="Forward a day (or scroll/arrow-key over the chart)">
             <ChevronRight className="h-4 w-4" />
           </Button>
-          <Button size="sm" variant="outline" className="h-8 w-8 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, windowDays))} aria-label="Forward a full window" title="Forward a full window">
+          <Button size="sm" variant="outline" className="h-7 w-7 rounded-full p-0" onClick={() => setWindowStart((d) => addDays(d, windowDays))} aria-label="Forward a full window" title="Forward a full window">
             <ChevronsRight className="h-4 w-4" />
           </Button>
         </div>
@@ -1781,8 +1781,9 @@ export default function VehiclePlanning() {
                                     <button
                                     key={dotKey}
                                     type="button"
-                                    onClick={(e) => { e.stopPropagation(); setSelCell({ vehicleId: v.id, dayIso }); ganttRef.current?.focus(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.trip.members.find((m) => m.startDay <= dayIso && memberEnd(dd.trip, m) >= dayIso) ?? dd.member, dayIso, x: r.left + r.width / 2, y: r.bottom }); }}
-                                    className={`${groupedDots.length > 2 ? "h-3 w-3" : "h-4 w-4"} relative z-10 shrink-0 cursor-pointer rounded-full shadow-sm transition-transform hover:scale-125 ${dotClass(dd.trip.state, cellDots.some((x) => x.conflict))} ${cellDots.some((x) => x.extended) ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setSelCell({ vehicleId: v.id, dayIso }); ganttRef.current?.focus(); const r = (e.currentTarget as HTMLElement).getBoundingClientRect(); setDotCard({ vehicle: v, trip: dd.trip, member: dd.trip.members.find((m) => m.startDay <= dayIso && memberEnd(dd.trip, m) >= dayIso) ?? dd.member, dayIso, x: r.left + r.width / 2, y: r.bottom }); }}
+                                    className={`${groupedDots.length > 2 ? "h-3 w-3" : "h-4 w-4"} relative z-20 shrink-0 cursor-pointer rounded-full shadow-sm transition-transform before:absolute before:-inset-2 before:content-[''] hover:scale-125 ${dotClass(dd.trip.state, cellDots.some((x) => x.conflict))} ${cellDots.some((x) => x.extended) ? "ring-2 ring-violet-500 ring-offset-1" : ""}`}
                                     title={`${dd.trip.members.length} order${dd.trip.members.length === 1 ? "" : "s"} · ${dayLabel(dayIso)} · ${stateText[dd.trip.state]}`}
                                   />
                                   );
@@ -2577,7 +2578,7 @@ export default function VehiclePlanning() {
           const { vehicle, trip, newEnd } = extendAsk;
           const clashes = clashesFor(vehicle, trip, newEnd);
           if (clashes.length > 0) { setExtendAsk(null); setStretchAsk({ vehicle, trip, newEnd, clashes, reason }); return; }
-          expectedEndMutation.mutate({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd, reason });
+          expectedEndMutation.mutate({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, orderNumbers: trip.members.map((m) => m.orderNumber), expectedEnd: newEnd, reason });
         }}
       />
 
@@ -2601,7 +2602,7 @@ export default function VehiclePlanning() {
                 onClick={async () => {
                   const { vehicle, trip, newEnd, clashes, reason } = stretchAsk;
                   try {
-                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd, reason });
+                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, orderNumbers: trip.members.map((m) => m.orderNumber), expectedEnd: newEnd, reason });
                     removeMutation.mutate({ vehicleId: vehicle.id, orderNumber: clashes[0].orderNumber });
                   } catch { /* the mutation already showed its error */ }
                 }}>
@@ -2611,7 +2612,7 @@ export default function VehiclePlanning() {
                 onClick={async () => {
                   const { vehicle, trip, newEnd, clashes, reason } = stretchAsk;
                   try {
-                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, expectedEnd: newEnd, reason });
+                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, orderNumbers: trip.members.map((m) => m.orderNumber), expectedEnd: newEnd, reason });
                     setChangeTarget({ vehicle, trip: clashes[0] });
                   } catch { /* the mutation already showed its error */ }
                 }}>
@@ -2623,7 +2624,7 @@ export default function VehiclePlanning() {
             <Button variant="outline" disabled={expectedEndMutation.isPending} onClick={() => setStretchAsk(null)}>Cancel the stretch</Button>
             <Button
               disabled={expectedEndMutation.isPending}
-              onClick={() => stretchAsk && expectedEndMutation.mutate({ vehicleId: stretchAsk.vehicle.id, orderNumber: stretchAsk.trip.orderNumber, expectedEnd: stretchAsk.newEnd, reason: stretchAsk.reason })}
+              onClick={() => stretchAsk && expectedEndMutation.mutate({ vehicleId: stretchAsk.vehicle.id, orderNumber: stretchAsk.trip.orderNumber, orderNumbers: stretchAsk.trip.members.map((m) => m.orderNumber), expectedEnd: stretchAsk.newEnd, reason: stretchAsk.reason })}
             >
               {expectedEndMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Keep it (stays red)"}
             </Button>

@@ -310,7 +310,16 @@ export function ExtendReasonDialog({ ask, pending, onCancel, onConfirm, onNewEnd
           <DialogDescription>
             {ask && (
               <>
-                {ask.orders.length > 1 ? "Orders " : "Order "}{ask.orders.map((o) => `#${o}`).join(" + ")}{ask.vehicleNumber ? ` · ${ask.vehicleNumber}` : ""}
+                <span className="block font-medium text-gray-800">
+                  {ask.orders.length > 1 ? `${ask.orders.length} Orders` : "Order"}{ask.vehicleNumber ? ` · ${ask.vehicleNumber}` : ""}
+                </span>
+                <div className="mt-1.5 flex max-h-24 flex-wrap gap-1 overflow-y-auto">
+                  {ask.orders.map((order) => (
+                    <span key={order} className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-semibold text-gray-700">
+                      #{order}
+                    </span>
+                  ))}
+                </div>
                 <span className="mt-1 block font-medium text-gray-800">
                   Ends {fmtDay(ask.oldEnd)} → {fmtDay(ask.newEnd)} <span className="text-red-600">(+{ask.extraDays} day{ask.extraDays === 1 ? "" : "s"})</span>
                 </span>

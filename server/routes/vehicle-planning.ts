@@ -719,7 +719,23 @@ router.post('/vehicle-planning/trips/arrival', requirePageWrite('vehicle-plannin
     if (!vehicleId || !orderNumber) return res.status(400).json({ message: 'vehicleId and orderNumber are required' });
     const { history, entry } = await loadTrip(vehicleId, orderNumber);
     if (!entry) return res.status(404).json({ message: 'That trip is not on this vehicle.' });
-    const { group, first } = tripEntries(history, orderNumber);
+
+    const requestedOrderNumbers = Array.isArray(req.body?.orderNumbers)
+      ? req.body.orderNumbers.map((value: unknown) => String(value ?? '').trim()).filter(Boolean)
+      : [orderNumber];
+    const affected = new Map<string, VehiclePlanningOrderEntry>();
+    for (const number of requestedOrderNumbers) {
+      const found = history.find((item) => item.orderNumber === number);
+      if (!found) continue;
+      for (const item of tripEntries(history, number).group) {
+        affected.set(item.orderNumber, item);
+      }
+    }
+    if (affected.size === 0) {
+      for (const item of tripEntries(history, orderNumber).group) affected.set(item.orderNumber, item);
+    }
+    const group = Array.from(affected.values());
+    const first = [...group].sort((a, b) => String(a.orderDate ?? '').localeCompare(String(b.orderDate ?? '')))[0];
     const { userCode, userName } = who(req);
     const vehicle = await storage.getVehicleInfo(vehicleId);
     const orders = group.map((g) => `#${g.orderNumber}`).join(', ');
