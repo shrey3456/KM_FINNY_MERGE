@@ -63,6 +63,7 @@ type Trip = {
   lastBusyDay: string; state: TripState; assumed: boolean;
   lockedReason?: string | null;   // why Free is not allowed (Loading has taken the order over)
   conflictAcceptedWith?: string | null; conflictAcceptedByName?: string | null;   // a person accepted the clash with this earlier order as it is
+  cancelledMembers?: TripMember[]; // cancelled orders that start later than the active shared-load orders
 };
 // The vehicle's own status on this page (maintenance, breakdown ...): our system only. days >= 1 keeps it out of Available for that many days.
 type ManualStatus = {
@@ -182,6 +183,15 @@ const isoDayDiff = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:
 function memberEnd(t: Trip, m: TripMember): string {
   if (m.plannedLastDay === t.plannedLastDay) return t.lastBusyDay;
   return m.plannedLastDay < t.lastBusyDay ? m.plannedLastDay : t.lastBusyDay;
+}
+
+// Shared-load labels include later cancelled orders, but only those later than every active member.
+function sharedTripDisplayMembers(trip: Trip): TripMember[] {
+  const active = trip.members ?? [];
+  const cancelled = (trip.cancelledMembers ?? []).filter((member) =>
+    active.every((activeMember) => member.startDay > activeMember.startDay),
+  );
+  return [...active, ...cancelled].sort((a, b) => a.startDay.localeCompare(b.startDay));
 }
 
 // The filter on each day heading: everything a vehicle can be on that one day. Every field that is set must hold (they are combined with AND).
@@ -2448,7 +2458,7 @@ export default function VehiclePlanning() {
                     embedded
                     ask={{
                       vehicleNumber: extendAsk.vehicle.vehicleNumber,
-                      orders: extendAsk.trip.members.map((m) => m.orderNumber),
+                      orders: sharedTripDisplayMembers(extendAsk.trip).map((member) => member.orderNumber),
                       oldEnd: extendAsk.trip.lastBusyDay,
                       newEnd: extendAsk.newEnd,
                       extraDays: Math.max(1, differenceInCalendarDays(parse(extendAsk.newEnd, "yyyy-MM-dd", new Date()), parse(extendAsk.trip.lastBusyDay, "yyyy-MM-dd", new Date()))),
@@ -2565,7 +2575,7 @@ export default function VehiclePlanning() {
       <ExtendReasonDialog
         ask={extendAsk && extendAsk.vehicle.id !== statusTarget?.id ? {
           vehicleNumber: extendAsk.vehicle.vehicleNumber,
-          orders: extendAsk.trip.members.map((m) => m.orderNumber),
+          orders: sharedTripDisplayMembers(extendAsk.trip).map((member) => member.orderNumber),
           oldEnd: extendAsk.trip.lastBusyDay,
           newEnd: extendAsk.newEnd,
           extraDays: Math.max(1, differenceInCalendarDays(parse(extendAsk.newEnd, "yyyy-MM-dd", new Date()), parse(extendAsk.trip.lastBusyDay, "yyyy-MM-dd", new Date()))),
@@ -2578,7 +2588,13 @@ export default function VehiclePlanning() {
           const { vehicle, trip, newEnd } = extendAsk;
           const clashes = clashesFor(vehicle, trip, newEnd);
           if (clashes.length > 0) { setExtendAsk(null); setStretchAsk({ vehicle, trip, newEnd, clashes, reason }); return; }
-          expectedEndMutation.mutate({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, orderNumbers: trip.members.map((m) => m.orderNumber), expectedEnd: newEnd, reason });
+          expectedEndMutation.mutate({
+            vehicleId: vehicle.id,
+            orderNumber: trip.orderNumber,
+            orderNumbers: trip.members.length > 1 ? trip.members.map((member) => member.orderNumber) : [trip.orderNumber],
+            expectedEnd: newEnd,
+            reason,
+          });
         }}
       />
 
@@ -2602,7 +2618,13 @@ export default function VehiclePlanning() {
                 onClick={async () => {
                   const { vehicle, trip, newEnd, clashes, reason } = stretchAsk;
                   try {
-                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, orderNumbers: trip.members.map((m) => m.orderNumber), expectedEnd: newEnd, reason });
+                    await expectedEndMutation.mutateAsync({
+                      vehicleId: vehicle.id,
+                      orderNumber: trip.orderNumber,
+                      orderNumbers: trip.members.length > 1 ? trip.members.map((member) => member.orderNumber) : [trip.orderNumber],
+                      expectedEnd: newEnd,
+                      reason,
+                    });
                     removeMutation.mutate({ vehicleId: vehicle.id, orderNumber: clashes[0].orderNumber });
                   } catch { /* the mutation already showed its error */ }
                 }}>
@@ -2612,7 +2634,13 @@ export default function VehiclePlanning() {
                 onClick={async () => {
                   const { vehicle, trip, newEnd, clashes, reason } = stretchAsk;
                   try {
-                    await expectedEndMutation.mutateAsync({ vehicleId: vehicle.id, orderNumber: trip.orderNumber, orderNumbers: trip.members.map((m) => m.orderNumber), expectedEnd: newEnd, reason });
+                    await expectedEndMutation.mutateAsync({
+                      vehicleId: vehicle.id,
+                      orderNumber: trip.orderNumber,
+                      orderNumbers: trip.members.length > 1 ? trip.members.map((member) => member.orderNumber) : [trip.orderNumber],
+                      expectedEnd: newEnd,
+                      reason,
+                    });
                     setChangeTarget({ vehicle, trip: clashes[0] });
                   } catch { /* the mutation already showed its error */ }
                 }}>
@@ -2624,7 +2652,13 @@ export default function VehiclePlanning() {
             <Button variant="outline" disabled={expectedEndMutation.isPending} onClick={() => setStretchAsk(null)}>Cancel the stretch</Button>
             <Button
               disabled={expectedEndMutation.isPending}
-              onClick={() => stretchAsk && expectedEndMutation.mutate({ vehicleId: stretchAsk.vehicle.id, orderNumber: stretchAsk.trip.orderNumber, orderNumbers: stretchAsk.trip.members.map((m) => m.orderNumber), expectedEnd: stretchAsk.newEnd, reason: stretchAsk.reason })}
+              onClick={() => stretchAsk && expectedEndMutation.mutate({
+                vehicleId: stretchAsk.vehicle.id,
+                orderNumber: stretchAsk.trip.orderNumber,
+                orderNumbers: stretchAsk.trip.members.length > 1 ? stretchAsk.trip.members.map((member) => member.orderNumber) : [stretchAsk.trip.orderNumber],
+                expectedEnd: stretchAsk.newEnd,
+                reason: stretchAsk.reason,
+              })}
             >
               {expectedEndMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Keep it (stays red)"}
             </Button>

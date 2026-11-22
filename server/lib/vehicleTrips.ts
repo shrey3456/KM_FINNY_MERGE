@@ -46,6 +46,7 @@ export type Trip = {
   assumed: boolean;            // closed quietly on its planned last day (nobody marked an arrival; see ASSUMED_AFTER_DAYS)
   conflictAcceptedWith: string | null;   // a person accepted the clash with this earlier order as it is (it is then not reported as a conflict)
   conflictAcceptedByName: string | null;
+  cancelledMembers?: TripMember[];       // cancelled orders joined later than the active shared-load orders
 };
 
 export type TripConflict = { orderNumber: string; startDay: string; withOrderNumber: string; withLastBusyDay: string };
@@ -158,6 +159,15 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
         driver: b.e.driver ?? null, driverNotionId: b.e.driverNotionId ?? null, notionNote: b.e.notionNote ?? null, notInSystem: !!b.e.notInSystem,
         startDay: b.p.start, plannedLastDay: b.p.last, tripDays: b.p.days,
       }));
+    const latestActiveStart = members.reduce((latest, member) => member.startDay > latest ? member.startDay : latest, members[0]?.startDay ?? '');
+    const cancelledMembers = all
+      .filter((b) => isCancelled(b) && (!latestActiveStart || b.p.start > latestActiveStart))
+      .sort((a, b) => a.p.start.localeCompare(b.p.start))
+      .map((b) => ({
+        orderNumber: b.e.orderNumber, proformaSlipId: b.e.proformaSlipId ?? null, partyName: b.e.partyName ?? null, plant: b.e.plant ?? null, status: b.e.status ?? null,
+        driver: b.e.driver ?? null, driverNotionId: b.e.driverNotionId ?? null, notionNote: b.e.notionNote ?? null, notInSystem: !!b.e.notInSystem,
+        startDay: b.p.start, plannedLastDay: b.p.last, tripDays: b.p.days,
+      }));
     trips.push({
       orderNumber: head.orderNumber, members, freeSameDay, freeFromDay: addDays(lastBusyDay, heldTillNextDay || oneDayTrip ? 1 : 0),
       proformaSlipId: head.proformaSlipId ?? null, partyName: head.partyName ?? null, plant: head.plant ?? null,
@@ -166,6 +176,7 @@ export function computeVehicleTrips(history: Entry[], today: string = todayIst()
       notInSystem: members.every((m) => m.notInSystem),
       tripDays: daysBetween(startDay, plannedLastDay) + 1, startDay, plannedLastDay, expectedEnd, expectedEndReason, arrivedOn, lastBusyDay, state, assumed,
       conflictAcceptedWith: head.conflictAcceptedWith ?? null, conflictAcceptedByName: head.conflictAcceptedByName ?? null,
+      cancelledMembers,
     });
   }
   trips.sort((a, b) => a.startDay.localeCompare(b.startDay) || a.orderNumber.localeCompare(b.orderNumber));
