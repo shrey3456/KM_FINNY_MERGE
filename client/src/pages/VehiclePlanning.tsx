@@ -922,6 +922,7 @@ export default function VehiclePlanning() {
   });
 
   const allVehicles = fleetQuery.data?.vehicles ?? [];
+  const todayIso = isoOf(new Date());
   const availableCompanies = settingsQuery.data?.availableCompanies ?? [];
   // What is saved (server) vs what the boxes show right now: the boxes follow a click straight away and
   // fall back to the saved list when it changes or a save fails.
@@ -1270,6 +1271,16 @@ export default function VehiclePlanning() {
     );
   }
 
+  const countDay = availableOn || todayIso;
+  const availableCount = allVehicles.filter((vehicle) => isAvailableOn(vehicle, countDay)).length;
+  const onTripCount = allVehicles.filter((vehicle) =>
+    (vehicle.trips ?? []).some((trip) =>
+      trip.state !== "cancelled" &&
+      trip.startDay <= countDay &&
+      countDay < trip.freeFromDay,
+    ),
+  ).length;
+
   return (
     <div className="mx-auto w-full max-w-none px-2 pb-3 pt-3 sm:px-3">
       {/* After a Reset planning: when, by whom, the day Refresh from Notion starts from, and Undo (7 days). */}
@@ -1354,7 +1365,7 @@ export default function VehiclePlanning() {
             <PopoverTrigger asChild>
               <Button size="sm" variant="outline" className={`h-7 shrink-0 rounded-full px-2.5 text-[11px] ${availableOn ? "border-emerald-500 bg-emerald-50 text-emerald-800" : ""}`}>
                 <Truck className="mr-1.5 h-3.5 w-3.5" />
-                {availableOn ? `Available on ${dayLabel(availableOn)}` : "Available"}
+                {availableOn ? `Available on ${dayLabel(availableOn)} · ${availableCount} / ${onTripCount}` : `Available ${availableCount} · On trip ${onTripCount}`}
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-72 space-y-3" align="end">
@@ -1364,9 +1375,25 @@ export default function VehiclePlanning() {
                 <button type="button" className={chipCls(availableOn === format(new Date(), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(new Date(), "yyyy-MM-dd"))}>Today</button>
                 <button type="button" className={chipCls(availableOn === format(addDays(new Date(), 1), "yyyy-MM-dd"))} onClick={() => setAvailableOn(format(addDays(new Date(), 1), "yyyy-MM-dd"))}>Tomorrow</button>
               </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-center">
+                  <div className="text-lg font-bold tabular-nums text-emerald-700">{availableCount}</div>
+                  <div className="text-[10px] font-semibold text-emerald-700">Available</div>
+                </div>
+                <div className="rounded-lg border border-purple-200 bg-purple-50 px-2.5 py-2 text-center">
+                  <div className="text-lg font-bold tabular-nums text-purple-700">{onTripCount}</div>
+                  <div className="text-[10px] font-semibold text-purple-700">On trip</div>
+                </div>
+              </div>
               <div className="flex items-center justify-between border-t pt-2 text-xs">
                 <span className="text-gray-500">
-                  {availableOn ? `${allVehicles.filter((v) => isAvailableOn(v, availableOn)).length} vehicle(s) free` : "Pick a day to filter"}
+                  {availableOn ? (
+                    <span className="flex items-center gap-2">
+                      <span className="font-semibold text-emerald-700">{availableCount} Available</span>
+                      <span className="text-gray-300">·</span>
+                      <span className="font-semibold text-purple-700">{onTripCount} On trip</span>
+                    </span>
+                  ) : "Pick a day to filter"}
                 </span>
                 {availableOn && <button type="button" className="font-semibold text-red-600 hover:text-red-700" onClick={() => { setAvailableOn(""); setAvailableOpen(false); }}>Clear</button>}
               </div>
