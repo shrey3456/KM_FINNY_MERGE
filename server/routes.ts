@@ -3441,11 +3441,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     console.error('[Daily Notion Sync] Could not start:', err);
   }
 
-  // Auto Dispatch: a load started after this went live becomes Dispatched by itself an hour after it was completed (app and Notion) - see
-  // server/services/autoDispatch.ts. It reads the database every few minutes, so a restart never loses a dispatch.
-  const { startAutoDispatchScheduler } = await import('./services/autoDispatch');
-  startAutoDispatchScheduler();
-
   // Return the HTTP server with WebSocket support
   return httpServer;
 }

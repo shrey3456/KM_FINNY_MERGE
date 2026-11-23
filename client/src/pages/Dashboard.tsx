@@ -50,7 +50,7 @@ const Home = () => {
     refetchInterval: 30000,
   });
 
-  // Slider pictures are the "Product Ad" rows of the Notion attachment database (server/services/homeSlidesSync)
+  // Slider pictures are the "Festival" rows of the Notion attachment database (server/services/homeSlidesSync)
   const { data: homeSlides } = useQuery<{ welcome: string | null; ads: { title: string; url: string }[] }>({
     queryKey: ['/api/home-slides'],
     queryFn: () => fetch('/api/home-slides').then((r) => r.json()),
@@ -90,7 +90,7 @@ const Home = () => {
       <Header userName={userName} onLogout={logout} />
       <div className="p-4 lg:p-6 max-w-md mx-auto">
         
-        {/* Image Slider - Product Ad slides from Notion */}
+        {/* Image Slider - Festival slides from Notion */}
         <div className="mb-4 overflow-hidden" ref={emblaRef}>
           <div className="flex">
             {slides.map((slide) => (

@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import sharp from 'sharp';
 import { extractText } from '../lib/notionProperties';
 
-// Home slides — the Dashboard slider ("Product Ad" rows) and the Login welcome photo ("Welcome
+// Home slides — the Dashboard slider ("Festival" rows: INF1, INF2 …) and the Login welcome photo ("Welcome
 // Screen" row) come from the Notion attachment database (NOTION_ATTACHMENT_STORAGE_PATH). Notion is
 // the source; the bucket (HOME_SLIDES_BUCKET) only holds compressed copies, because Notion file
 // URLs expire after ~1 hour. Every other Category in that database is ignored.
@@ -18,7 +18,7 @@ const BUCKET = (process.env.HOME_SLIDES_BUCKET ?? 'home-slides').trim();
 const DATABASE_ID = (process.env.NOTION_ATTACHMENT_STORAGE_PATH ?? '').trim();
 const MANIFEST_KEY = 'manifest.json';
 
-const CATEGORY_AD = 'Product Ad';
+const CATEGORY_AD = 'Festival';
 const CATEGORY_WELCOME = 'Welcome Screen';
 
 const s3 = new S3Client({
@@ -103,7 +103,7 @@ async function readRows(): Promise<{ welcome: Row | null; ads: Row[] }> {
   } while (cursor);
 
   const ads = rows.filter((r) => r.category === CATEGORY_AD).map((r) => r.row)
-    .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true })); // AD1, AD2 … AD10
+    .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true })); // INF1, INF2 … INF10
   const welcome = rows.filter((r) => r.category === CATEGORY_WELCOME).map((r) => r.row)
     .sort((a, b) => a.title.localeCompare(b.title, undefined, { numeric: true }))[0] ?? null;
   return { welcome, ads };

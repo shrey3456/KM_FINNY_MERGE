@@ -9,6 +9,7 @@ import { applyProductPageFromNotionWebhook } from '../services/notionInventorySy
 import { isNotionStatusGuarded, isLaterStageStatus } from '../services/notionOrderStatusSync';
 import { dispatchUnlockPatch } from '../services/autoDispatch';
 import { syncHomeSlides, homeSlidesDatabaseId } from '../services/homeSlidesSync';
+import { applyFestivalPage, removeFestivalPage } from '../services/festivalWhatsapp';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Notion webhook — Notion calls this the moment a page changes, so the app follows Notion directly
@@ -111,6 +112,9 @@ async function processPage(pageId: string, eventType: string, attempt = 0): Prom
   const parentId = normalizeId(page?.parent?.database_id);
   if (parentId && parentId === homeSlidesDatabaseId()) {
     scheduleHomeSlides(eventType, pageId);
+    // Festival cards in the same database also feed the WhatsApp greetings schedule.
+    try { logActivity({ type: eventType, pageId, database: 'attachment', result: `festival schedule: ${await applyFestivalPage(page)}` }); }
+    catch (error) { logActivity({ type: eventType, pageId, database: 'attachment', result: 'error', detail: `festival schedule: ${error instanceof Error ? error.message : String(error)}` }); }
     return;
   }
   const database =
@@ -205,6 +209,7 @@ router.post('/webhooks/notion', (req: Request, res: Response) => {
   }
   if (type === 'page.deleted') {
     scheduleHomeSlides(type, pageId); // a trashed ad / welcome row must disappear from the app
+    void removeFestivalPage(pageId).catch(() => {}); // a trashed festival card must stop being sent
     logActivity({ type, pageId, result: 'ignored', detail: 'page moved to trash in Notion — nothing is deleted in the app' });
     return;
   }

@@ -83,6 +83,10 @@ app.use((req, res, next) => {
       ADD COLUMN IF NOT EXISTS product_image_hash TEXT
     `);
     await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS contact_number TEXT
+    `);
+    await pool.query(`
       ALTER TABLE plants
       ADD COLUMN IF NOT EXISTS is_auto_complete_enabled BOOLEAN DEFAULT false
     `);
@@ -693,6 +697,12 @@ app.use((req, res, next) => {
     // pass at boot catches anything changed while the server was down — see services/homeSlidesSync.
     const { syncHomeSlides } = await import('./services/homeSlidesSync');
     setTimeout(() => { void syncHomeSlides(); }, 10 * 1000);
+
+    // Festival greetings on WhatsApp (Notion "Festival" rows, sent on their Date). Dry-run unless
+    // WHATSAPP_FESTIVAL_ENABLED=true — see services/festivalWhatsapp.
+    const { ensureFestivalWhatsappSchema, startFestivalWhatsappScheduler } = await import('./services/festivalWhatsapp');
+    await ensureFestivalWhatsappSchema();
+    startFestivalWhatsappScheduler();
 
     // Vehicle Planning no longer syncs from Notion by itself (no daily timer, nothing at start-up): it reads Notion only when a planner presses
     // "Refresh from Notion" (POST /vehicle-planning/sync) and when an Assign writes to one order.

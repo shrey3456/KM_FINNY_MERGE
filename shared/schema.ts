@@ -14,6 +14,7 @@ export const users = pgTable("users", {
   name: text("name"),
   designation: text("designation"),
   department: text("department"),
+  contactNumber: text("contact_number"), // phone / WhatsApp number, digits with optional country code
   role: text("role").default("user"), // "user" | "admin"
   profileImage: text("profile_image"), // Base64-encoded JPEG
   plants: text("plants").default("[]"), // JSON array of plant names e.g. ["VALSAD","INDORE"]

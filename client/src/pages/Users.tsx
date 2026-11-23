@@ -17,7 +17,7 @@ import {
 import {
   Plus, Search, Edit, Trash, Loader2, Users as UsersIcon, Check, X, ChevronsUpDown,
   ChevronLeft, ChevronRight, LogOut,
-  UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck,
+  UserPlus, UserCog, AlertTriangle, KeyRound, IdCard, ShieldCheck, Filter,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { User } from '@shared/schema';
@@ -85,6 +85,10 @@ const userFormSchema = z.object({
   role: z.enum(["admin", "super-admin", "read/write", "read"]).default("read"),
   department: z.string().optional(),
   designation: z.string().optional(),
+  contactNumber: z.string().trim().optional().refine(
+    (v) => { if (!v) return true; const d = v.replace(/\D/g, ''); return /^\+?[0-9][0-9\s-]*$/.test(v) && d.length >= 11 && d.length <= 15; },
+    "Include the country code, e.g. +91 98765 43210",
+  ),
   plants: z.array(z.string()).default([]),
   allowedPages: z.array(z.string()).default([]),
   pageWriteAccess: z.array(z.string()).default([]),
@@ -106,6 +110,18 @@ const PLANT_PREFIXES: Record<string, string> = {
   INDORE: "IND",
   LUCKNOW: "LKO",
 };
+
+// Department display order: MANAGEMENT, IT, then Valsad departments, then Indore ones, then the
+// rest A to Z (users with no department last).
+function departmentRank(dept: string): number {
+  const u = dept.trim().toUpperCase();
+  if (!u || u === '(NONE)') return 99;
+  if (u === 'MANAGEMENT') return 0;
+  if (u === 'IT') return 1;
+  if (u.includes('VALSAD')) return 2;
+  if (u.includes('INDORE')) return 3;
+  return 4;
+}
 
 function plantPrefix(plant: string): string {
   const normalized = plant.trim().toUpperCase();
@@ -175,6 +191,7 @@ function MultiSelectField({
   onChange,
   disabled,
   disabledNote,
+  colorPlants,
 }: {
   label: string;
   options: readonly { readonly key: string; readonly label: string }[];
@@ -182,6 +199,8 @@ function MultiSelectField({
   onChange: (val: string[]) => void;
   disabled?: boolean;
   disabledNote?: string;
+  /** Render options as Plant Management-coloured capsules (for the plants field). */
+  colorPlants?: boolean;
 }) {
   const toggle = (key: string) => {
     if (selected.includes(key)) {
@@ -207,6 +226,7 @@ function MultiSelectField({
             ) : (
               selected.map(k => {
                 const opt = options.find(o => o.key === k);
+                if (colorPlants) return <PlantBadge key={k} plant={k} className="text-xs" />;
                 return (
                   <Badge key={k} variant="secondary" className="text-xs font-normal">
                     {opt?.label ?? k}
@@ -237,7 +257,9 @@ function MultiSelectField({
                   checked={selected.includes(opt.key)}
                   onCheckedChange={() => toggle(opt.key)}
                 />
-                <span className="text-sm">{opt.label}</span>
+                {colorPlants
+                  ? <PlantBadge plant={opt.key} className="text-xs" />
+                  : <span className="text-sm">{opt.label}</span>}
               </div>
             ))}
           </div>
@@ -249,10 +271,14 @@ function MultiSelectField({
 
 const Users = () => {
   const [searchTerm, setSearchTerm] = usePersistentFilter('users:search', '');
+  // '' = all states. Otherwise a plant state code (e.g. GJ) from Plant Management.
+  const [stateFilter, setStateFilter] = usePersistentFilter('users:state', '');
+  // Departments ticked in the Department column's header filter; empty = every department.
+  const [deptFilter, setDeptFilter] = usePersistentFilter<string[]>('users:dept', []);
   const [pageIndex, setPageIndex] = useState(0);
   // Searching re-cuts the list, so start it from the top rather than leaving you on a page number
   // that means something different (or nothing at all) against the new set.
-  useEffect(() => { setPageIndex(0); }, [searchTerm]);
+  useEffect(() => { setPageIndex(0); }, [searchTerm, stateFilter, deptFilter]);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -264,7 +290,7 @@ const Users = () => {
   const canSeePins = viewer?.role === 'admin';
   const [logoutTarget, setLogoutTarget] = useState<User | null>(null);
   // Start with the business identifier people use to find a colleague, not an avatar-only column.
-  const DEFAULT_VISIBLE_COLUMN_IDS = ['userCode', 'name', 'username', 'department', 'designation', 'role', 'plants', 'actions'];
+  const DEFAULT_VISIBLE_COLUMN_IDS = ['userCode', 'name', 'username', 'department', 'designation', 'contactNumber', 'role', 'plants', 'actions'];
   // Column visibility/order are real preferences, not working context for one sitting — saved to
   // localStorage (not sessionStorage) so choosing which columns to see survives closing the
   // browser/logging out, and only changes again when the user actually touches it here.
@@ -319,13 +345,21 @@ const Users = () => {
   });
 
   // Fetch plants for multi-select
-  const { data: plantsList = [] } = useQuery<{ id: number; name: string }[]>({
+  const { data: plantsList = [] } = useQuery<{ id: number; name: string; state?: string | null }[]>({
     queryKey: ['/api/plants'],
     queryFn: async () => {
       const res = await apiRequest('GET', '/api/plants');
       return res.json();
     }
   });
+  // A user belongs to a state when any of their plants is in it (state comes from Plant Management).
+  const plantState = (name: string) =>
+    (plantsList.find((p) => p.name.toUpperCase() === name.toUpperCase())?.state ?? '').trim().toUpperCase();
+  const userInState = (user: User, state: string) =>
+    parseJsonArray((user as any).plants).some((pl) => plantState(pl) === state);
+  const stateCodes = Array.from(
+    new Set(plantsList.map((p) => (p.state ?? '').trim().toUpperCase()).filter(Boolean)),
+  ).sort();
   const plantOptions = plantsList.map((p: { id: number; name: string }) => ({ key: p.name, label: p.name }));
 
   // Create user mutation
@@ -344,7 +378,7 @@ const Users = () => {
       queryClient.invalidateQueries({ queryKey: ['/api/users'] });
       addUserForm.reset({
         userCode: "", username: "", pin: "", name: "",
-        role: "read", department: "", designation: "",
+        role: "read", department: "", designation: "", contactNumber: "",
         plants: [], allowedPages: [], pageWriteAccess: [],
       });
       setIsAddDialogOpen(false);
@@ -413,8 +447,16 @@ const Users = () => {
     },
   });
 
-  const filteredUsers = searchTerm && Array.isArray(users)
-    ? users.filter((user: User) =>
+  const allUsers: User[] = Array.isArray(users) ? users : [];
+  const deptKey = (u: User) => (u.department || '').trim() || '(none)';
+  const departmentOptions = Array.from(new Set(allUsers.map(deptKey))).sort((a, b) => {
+    return departmentRank(a) - departmentRank(b) || a.localeCompare(b, undefined, { sensitivity: 'base' });
+  });
+  const stateScopedUsers = allUsers.filter(
+    (u) => (!stateFilter || userInState(u, stateFilter)) && (deptFilter.length === 0 || deptFilter.includes(deptKey(u))),
+  );
+  const filteredUsers = searchTerm
+    ? stateScopedUsers.filter((user: User) =>
         user.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
         (user.name && user.name.toLowerCase().includes(searchTerm.toLowerCase())) ||
         (user.userCode && user.userCode.toLowerCase().includes(searchTerm.toLowerCase())) ||
@@ -422,12 +464,20 @@ const Users = () => {
         (user.role && user.role.toLowerCase().includes(searchTerm.toLowerCase())) ||
         (user.designation && user.designation.toLowerCase().includes(searchTerm.toLowerCase()))
       )
-    : Array.isArray(users) ? users : [];
-  // User Code is the predictable initial order. Clicking any sortable table header replaces it
-  // with that column's ascending/descending sort; equal values retain this code ordering.
-  const orderedUsers = [...filteredUsers].sort((a: User, b: User) =>
-    (a.userCode || '').localeCompare(b.userCode || '', undefined, { numeric: true, sensitivity: 'base' }),
-  );
+    : stateScopedUsers;
+  // Opening order: grouped by department — see departmentRank, then Directors first, then User Code within each
+  // department. Clicking a sortable header replaces it with that column's sort; equal values
+  // retain this department/code ordering.
+  const orderedUsers = [...filteredUsers].sort((a: User, b: User) => {
+    const da = (a.department || '').trim();
+    const db = (b.department || '').trim();
+    if (departmentRank(da) !== departmentRank(db)) return departmentRank(da) - departmentRank(db);
+    const dirA = (a.designation || '').trim().toUpperCase() === 'DIRECTOR';
+    const dirB = (b.designation || '').trim().toUpperCase() === 'DIRECTOR';
+    return da.localeCompare(db, undefined, { sensitivity: 'base' })
+      || (dirA !== dirB ? (dirA ? -1 : 1) : 0)
+      || (a.userCode || '').localeCompare(b.userCode || '', undefined, { numeric: true, sensitivity: 'base' });
+  });
 
   const isAdmin = true;
 
@@ -436,7 +486,7 @@ const Users = () => {
     resolver: zodResolver(userFormSchema),
     defaultValues: {
       userCode: "", username: "", pin: "", name: "",
-      role: "read", department: "", designation: "",
+      role: "read", department: "", designation: "", contactNumber: "",
       plants: [], allowedPages: [], pageWriteAccess: [],
     }
   });
@@ -446,7 +496,7 @@ const Users = () => {
     resolver: zodResolver(userFormSchema.partial()),
     defaultValues: {
       userCode: "", username: "", name: "",
-      role: "read", department: "", designation: "",
+      role: "read", department: "", designation: "", contactNumber: "",
       plants: [], allowedPages: [], pageWriteAccess: [],
     }
   });
@@ -459,7 +509,7 @@ const Users = () => {
     if (!open) {
       addUserForm.reset({
         userCode: "", username: "", pin: "", name: "",
-        role: "read", department: "", designation: "",
+        role: "read", department: "", designation: "", contactNumber: "",
         plants: [], allowedPages: [], pageWriteAccess: [],
       });
     }
@@ -488,6 +538,7 @@ const Users = () => {
       role: (user.role as any) || "read",
       department: user.department || "",
       designation: user.designation || "",
+      contactNumber: (user as any).contactNumber || "",
       plants: parseJsonArray((user as any).plants),
       allowedPages: parseJsonArray((user as any).allowedPages),
       pageWriteAccess: parseJsonArray((user as any).pageWriteAccess),
@@ -501,8 +552,7 @@ const Users = () => {
   };
 
   const [departments, setDepartments] = useState<string[]>([
-    "MANAGEMENT", "IT", "BILLING", "SALES", "DISPATCH {VALSAD}", "DISPATCH {INDORE}", "DISPATCH {LUCKNOW}", "ACCOUNTS", "STEER", "M&S",
-    "LOADING"
+    "MANAGEMENT", "IT", "BILLING", "SALES", "DISPATCH {VALSAD}", "DISPATCH {INDORE}", "DISPATCH {LUCKNOW}", "ACCOUNTS", "STEER", "M&S"
   ]);
   const [customDepartment, setCustomDepartment] = useState("");
   const [isAddingDepartment, setIsAddingDepartment] = useState(false);
@@ -598,15 +648,27 @@ const Users = () => {
         </FormSection>
 
         <FormSection icon={UserCog} title="Profile">
-        <FormField control={form.control} name="name" render={({ field }) => (
-          <FormItem>
-            <FormLabel>Display Name</FormLabel>
-            <FormControl>
-              <Input placeholder="John Doe" {...field} value={field.value || ''} />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        )} />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <FormField control={form.control} name="name" render={({ field }) => (
+            <FormItem>
+              <FormLabel>Display Name</FormLabel>
+              <FormControl>
+                <Input placeholder="John Doe" {...field} value={field.value || ''} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )} />
+
+          <FormField control={form.control} name="contactNumber" render={({ field }) => (
+            <FormItem>
+              <FormLabel>Contact Number</FormLabel>
+              <FormControl>
+                <Input type="tel" inputMode="tel" placeholder="+91 98765 43210" {...field} value={field.value || ''} />
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )} />
+        </div>
 
         <div className="grid grid-cols-2 gap-4">
           <FormField control={form.control} name="role" render={({ field }) => (
@@ -725,6 +787,7 @@ const Users = () => {
             <FormControl>
               <MultiSelectField
                 label="plants"
+                colorPlants
                 options={plantOptions}
                 selected={field.value ?? []}
                 onChange={field.onChange}
@@ -847,8 +910,54 @@ const Users = () => {
       render: (user) => user.designation || '-',
     },
     {
+      id: 'contactNumber',
+      header: 'Contact',
+      width: 125,
+      sortable: true,
+      accessor: (user) => (user as any).contactNumber,
+      cellClassName: 'tabular-nums',
+      render: (user) => (user as any).contactNumber || <span className="text-gray-400">—</span>,
+    },
+    {
       id: 'department',
       header: 'Department',
+      headerFilter: (
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              aria-label="Filter by department"
+              className={`rounded p-0.5 ${deptFilter.length ? 'text-yellow-300' : 'text-white/60 hover:text-white'}`}
+            >
+              <Filter className={`h-3 w-3 ${deptFilter.length ? 'fill-current' : ''}`} />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-60 p-0">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <span className="text-xs font-semibold text-gray-700">Department</span>
+              {deptFilter.length > 0 && (
+                <button type="button" className="text-xs text-[#001d6e] hover:underline" onClick={() => setDeptFilter([])}>
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="max-h-64 overflow-y-auto p-1.5" onWheel={(e) => e.stopPropagation()}>
+              {departmentOptions.map((d) => (
+                <label key={d} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm normal-case hover:bg-muted">
+                  <Checkbox
+                    checked={deptFilter.includes(d)}
+                    onCheckedChange={() =>
+                      setDeptFilter(deptFilter.includes(d) ? deptFilter.filter((x) => x !== d) : [...deptFilter, d])
+                    }
+                  />
+                  <span className="flex-1 truncate">{d}</span>
+                  <span className="text-xs tabular-nums text-gray-400">{allUsers.filter((u) => deptKey(u) === d).length}</span>
+                </label>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
+      ),
       width: 120,
       sortable: true,
       accessor: (user) => user.department,
@@ -929,75 +1038,92 @@ const Users = () => {
   return (
     <div className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50/70 p-3 sm:p-5 lg:p-6">
       <div className="mx-auto w-full max-w-[1800px]">
-        <div className="mb-4 sm:mb-5">
-          <h2 className="text-xl font-bold tracking-tight text-gray-900 sm:text-2xl">User Management</h2>
-          <p className="mt-1 text-sm text-gray-500">Manage accounts, departments, access, and assigned plants.</p>
-        </div>
-
-        <Card className="overflow-hidden border-slate-200 bg-white shadow-sm">
-          {/* Header bar — title + search, filters directly beneath */}
-          <div className="bg-white border-b border-gray-200 px-3 sm:px-5 py-3 sm:py-3.5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-3">
-                <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-full bg-[#001d6e] text-white">
-                  <UsersIcon className="h-4 w-4 sm:h-5 sm:w-5" />
-                </div>
-                <div>
-                  <div className="text-base font-bold tracking-tight text-gray-900 sm:text-lg">Directory</div>
-                  <div className="mt-0.5 text-xs leading-none text-gray-400">
-                    {searchTerm
-                      ? `${filteredUsers.length} of ${Array.isArray(users) ? users.length : 0} users`
-                      : `${Array.isArray(users) ? users.length : 0} users`}
-                  </div>
-                </div>
-              </div>
-              <div className="relative w-full sm:w-72 sm:shrink-0">
-                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
-                <input
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Search users…"
-                  className="h-9 w-full rounded-lg border border-gray-200 bg-slate-50 pl-9 pr-8 text-sm text-gray-700 placeholder:text-gray-400 transition focus:border-[#001d6e]/40 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#001d6e]/10"
-                />
-                {searchTerm && (
-                  <button onClick={() => setSearchTerm('')} className="absolute right-2.5 top-2.5 text-gray-400 hover:text-gray-600">
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Filters */}
-            <div className="mt-3 flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center">
-              <DataTableColumnToggle
-              columnOrder={columnOrder}
-              onColumnOrderChange={setColumnOrder}
-                columns={userColumns}
-                visibleColumnIds={visibleColumnIds}
-                onToggleColumn={(id) =>
-                  setVisibleColumnIds((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(id)) next.delete(id);
-                    else next.add(id);
-                    return next;
-                  })
-                }
-                onSetAll={(visible) =>
-                  setVisibleColumnIds(visible ? new Set(userColumns.map((c) => c.id)) : new Set())
-                }
-                buttonClassName={FILTER_BTN_CLASS}
-              />
-              <Button
-                className={`${FILTER_BTN_CLASS} flex items-center gap-1 sm:ml-auto`}
-                onClick={() => setIsAddDialogOpen(true)}
-                disabled={!isAdmin}
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Add User</span>
-              </Button>
+        <div className="mb-4 flex flex-col gap-3 sm:mb-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <UsersIcon className="h-6 w-6 shrink-0 text-[#001d6e] sm:h-7 sm:w-7" />
+            <div>
+              <h2 className="text-xl font-bold tracking-tight text-gray-900 sm:text-2xl">User Management</h2>
+              <p className="mt-0.5 text-sm text-gray-500">
+                {searchTerm || stateFilter || deptFilter.length
+                  ? `${filteredUsers.length} of ${Array.isArray(users) ? users.length : 0} users`
+                  : `${Array.isArray(users) ? users.length : 0} users`}
+                {" · "}Manage accounts, departments, access, and assigned plants.
+              </p>
             </div>
           </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="relative w-full sm:w-64">
+              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+              <input
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search users…"
+                className="h-9 w-full rounded-lg border border-gray-200 bg-white pl-9 pr-8 text-sm text-gray-700 placeholder:text-gray-400 transition focus:border-[#001d6e]/40 focus:outline-none focus:ring-2 focus:ring-[#001d6e]/10"
+              />
+              {searchTerm && (
+                <button onClick={() => setSearchTerm('')} className="absolute right-2.5 top-2.5 text-gray-400 hover:text-gray-600">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            <DataTableColumnToggle
+              columnOrder={columnOrder}
+              onColumnOrderChange={setColumnOrder}
+              columns={userColumns}
+              visibleColumnIds={visibleColumnIds}
+              onToggleColumn={(id) =>
+                setVisibleColumnIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                })
+              }
+              onSetAll={(visible) =>
+                setVisibleColumnIds(visible ? new Set(userColumns.map((c) => c.id)) : new Set())
+              }
+              buttonClassName={FILTER_BTN_CLASS}
+            />
+            <Button
+              className={`${FILTER_BTN_CLASS} flex items-center gap-1`}
+              onClick={() => setIsAddDialogOpen(true)}
+              disabled={!isAdmin}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Add User</span>
+            </Button>
+          </div>
+        </div>
 
+        {stateCodes.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Filter by state">
+            {[{ code: '', label: 'All', count: allUsers.length }, ...stateCodes.map((code) => ({
+              code, label: code, count: allUsers.filter((u) => userInState(u, code)).length,
+            }))].map(({ code, label, count }) => {
+              const active = stateFilter === code;
+              return (
+                <button
+                  key={code || 'all'}
+                  type="button"
+                  onClick={() => setStateFilter(code)}
+                  aria-pressed={active}
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition ${
+                    active
+                      ? 'border-[#001d6e] bg-[#001d6e] text-white'
+                      : code === ''
+                        ? 'border-slate-200 bg-white text-slate-600 hover:border-[#001d6e]/40 hover:text-[#001d6e]'
+                        : 'border-blue-200 bg-blue-50 text-blue-700 hover:border-blue-300'
+                  }`}
+                >
+                  {label}
+                  <span className={`rounded-full px-1.5 text-[10px] tabular-nums ${active ? 'bg-white/20' : 'bg-slate-100 text-slate-500'}`}>{count}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <Card className="overflow-hidden border-slate-200 bg-white shadow-sm">
           <CardContent className="p-0">
             {/* Cards are reserved for genuinely narrow screens; wider layouts use the data grid so
                 the available workspace is not left empty. */}
@@ -1006,7 +1132,7 @@ const Users = () => {
                 <SectionSkeleton lines={4} />
               ) : filteredUsers.length === 0 ? (
                 <p className="py-10 text-center text-sm text-gray-400">
-                  {searchTerm ? "No users found matching your search." : "No users have been added yet."}
+                  {searchTerm || stateFilter || deptFilter.length ? "No users found matching your filters." : "No users have been added yet."}
                 </p>
               ) : (
                 <>
@@ -1143,7 +1269,7 @@ const Users = () => {
               loadingLabel="Loading users…"
               emptyState="No users have been added yet."
               noResultsState="No users found matching your search."
-              hasActiveFilters={!!searchTerm}
+              hasActiveFilters={!!searchTerm || !!stateFilter || deptFilter.length > 0}
               sortMode="client"
               // Paginated, with no isStickyHeader/maxHeight, so the table has no inner scroll box
               // of its own — matching develop.

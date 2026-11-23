@@ -3,6 +3,8 @@ import type { ReactNode, ComponentType } from "react";
 export interface DataTableColumn<TData> {
   id: string;
   header: ReactNode;
+  /** Optional control (e.g. a filter popover) drawn in the header after the sort arrow. Clicks on it never trigger a sort. */
+  headerFilter?: ReactNode;
   accessor?: (row: TData) => unknown;
   /** rowIndex is the row's 0-based position in the full sorted/filtered dataset (not just the current page). */
   render?: (row: TData, rowIndex: number) => ReactNode;

@@ -847,6 +847,16 @@ export function DataTable<TData>({
                             ) : (
                               <ChevronsUpDown className="h-3 w-3 opacity-30" />
                             ))}
+                          {col.headerFilter && (
+                            <span
+                              className="normal-case"
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
+                              draggable={false}
+                            >
+                              {col.headerFilter}
+                            </span>
+                          )}
                         </span>
                         {enableColumnResizing && (
                           <span
