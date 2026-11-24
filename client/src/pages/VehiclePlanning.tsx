@@ -1198,9 +1198,9 @@ export default function VehiclePlanning() {
     const planned = [...live].filter((x) => x.state === "planned").sort(byStart)[0] ?? null;
     return { live, out, planned };
   }
-  function latestTripOrderNumber(trip: Trip): string {
+  function latestTripOrderNumber(trip: Trip, members: TripMember[] = trip.members): string {
     let latest: TripMember | undefined;
-    for (const member of trip.members) {
+    for (const member of members) {
       if (!latest
         || member.startDay > latest.startDay
         || (member.startDay === latest.startDay && member.orderNumber.localeCompare(latest.orderNumber, undefined, { numeric: true }) > 0)) {
@@ -2496,7 +2496,7 @@ export default function VehiclePlanning() {
                     embedded
                     ask={{
                       vehicleNumber: extendAsk.vehicle.vehicleNumber,
-                      orders: sharedTripDisplayMembers(extendAsk.trip).map((member) => member.orderNumber),
+                      orders: [latestTripOrderNumber(extendAsk.trip, sharedTripDisplayMembers(extendAsk.trip))],
                       oldEnd: extendAsk.trip.lastBusyDay,
                       newEnd: extendAsk.newEnd,
                       extraDays: Math.max(1, differenceInCalendarDays(parse(extendAsk.newEnd, "yyyy-MM-dd", new Date()), parse(extendAsk.trip.lastBusyDay, "yyyy-MM-dd", new Date()))),
@@ -2613,7 +2613,7 @@ export default function VehiclePlanning() {
       <ExtendReasonDialog
         ask={extendAsk && extendAsk.vehicle.id !== statusTarget?.id ? {
           vehicleNumber: extendAsk.vehicle.vehicleNumber,
-          orders: sharedTripDisplayMembers(extendAsk.trip).map((member) => member.orderNumber),
+          orders: [latestTripOrderNumber(extendAsk.trip, sharedTripDisplayMembers(extendAsk.trip))],
           oldEnd: extendAsk.trip.lastBusyDay,
           newEnd: extendAsk.newEnd,
           extraDays: Math.max(1, differenceInCalendarDays(parse(extendAsk.newEnd, "yyyy-MM-dd", new Date()), parse(extendAsk.trip.lastBusyDay, "yyyy-MM-dd", new Date()))),
