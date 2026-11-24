@@ -216,6 +216,7 @@ export default function EditCsvDialog({ sessionId, onClose, basePath = "order-im
         await qc.invalidateQueries({ queryKey: ["/api/unloading/sessions"] });
       } else {
         await qc.invalidateQueries({ queryKey: ["/api/order-import/sessions"] });
+        await qc.invalidateQueries({ queryKey: ["/api/order-scan/sessions", sessionId] });
       }
       onClose();
     },

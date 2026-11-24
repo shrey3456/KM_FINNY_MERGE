@@ -1198,6 +1198,17 @@ export default function VehiclePlanning() {
     const planned = [...live].filter((x) => x.state === "planned").sort(byStart)[0] ?? null;
     return { live, out, planned };
   }
+  function latestTripOrderNumber(trip: Trip): string {
+    let latest: TripMember | undefined;
+    for (const member of trip.members) {
+      if (!latest
+        || member.startDay > latest.startDay
+        || (member.startDay === latest.startDay && member.orderNumber.localeCompare(latest.orderNumber, undefined, { numeric: true }) > 0)) {
+        latest = member;
+      }
+    }
+    return latest?.orderNumber ?? trip.orderNumber;
+  }
   function freeOptionsOf(trips: Trip[]): FreeOption[] {
     return trips.flatMap((x) => x.members.map((m) => ({
       orderNumber: m.orderNumber, partyName: m.partyName, startDay: x.startDay, lastBusyDay: x.lastBusyDay, notInSystem: m.notInSystem, locked: x.lockedReason ?? null,
@@ -2507,7 +2518,7 @@ export default function VehiclePlanning() {
                   const freeable = at.live.filter((x) => !x.lockedReason);
                   const allLocked = at.live.length > 0 && freeable.length === 0;
                   const dueNow = at.out?.state === "awaiting";
-                  const hint = at.out ? `Out on order #${at.out.members.map((m) => m.orderNumber).join(" + #")}` : at.planned ? `Order #${at.planned.orderNumber} starts on ${dayLabel(at.planned.startDay)}. Nothing is out yet.` : "No order on it right now.";
+                  const hint = at.out ? `Out on order #${latestTripOrderNumber(at.out)}` : at.planned ? `Order #${at.planned.orderNumber} starts on ${dayLabel(at.planned.startDay)}. Nothing is out yet.` : "No order on it right now.";
                   return (
                     <div className="space-y-2">
                       <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Actions</div>

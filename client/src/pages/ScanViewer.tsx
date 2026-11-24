@@ -535,7 +535,9 @@ export default function ScanViewer() {
   const itemsQuery = useQuery<OsScanItem[]>({
     queryKey: ["/api/order-scan/sessions", sessionId, "items", "scan-viewer"],
     queryFn: () => apiRequest("GET", `/api/order-scan/sessions/${sessionId}/items`).then((r) => r.json()),
-    enabled: sessionId != null,
+    enabled: sessionId != null && viewerTab === "scan",
+    refetchInterval: 8000,
+    refetchIntervalInBackground: false,
   });
   const extrasQuery = useQuery<ExtraRow[]>({
     queryKey: ["/api/order-scan/sessions", sessionId, "extras", "scan-viewer"],
